@@ -25,6 +25,7 @@ UNIDADES = {
 
 TEMPO_DAS_RESPOSTAS = 25
 
+
 EMOJI_INICIO = "<:axolote:1556443018557661234>"
 EMOJI_FINAL = "<a:emoji_481:1556442987691647068>"
 
@@ -33,7 +34,7 @@ def analisar_duracao(
     texto: str,
 ) -> Optional[int]:
     """
-    Converte formatos como:
+    Converte:
 
     30s = 30 segundos
     1m  = 1 minuto
@@ -82,7 +83,8 @@ def formatar_duracao(
             plural = "s" if quantidade != 1 else ""
 
             partes.append(
-                f"{quantidade} {nome}{plural}"
+                f"{quantidade} "
+                f"{nome}{plural}"
             )
 
     return ", ".join(partes)
@@ -90,9 +92,7 @@ def formatar_duracao(
 
 class Cartao(discord.ui.LayoutView):
     """
-    Cartão curto e fofo usando Components V2.
-
-    Não utiliza discord.Embed.
+    Container Components V2 sem discord.Embed.
     """
 
     def __init__(
@@ -105,7 +105,9 @@ class Cartao(discord.ui.LayoutView):
         )
 
         texto = (
-            f"{EMOJI_INICIO}  **{titulo}**  {EMOJI_FINAL}\n\n"
+            f"{EMOJI_INICIO}  "
+            f"**{titulo}**  "
+            f"{EMOJI_FINAL}\n\n"
             f"{descricao}"
         )
 
@@ -140,7 +142,7 @@ async def responder(
     view: Cartao,
 ) -> discord.Message:
     """
-    Envia o container e remove a resposta depois de 25 segundos.
+    Envia a resposta e remove depois de 25 segundos.
     """
 
     return await ctx.send(
@@ -156,8 +158,8 @@ class Moderacao(commands.Cog):
     O comando ,calado não utiliza o timeout nativo
     do Discord.
 
-    Enquanto o membro estiver calado, qualquer mensagem
-    nova enviada por ele será apagada automaticamente.
+    O bot apenas registra o membro e apaga as mensagens
+    dele enquanto o tempo estiver ativo.
     """
 
     def __init__(
@@ -166,14 +168,11 @@ class Moderacao(commands.Cog):
     ) -> None:
         self.bot = bot
 
-        # Formato:
-        #
         # {
         #     id_do_servidor: {
         #         id_do_membro: timestamp_de_expiracao
         #     }
         # }
-        #
         self.calados: dict[
             int,
             dict[int, float],
@@ -252,8 +251,8 @@ class Moderacao(commands.Cog):
             "categoria": "Moderação",
             "uso": ",calado @membro 1h",
             "descricao": (
-                "Apaga as mensagens de um membro durante "
-                "o período informado."
+                "Apaga as mensagens de um membro "
+                "durante o tempo informado."
             ),
         },
     )
@@ -336,8 +335,8 @@ class Moderacao(commands.Cog):
                 ctx,
                 cartao_erro(
                     (
-                        "Meu cargo precisa estar acima do cargo "
-                        "desse membro."
+                        "Meu cargo precisa estar acima "
+                        "do cargo desse membro."
                     )
                 ),
             )
@@ -358,8 +357,8 @@ class Moderacao(commands.Cog):
                 (
                     f"{membro.mention} ficará calado por "
                     f"**{formatar_duracao(segundos)}**.\n\n"
-                    "As mensagens dele serão apagadas durante "
-                    "esse período.\n\n"
+                    "As mensagens dele serão apagadas "
+                    "durante esse período.\n\n"
                     f"**Motivo:** {motivo}"
                 ),
             ),
@@ -375,7 +374,7 @@ class Moderacao(commands.Cog):
             "categoria": "Moderação",
             "uso": ",nchoraxx @membro",
             "descricao": (
-                "Remove o modo calado personalizado de um membro."
+                "Remove o modo calado de um membro."
             ),
         },
     )
@@ -489,9 +488,7 @@ class Moderacao(commands.Cog):
         extras={
             "categoria": "Moderação",
             "uso": ",rban ID",
-            "descricao": (
-                "Remove o banimento pelo ID do usuário."
-            ),
+            "descricao": "Remove o banimento usando o ID.",
         },
     )
     @commands.guild_only()
@@ -658,8 +655,8 @@ class Moderacao(commands.Cog):
                 ctx,
                 cartao_erro(
                     (
-                        "Meu cargo precisa estar acima do cargo "
-                        "desse membro."
+                        "Meu cargo precisa estar acima "
+                        "do cargo desse membro."
                     )
                 ),
             )
