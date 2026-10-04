@@ -13,6 +13,7 @@ DURACAO_RE = re.compile(
     re.IGNORECASE,
 )
 
+
 UNIDADES = {
     "s": 1,
     "m": 60,
@@ -21,15 +22,18 @@ UNIDADES = {
     "w": 60 * 60 * 24 * 7,
 }
 
-TEMPO_DAS_RESPOSTAS = 5
+
+# Tempo que os containers de resposta ficam visíveis.
+TEMPO_DAS_RESPOSTAS = 25
 
 
 class Cartao(discord.ui.LayoutView):
     """
-    Cartão feito com Components V2.
+    Cartão criado com Components V2.
 
-    Não utiliza Embed e não define accent_color,
-    portanto não possui a barra lateral colorida.
+    Não utiliza discord.Embed.
+    Não define accent_color, então não possui
+    a barra lateral colorida dos embeds tradicionais.
     """
 
     def __init__(
@@ -53,18 +57,51 @@ class Cartao(discord.ui.LayoutView):
         )
 
 
+def cartao_sucesso(
+    titulo: str,
+    descricao: str,
+) -> Cartao:
+    return Cartao(
+        titulo,
+        descricao,
+    )
+
+
+def cartao_erro(
+    descricao: str,
+) -> Cartao:
+    return Cartao(
+        "Ação não realizada",
+        descricao,
+    )
+
+
+async def responder(
+    ctx: commands.Context,
+    view: Cartao,
+) -> discord.Message:
+    """
+    Envia o container e remove a resposta depois de 25 segundos.
+    """
+
+    return await ctx.send(
+        view=view,
+        delete_after=TEMPO_DAS_RESPOSTAS,
+    )
+
+
 def analisar_duracao(
     texto: str,
 ) -> Optional[int]:
     """
-    Converte os formatos abaixo para segundos:
+    Converte formatos como:
 
-    30s
-    1m
-    1h
-    2h
-    28d
-    1w
+    30s = 30 segundos
+    1m  = 1 minuto
+    1h  = 1 hora
+    2h  = 2 horas
+    28d = 28 dias
+    1w  = 1 semana
     """
 
     correspondencia = DURACAO_RE.fullmatch(
@@ -115,34 +152,15 @@ def formatar_duracao(
     return ", ".join(partes)
 
 
-async def responder(
-    ctx: commands.Context,
-    titulo: str,
-    descricao: str,
-) -> discord.Message:
-    """
-    Envia uma resposta usando Components V2.
-
-    A mensagem desaparece automaticamente após 5 segundos.
-    """
-
-    return await ctx.send(
-        view=Cartao(
-            titulo,
-            descricao,
-        ),
-        delete_after=TEMPO_DAS_RESPOSTAS,
-    )
-
-
 class Moderacao(commands.Cog):
     """
     Comandos de moderação do servidor.
 
-    O comando ,calado não utiliza timeout nativo do Discord.
+    O comando ,calado não utiliza o timeout nativo
+    do Discord.
 
-    Enquanto o membro estiver calado, qualquer mensagem nova
-    enviada por ele será apagada automaticamente pelo bot.
+    Enquanto o membro estiver calado, qualquer mensagem
+    nova enviada por ele será apagada automaticamente.
     """
 
     def __init__(
@@ -151,7 +169,7 @@ class Moderacao(commands.Cog):
     ) -> None:
         self.bot = bot
 
-        # Formato:
+        # Estrutura:
         #
         # {
         #     id_do_servidor: {
@@ -168,6 +186,10 @@ class Moderacao(commands.Cog):
         self,
         ctx: commands.Context,
     ) -> bool:
+        """
+        Permite o uso dos comandos somente dentro de servidores.
+        """
+
         if ctx.guild is None:
             raise commands.NoPrivateMessage()
 
@@ -204,7 +226,9 @@ class Moderacao(commands.Cog):
         if expiracao is None:
             return
 
-        if time.time() >= expiracao:
+        agora = time.time()
+
+        if agora >= expiracao:
             calados_do_servidor.pop(
                 membro_id,
                 None,
@@ -257,6 +281,11 @@ class Moderacao(commands.Cog):
         *,
         motivo: str = "Nenhum motivo informado",
     ) -> None:
+        """
+        Deixa um membro calado sem utilizar
+        o timeout nativo do Discord.
+        """
+
         segundos = analisar_duracao(
             tempo
         )
@@ -268,10 +297,11 @@ class Moderacao(commands.Cog):
         ):
             await responder(
                 ctx,
-                "Tempo inválido",
-                (
-                    "Informe um tempo válido entre `1s` e `28d`.\n\n"
-                    "Exemplos: `1m`, `1h`, `2h` ou `28d`."
+                cartao_erro(
+                    (
+                        "Informe um tempo válido entre `1s` e `28d`.\n"
+                        "Exemplos: `1m`, `1h`, `2h` ou `28d`."
+                    )
                 ),
             )
 
@@ -280,8 +310,9 @@ class Moderacao(commands.Cog):
         if membro == ctx.author:
             await responder(
                 ctx,
-                "Ação não realizada",
-                "Você não pode deixar a si mesmo calado.",
+                cartao_erro(
+                    "Você não pode deixar a si mesmo calado."
+                ),
             )
 
             return
@@ -289,8 +320,9 @@ class Moderacao(commands.Cog):
         if membro == ctx.guild.owner:
             await responder(
                 ctx,
-                "Ação não realizada",
-                "O dono do servidor não pode ser deixado calado.",
+                cartao_erro(
+                    "O dono do servidor não pode ser deixado calado."
+                ),
             )
 
             return
@@ -300,10 +332,11 @@ class Moderacao(commands.Cog):
         if membro.top_role >= ctx.author.top_role:
             await responder(
                 ctx,
-                "Ação não realizada",
-                (
-                    "Esse membro possui um cargo igual ou superior "
-                    "ao seu cargo mais alto."
+                cartao_erro(
+                    (
+                        "Esse membro possui um cargo igual ou "
+                        "superior ao seu cargo mais alto."
+                    )
                 ),
             )
 
@@ -315,10 +348,11 @@ class Moderacao(commands.Cog):
         ):
             await responder(
                 ctx,
-                "Ação não realizada",
-                (
-                    "Meu cargo precisa estar acima do cargo "
-                    "desse membro."
+                cartao_erro(
+                    (
+                        "Meu cargo precisa estar acima do cargo "
+                        "desse membro."
+                    )
                 ),
             )
 
@@ -333,13 +367,16 @@ class Moderacao(commands.Cog):
 
         await responder(
             ctx,
-            "Membro calado",
-            (
-                f"{membro.mention} ficará calado por "
-                f"**{formatar_duracao(segundos)}**.\n\n"
-                "Durante esse período, todas as mensagens novas "
-                "enviadas por ele serão apagadas automaticamente.\n\n"
-                f"**Motivo:** {motivo}"
+            cartao_sucesso(
+                "Membro calado",
+                (
+                    f"{membro.mention} ficará calado por "
+                    f"**{formatar_duracao(segundos)}**.\n\n"
+                    "Durante esse período, todas as mensagens "
+                    "novas enviadas por ele serão apagadas "
+                    "automaticamente.\n\n"
+                    f"**Motivo:** {motivo}"
+                ),
             ),
         )
 
@@ -369,6 +406,10 @@ class Moderacao(commands.Cog):
         ctx: commands.Context,
         membro: discord.Member,
     ) -> None:
+        """
+        Remove o modo calado de um membro.
+        """
+
         calados_do_servidor = self.calados.get(
             ctx.guild.id,
             {},
@@ -377,8 +418,9 @@ class Moderacao(commands.Cog):
         if membro.id not in calados_do_servidor:
             await responder(
                 ctx,
-                "Ação não realizada",
-                f"{membro.mention} não está calado pelo bot.",
+                cartao_erro(
+                    f"{membro.mention} não está calado pelo bot."
+                ),
             )
 
             return
@@ -396,10 +438,12 @@ class Moderacao(commands.Cog):
 
         await responder(
             ctx,
-            "Modo calado removido",
-            (
-                f"{membro.mention} já pode enviar mensagens "
-                "normalmente."
+            cartao_sucesso(
+                "Modo calado removido",
+                (
+                    f"{membro.mention} já pode enviar "
+                    "mensagens normalmente."
+                ),
             ),
         )
 
@@ -408,7 +452,10 @@ class Moderacao(commands.Cog):
         extras={
             "categoria": "Moderação",
             "uso": ",banir @membro [motivo]",
-            "descricao": "Bane um membro do servidor.",
+            "descricao": (
+                "Bane um membro e remove as mensagens "
+                "recentes dele."
+            ),
         },
     )
     @commands.guild_only()
@@ -425,7 +472,7 @@ class Moderacao(commands.Cog):
         *,
         motivo: str = "Nenhum motivo informado",
     ) -> None:
-        if not await self.pode_punir(
+        if not await self._pode_punir(
             ctx,
             membro,
             "banir",
@@ -441,18 +488,21 @@ class Moderacao(commands.Cog):
         except discord.Forbidden:
             await responder(
                 ctx,
-                "Ação não realizada",
-                "Não tenho permissão para banir esse membro.",
+                cartao_erro(
+                    "Não tenho permissão para banir esse membro."
+                ),
             )
 
             return
 
         await responder(
             ctx,
-            "Banimento aplicado",
-            (
-                f"**{membro}** foi banido do servidor.\n"
-                f"**Motivo:** {motivo}"
+            cartao_sucesso(
+                "Banimento aplicado",
+                (
+                    f"**{membro}** foi banido do servidor.\n"
+                    f"**Motivo:** {motivo}"
+                ),
             ),
         )
 
@@ -496,10 +546,11 @@ class Moderacao(commands.Cog):
         except discord.NotFound:
             await responder(
                 ctx,
-                "Ação não realizada",
-                (
-                    "Não encontrei um banimento ativo "
-                    "para esse ID."
+                cartao_erro(
+                    (
+                        "Não encontrei um banimento ativo "
+                        "para esse ID."
+                    )
                 ),
             )
 
@@ -508,10 +559,11 @@ class Moderacao(commands.Cog):
         except discord.Forbidden:
             await responder(
                 ctx,
-                "Ação não realizada",
-                (
-                    "Não tenho permissão para remover "
-                    "banimentos."
+                cartao_erro(
+                    (
+                        "Não tenho permissão para remover "
+                        "banimentos."
+                    )
                 ),
             )
 
@@ -519,10 +571,12 @@ class Moderacao(commands.Cog):
 
         await responder(
             ctx,
-            "Banimento removido",
-            (
-                f"**{banimento.user}** pode entrar no "
-                "servidor novamente."
+            cartao_sucesso(
+                "Banimento removido",
+                (
+                    f"**{banimento.user}** pode entrar no "
+                    "servidor novamente."
+                ),
             ),
         )
 
@@ -551,7 +605,7 @@ class Moderacao(commands.Cog):
         *,
         motivo: str = "Nenhum motivo informado",
     ) -> None:
-        if not await self.pode_punir(
+        if not await self._pode_punir(
             ctx,
             membro,
             "expulsar",
@@ -566,10 +620,11 @@ class Moderacao(commands.Cog):
         except discord.Forbidden:
             await responder(
                 ctx,
-                "Ação não realizada",
-                (
-                    "Não tenho permissão para "
-                    "expulsar esse membro."
+                cartao_erro(
+                    (
+                        "Não tenho permissão para "
+                        "expulsar esse membro."
+                    )
                 ),
             )
 
@@ -577,24 +632,31 @@ class Moderacao(commands.Cog):
 
         await responder(
             ctx,
-            "Membro expulso",
-            (
-                f"**{membro}** foi removido do servidor.\n"
-                f"**Motivo:** {motivo}"
+            cartao_sucesso(
+                "Membro expulso",
+                (
+                    f"**{membro}** foi removido do servidor.\n"
+                    f"**Motivo:** {motivo}"
+                ),
             ),
         )
 
-    async def pode_punir(
+    async def _pode_punir(
         self,
         ctx: commands.Context,
         membro: discord.Member,
         acao: str,
     ) -> bool:
+        """
+        Verifica se o autor e o bot podem punir o membro.
+        """
+
         if membro == ctx.guild.owner:
             await responder(
                 ctx,
-                "Ação não realizada",
-                f"O dono do servidor não pode ser {acao}.",
+                cartao_erro(
+                    f"O dono do servidor não pode ser {acao}."
+                ),
             )
 
             return False
@@ -602,10 +664,11 @@ class Moderacao(commands.Cog):
         if membro.top_role >= ctx.author.top_role:
             await responder(
                 ctx,
-                "Ação não realizada",
-                (
-                    "Esse membro possui um cargo igual ou "
-                    "superior ao seu cargo mais alto."
+                cartao_erro(
+                    (
+                        "Esse membro possui um cargo igual "
+                        "ou superior ao seu cargo mais alto."
+                    )
                 ),
             )
 
@@ -619,10 +682,11 @@ class Moderacao(commands.Cog):
         ):
             await responder(
                 ctx,
-                "Ação não realizada",
-                (
-                    "Meu cargo precisa estar acima do cargo "
-                    "desse membro."
+                cartao_erro(
+                    (
+                        "Meu cargo precisa estar acima do cargo "
+                        "desse membro."
+                    )
                 ),
             )
 
@@ -666,10 +730,12 @@ class Moderacao(commands.Cog):
 
         await responder(
             ctx,
-            "Canal trancado",
-            (
-                "Membros comuns não poderão enviar mensagens "
-                "até que o canal seja destrancado."
+            cartao_sucesso(
+                "Canal trancado",
+                (
+                    "Membros comuns não poderão enviar "
+                    "mensagens até ele ser destrancado."
+                ),
             ),
         )
 
@@ -709,8 +775,10 @@ class Moderacao(commands.Cog):
 
         await responder(
             ctx,
-            "Canal destrancado",
-            "O envio de mensagens foi liberado novamente.",
+            cartao_sucesso(
+                "Canal destrancado",
+                "O envio de mensagens foi liberado novamente.",
+            ),
         )
 
     @commands.command(
@@ -740,8 +808,9 @@ class Moderacao(commands.Cog):
         if quantidade < 1 or quantidade > 100:
             await responder(
                 ctx,
-                "Ação não realizada",
-                "Escolha uma quantidade entre 1 e 100.",
+                cartao_erro(
+                    "Escolha uma quantidade entre 1 e 100."
+                ),
             )
 
             return
@@ -752,10 +821,12 @@ class Moderacao(commands.Cog):
 
         await responder(
             ctx,
-            "Limpeza concluída",
-            (
-                f"{max(len(apagadas) - 1, 0)} mensagens "
-                "foram removidas deste canal."
+            cartao_sucesso(
+                "Limpeza concluída",
+                (
+                    f"{max(len(apagadas) - 1, 0)} mensagens "
+                    "foram removidas deste canal."
+                ),
             ),
         )
 
@@ -782,10 +853,12 @@ class Moderacao(commands.Cog):
     ) -> None:
         await responder(
             ctx,
-            "Advertência registrada",
-            (
-                f"{membro.mention} recebeu uma advertência.\n"
-                f"**Motivo:** {motivo}"
+            cartao_sucesso(
+                "Advertência registrada",
+                (
+                    f"{membro.mention} recebeu uma advertência.\n"
+                    f"**Motivo:** {motivo}"
+                ),
             ),
         )
 
