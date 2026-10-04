@@ -830,39 +830,6 @@ class Moderacao(commands.Cog):
             ),
         )
 
-    @commands.command(
-        name="aviso",
-        extras={
-            "categoria": "Moderação",
-            "uso": ",aviso @membro motivo",
-            "descricao": (
-                "Registra uma advertência pública e organizada."
-            ),
-        },
-    )
-    @commands.guild_only()
-    @commands.has_permissions(
-        manage_messages=True
-    )
-    async def aviso(
-        self,
-        ctx: commands.Context,
-        membro: discord.Member,
-        *,
-        motivo: str,
-    ) -> None:
-        await responder(
-            ctx,
-            cartao_sucesso(
-                "Advertência registrada",
-                (
-                    f"{membro.mention} recebeu uma advertência.\n"
-                    f"**Motivo:** {motivo}"
-                ),
-            ),
-        )
-
-
 async def setup(
     bot: commands.Bot,
 ) -> None:
