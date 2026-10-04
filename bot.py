@@ -196,7 +196,7 @@ async def comandos(
         )
 
     blocos.append(
-        "-# As mensagens de moderação desaparecem automaticamente após 5 segundos."
+        "-# As mensagens de moderação desaparecem automaticamente após 25 segundos."
     )
 
     await ctx.send(
