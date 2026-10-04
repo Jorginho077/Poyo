@@ -88,7 +88,8 @@ def formatar_duracao(
 
 class Cartao(discord.ui.LayoutView):
     """
-    Container Components V2 com banner acima e abaixo.
+    Container V2 com o banner dentro:
+    banner, texto e banner novamente.
     """
 
     def __init__(
@@ -100,26 +101,30 @@ class Cartao(discord.ui.LayoutView):
             timeout=None
         )
 
-        banner_cima = discord.ui.MediaGallery(
-            discord.MediaGalleryItem(BANNER_URL)
-        )
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.MediaGallery(
+                    discord.MediaGalleryItem(
+                        BANNER_URL
+                    )
+                ),
 
-        texto = discord.ui.Container(
-            discord.ui.TextDisplay(
-                f"{EMOJI_INICIO}  "
-                f"**{titulo}**  "
-                f"{EMOJI_FINAL}\n\n"
-                f"{descricao}"
+                discord.ui.TextDisplay(
+                    (
+                        f"{EMOJI_INICIO}  "
+                        f"**{titulo}**  "
+                        f"{EMOJI_FINAL}\n\n"
+                        f"{descricao}"
+                    )
+                ),
+
+                discord.ui.MediaGallery(
+                    discord.MediaGalleryItem(
+                        BANNER_URL
+                    )
+                ),
             )
         )
-
-        banner_baixo = discord.ui.MediaGallery(
-            discord.MediaGalleryItem(BANNER_URL)
-        )
-
-        self.add_item(banner_cima)
-        self.add_item(texto)
-        self.add_item(banner_baixo)
 
 
 def cartao_sucesso(
@@ -155,9 +160,9 @@ class Moderacao(commands.Cog):
     """
     Comandos de moderação.
 
-    ,calado não usa timeout nativo.
+    O comando ,calado não usa timeout nativo.
     As mensagens do membro são apagadas
-    até o tempo terminar.
+    enquanto o tempo estiver ativo.
     """
 
     def __init__(
