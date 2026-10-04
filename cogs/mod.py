@@ -24,42 +24,47 @@ UNIDADES = {
 TEMPO_DAS_RESPOSTAS = 5
 
 
-def embed_sucesso(
-    titulo: str,
-    descricao: str,
-) -> discord.Embed:
+class Cartao(discord.ui.LayoutView):
     """
-    Embed sem cor definida.
-    Isso remove a faixa lateral colorida personalizada.
+    Cartão feito com Components V2.
+
+    Não utiliza Embed e não define accent_color,
+    portanto não possui a barra lateral colorida.
     """
 
-    return discord.Embed(
-        title=titulo,
-        description=descricao,
-    )
+    def __init__(
+        self,
+        titulo: str,
+        descricao: str,
+    ) -> None:
+        super().__init__(
+            timeout=None
+        )
 
+        texto = (
+            f"## {titulo}\n\n"
+            f"{descricao}"
+        )
 
-def embed_erro(
-    descricao: str,
-) -> discord.Embed:
-    return discord.Embed(
-        title="Ação não realizada",
-        description=descricao,
-    )
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay(texto)
+            )
+        )
 
 
 def analisar_duracao(
     texto: str,
 ) -> Optional[int]:
     """
-    Converte formatos como:
+    Converte os formatos abaixo para segundos:
 
-    30s = 30 segundos
-    1m  = 1 minuto
-    1h  = 1 hora
-    2h  = 2 horas
-    28d = 28 dias
-    1w  = 1 semana
+    30s
+    1m
+    1h
+    2h
+    28d
+    1w
     """
 
     correspondencia = DURACAO_RE.fullmatch(
@@ -85,13 +90,15 @@ def formatar_duracao(
 ) -> str:
     partes = []
 
-    for nome, divisor in (
+    unidades = (
         ("semana", 604800),
         ("dia", 86400),
         ("hora", 3600),
         ("minuto", 60),
         ("segundo", 1),
-    ):
+    )
+
+    for nome, divisor in unidades:
         quantidade, segundos = divmod(
             segundos,
             divisor,
@@ -101,7 +108,8 @@ def formatar_duracao(
             plural = "s" if quantidade != 1 else ""
 
             partes.append(
-                f"{quantidade} {nome}{plural}"
+                f"{quantidade} "
+                f"{nome}{plural}"
             )
 
     return ", ".join(partes)
@@ -109,14 +117,20 @@ def formatar_duracao(
 
 async def responder(
     ctx: commands.Context,
-    embed: discord.Embed,
+    titulo: str,
+    descricao: str,
 ) -> discord.Message:
     """
-    Todas as respostas da moderação desaparecem após 5 segundos.
+    Envia uma resposta usando Components V2.
+
+    A mensagem desaparece automaticamente após 5 segundos.
     """
 
     return await ctx.send(
-        embed=embed,
+        view=Cartao(
+            titulo,
+            descricao,
+        ),
         delete_after=TEMPO_DAS_RESPOSTAS,
     )
 
@@ -125,12 +139,10 @@ class Moderacao(commands.Cog):
     """
     Comandos de moderação do servidor.
 
-    O comando ,calado não utiliza o timeout nativo
-    do Discord.
+    O comando ,calado não utiliza timeout nativo do Discord.
 
-    O membro continua podendo enviar mensagens,
-    mas o bot apaga automaticamente tudo que ele
-    enviar durante o período determinado.
+    Enquanto o membro estiver calado, qualquer mensagem nova
+    enviada por ele será apagada automaticamente pelo bot.
     """
 
     def __init__(
@@ -139,7 +151,7 @@ class Moderacao(commands.Cog):
     ) -> None:
         self.bot = bot
 
-        # Estrutura:
+        # Formato:
         #
         # {
         #     id_do_servidor: {
@@ -147,16 +159,15 @@ class Moderacao(commands.Cog):
         #     }
         # }
         #
-        self.calados: dict[int, dict[int, float]] = {}
+        self.calados: dict[
+            int,
+            dict[int, float],
+        ] = {}
 
     async def cog_check(
         self,
         ctx: commands.Context,
     ) -> bool:
-        """
-        Impede o uso dos comandos em mensagens privadas.
-        """
-
         if ctx.guild is None:
             raise commands.NoPrivateMessage()
 
@@ -193,9 +204,7 @@ class Moderacao(commands.Cog):
         if expiracao is None:
             return
 
-        agora = time.time()
-
-        if agora >= expiracao:
+        if time.time() >= expiracao:
             calados_do_servidor.pop(
                 membro_id,
                 None,
@@ -229,16 +238,16 @@ class Moderacao(commands.Cog):
             "uso": ",calado @membro 1h",
             "descricao": (
                 "Apaga as mensagens de um membro durante "
-                "o período informado, sem usar o timeout nativo."
+                "o período informado, sem usar timeout nativo."
             ),
         },
     )
     @commands.guild_only()
     @commands.has_permissions(
-        manage_messages=True,
+        manage_messages=True
     )
     @commands.bot_has_permissions(
-        manage_messages=True,
+        manage_messages=True
     )
     async def calado(
         self,
@@ -248,10 +257,6 @@ class Moderacao(commands.Cog):
         *,
         motivo: str = "Nenhum motivo informado",
     ) -> None:
-        """
-        Deixa um membro calado sem utilizar timeout nativo.
-        """
-
         segundos = analisar_duracao(
             tempo
         )
@@ -263,10 +268,10 @@ class Moderacao(commands.Cog):
         ):
             await responder(
                 ctx,
-                embed_erro(
-                    "O tempo informado é inválido.\n\n"
-                    "Use um dos formatos abaixo:\n"
-                    "`30s`, `1m`, `1h`, `2h` ou `28d`."
+                "Tempo inválido",
+                (
+                    "Informe um tempo válido entre `1s` e `28d`.\n\n"
+                    "Exemplos: `1m`, `1h`, `2h` ou `28d`."
                 ),
             )
 
@@ -275,9 +280,8 @@ class Moderacao(commands.Cog):
         if membro == ctx.author:
             await responder(
                 ctx,
-                embed_erro(
-                    "Você não pode deixar a si mesmo calado."
-                ),
+                "Ação não realizada",
+                "Você não pode deixar a si mesmo calado.",
             )
 
             return
@@ -285,9 +289,8 @@ class Moderacao(commands.Cog):
         if membro == ctx.guild.owner:
             await responder(
                 ctx,
-                embed_erro(
-                    "O dono do servidor não pode ser deixado calado."
-                ),
+                "Ação não realizada",
+                "O dono do servidor não pode ser deixado calado.",
             )
 
             return
@@ -297,7 +300,8 @@ class Moderacao(commands.Cog):
         if membro.top_role >= ctx.author.top_role:
             await responder(
                 ctx,
-                embed_erro(
+                "Ação não realizada",
+                (
                     "Esse membro possui um cargo igual ou superior "
                     "ao seu cargo mais alto."
                 ),
@@ -311,7 +315,8 @@ class Moderacao(commands.Cog):
         ):
             await responder(
                 ctx,
-                embed_erro(
+                "Ação não realizada",
+                (
                     "Meu cargo precisa estar acima do cargo "
                     "desse membro."
                 ),
@@ -321,30 +326,29 @@ class Moderacao(commands.Cog):
 
         expiracao = time.time() + segundos
 
-        if ctx.guild.id not in self.calados:
-            self.calados[ctx.guild.id] = {}
-
-        # Se já estiver calado, atualiza o tempo.
-        self.calados[ctx.guild.id][membro.id] = expiracao
+        self.calados.setdefault(
+            ctx.guild.id,
+            {},
+        )[membro.id] = expiracao
 
         await responder(
             ctx,
-            embed_sucesso(
-                "Membro calado",
-                (
-                    f"{membro.mention} ficará calado por "
-                    f"**{formatar_duracao(segundos)}**.\n\n"
-                    "Durante esse período, todas as mensagens "
-                    "novas enviadas por ele serão apagadas "
-                    "automaticamente.\n\n"
-                    f"**Motivo:** {motivo}"
-                ),
+            "Membro calado",
+            (
+                f"{membro.mention} ficará calado por "
+                f"**{formatar_duracao(segundos)}**.\n\n"
+                "Durante esse período, todas as mensagens novas "
+                "enviadas por ele serão apagadas automaticamente.\n\n"
+                f"**Motivo:** {motivo}"
             ),
         )
 
     @commands.command(
         name="nchoraxx",
-        aliases=("rcalado", "rsilenciar"),
+        aliases=(
+            "rcalado",
+            "rsilenciar",
+        ),
         extras={
             "categoria": "Moderação",
             "uso": ",nchoraxx @membro",
@@ -355,20 +359,16 @@ class Moderacao(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(
-        manage_messages=True,
+        manage_messages=True
     )
     @commands.bot_has_permissions(
-        manage_messages=True,
+        manage_messages=True
     )
     async def nchoraxx(
         self,
         ctx: commands.Context,
         membro: discord.Member,
     ) -> None:
-        """
-        Remove o membro da lista de calados.
-        """
-
         calados_do_servidor = self.calados.get(
             ctx.guild.id,
             {},
@@ -377,9 +377,8 @@ class Moderacao(commands.Cog):
         if membro.id not in calados_do_servidor:
             await responder(
                 ctx,
-                embed_erro(
-                    f"{membro.mention} não está calado pelo bot."
-                ),
+                "Ação não realizada",
+                f"{membro.mention} não está calado pelo bot.",
             )
 
             return
@@ -397,12 +396,10 @@ class Moderacao(commands.Cog):
 
         await responder(
             ctx,
-            embed_sucesso(
-                "Modo calado removido",
-                (
-                    f"{membro.mention} já pode enviar mensagens "
-                    "normalmente."
-                ),
+            "Modo calado removido",
+            (
+                f"{membro.mention} já pode enviar mensagens "
+                "normalmente."
             ),
         )
 
@@ -411,17 +408,15 @@ class Moderacao(commands.Cog):
         extras={
             "categoria": "Moderação",
             "uso": ",banir @membro [motivo]",
-            "descricao": (
-                "Bane um membro e remove as mensagens recentes dele."
-            ),
+            "descricao": "Bane um membro do servidor.",
         },
     )
     @commands.guild_only()
     @commands.has_permissions(
-        ban_members=True,
+        ban_members=True
     )
     @commands.bot_has_permissions(
-        ban_members=True,
+        ban_members=True
     )
     async def banir(
         self,
@@ -430,7 +425,7 @@ class Moderacao(commands.Cog):
         *,
         motivo: str = "Nenhum motivo informado",
     ) -> None:
-        if not await self._pode_punir(
+        if not await self.pode_punir(
             ctx,
             membro,
             "banir",
@@ -446,21 +441,18 @@ class Moderacao(commands.Cog):
         except discord.Forbidden:
             await responder(
                 ctx,
-                embed_erro(
-                    "Não tenho permissão para banir esse membro."
-                ),
+                "Ação não realizada",
+                "Não tenho permissão para banir esse membro.",
             )
 
             return
 
         await responder(
             ctx,
-            embed_sucesso(
-                "Banimento aplicado",
-                (
-                    f"**{membro}** foi banido do servidor.\n"
-                    f"**Motivo:** {motivo}"
-                ),
+            "Banimento aplicado",
+            (
+                f"**{membro}** foi banido do servidor.\n"
+                f"**Motivo:** {motivo}"
             ),
         )
 
@@ -476,10 +468,10 @@ class Moderacao(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(
-        ban_members=True,
+        ban_members=True
     )
     @commands.bot_has_permissions(
-        ban_members=True,
+        ban_members=True
     )
     async def rban(
         self,
@@ -488,19 +480,26 @@ class Moderacao(commands.Cog):
     ) -> None:
         try:
             banimento = await ctx.guild.fetch_ban(
-                discord.Object(id=usuario_id)
+                discord.Object(
+                    id=usuario_id
+                )
             )
 
             await ctx.guild.unban(
                 banimento.user,
-                reason=f"Banimento removido por {ctx.author}",
+                reason=(
+                    f"Banimento removido por "
+                    f"{ctx.author}"
+                ),
             )
 
         except discord.NotFound:
             await responder(
                 ctx,
-                embed_erro(
-                    "Não encontrei um banimento ativo para esse ID."
+                "Ação não realizada",
+                (
+                    "Não encontrei um banimento ativo "
+                    "para esse ID."
                 ),
             )
 
@@ -509,8 +508,10 @@ class Moderacao(commands.Cog):
         except discord.Forbidden:
             await responder(
                 ctx,
-                embed_erro(
-                    "Não tenho permissão para remover banimentos."
+                "Ação não realizada",
+                (
+                    "Não tenho permissão para remover "
+                    "banimentos."
                 ),
             )
 
@@ -518,12 +519,10 @@ class Moderacao(commands.Cog):
 
         await responder(
             ctx,
-            embed_sucesso(
-                "Banimento removido",
-                (
-                    f"**{banimento.user}** pode entrar no "
-                    "servidor novamente."
-                ),
+            "Banimento removido",
+            (
+                f"**{banimento.user}** pode entrar no "
+                "servidor novamente."
             ),
         )
 
@@ -540,10 +539,10 @@ class Moderacao(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(
-        kick_members=True,
+        kick_members=True
     )
     @commands.bot_has_permissions(
-        kick_members=True,
+        kick_members=True
     )
     async def expulsar(
         self,
@@ -552,7 +551,7 @@ class Moderacao(commands.Cog):
         *,
         motivo: str = "Nenhum motivo informado",
     ) -> None:
-        if not await self._pode_punir(
+        if not await self.pode_punir(
             ctx,
             membro,
             "expulsar",
@@ -561,14 +560,16 @@ class Moderacao(commands.Cog):
 
         try:
             await membro.kick(
-                reason=f"{ctx.author} — {motivo}",
+                reason=f"{ctx.author} — {motivo}"
             )
 
         except discord.Forbidden:
             await responder(
                 ctx,
-                embed_erro(
-                    "Não tenho permissão para expulsar esse membro."
+                "Ação não realizada",
+                (
+                    "Não tenho permissão para "
+                    "expulsar esse membro."
                 ),
             )
 
@@ -576,31 +577,24 @@ class Moderacao(commands.Cog):
 
         await responder(
             ctx,
-            embed_sucesso(
-                "Membro expulso",
-                (
-                    f"**{membro}** foi removido do servidor.\n"
-                    f"**Motivo:** {motivo}"
-                ),
+            "Membro expulso",
+            (
+                f"**{membro}** foi removido do servidor.\n"
+                f"**Motivo:** {motivo}"
             ),
         )
 
-    async def _pode_punir(
+    async def pode_punir(
         self,
         ctx: commands.Context,
         membro: discord.Member,
         acao: str,
     ) -> bool:
-        """
-        Confere a hierarquia antes de banir ou expulsar.
-        """
-
         if membro == ctx.guild.owner:
             await responder(
                 ctx,
-                embed_erro(
-                    f"O dono do servidor não pode ser {acao}."
-                ),
+                "Ação não realizada",
+                f"O dono do servidor não pode ser {acao}.",
             )
 
             return False
@@ -608,9 +602,10 @@ class Moderacao(commands.Cog):
         if membro.top_role >= ctx.author.top_role:
             await responder(
                 ctx,
-                embed_erro(
-                    "Esse membro possui um cargo igual ou superior "
-                    "ao seu cargo mais alto."
+                "Ação não realizada",
+                (
+                    "Esse membro possui um cargo igual ou "
+                    "superior ao seu cargo mais alto."
                 ),
             )
 
@@ -624,7 +619,8 @@ class Moderacao(commands.Cog):
         ):
             await responder(
                 ctx,
-                embed_erro(
+                "Ação não realizada",
+                (
                     "Meu cargo precisa estar acima do cargo "
                     "desse membro."
                 ),
@@ -647,10 +643,10 @@ class Moderacao(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(
-        manage_channels=True,
+        manage_channels=True
     )
     @commands.bot_has_permissions(
-        manage_channels=True,
+        manage_channels=True
     )
     async def trancar(
         self,
@@ -670,12 +666,10 @@ class Moderacao(commands.Cog):
 
         await responder(
             ctx,
-            embed_sucesso(
-                "Canal trancado",
-                (
-                    "Membros comuns não poderão enviar mensagens "
-                    "até que o canal seja destrancado."
-                ),
+            "Canal trancado",
+            (
+                "Membros comuns não poderão enviar mensagens "
+                "até que o canal seja destrancado."
             ),
         )
 
@@ -692,10 +686,10 @@ class Moderacao(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(
-        manage_channels=True,
+        manage_channels=True
     )
     @commands.bot_has_permissions(
-        manage_channels=True,
+        manage_channels=True
     )
     async def destrancar(
         self,
@@ -715,10 +709,8 @@ class Moderacao(commands.Cog):
 
         await responder(
             ctx,
-            embed_sucesso(
-                "Canal destrancado",
-                "O envio de mensagens foi liberado novamente.",
-            ),
+            "Canal destrancado",
+            "O envio de mensagens foi liberado novamente.",
         )
 
     @commands.command(
@@ -728,13 +720,13 @@ class Moderacao(commands.Cog):
             "categoria": "Moderação",
             "uso": ",limpar 20",
             "descricao": (
-                "Apaga de 1 a 100 mensagens recentes do canal."
+                "Apaga de 1 a 100 mensagens recentes."
             ),
         },
     )
     @commands.guild_only()
     @commands.has_permissions(
-        manage_messages=True,
+        manage_messages=True
     )
     @commands.bot_has_permissions(
         manage_messages=True,
@@ -748,9 +740,8 @@ class Moderacao(commands.Cog):
         if quantidade < 1 or quantidade > 100:
             await responder(
                 ctx,
-                embed_erro(
-                    "Escolha uma quantidade entre 1 e 100."
-                ),
+                "Ação não realizada",
+                "Escolha uma quantidade entre 1 e 100.",
             )
 
             return
@@ -761,12 +752,10 @@ class Moderacao(commands.Cog):
 
         await responder(
             ctx,
-            embed_sucesso(
-                "Limpeza concluída",
-                (
-                    f"{max(len(apagadas) - 1, 0)} mensagens "
-                    "foram removidas deste canal."
-                ),
+            "Limpeza concluída",
+            (
+                f"{max(len(apagadas) - 1, 0)} mensagens "
+                "foram removidas deste canal."
             ),
         )
 
@@ -782,7 +771,7 @@ class Moderacao(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(
-        manage_messages=True,
+        manage_messages=True
     )
     async def aviso(
         self,
@@ -793,12 +782,10 @@ class Moderacao(commands.Cog):
     ) -> None:
         await responder(
             ctx,
-            embed_sucesso(
-                "Advertência registrada",
-                (
-                    f"{membro.mention} recebeu uma advertência.\n"
-                    f"**Motivo:** {motivo}"
-                ),
+            "Advertência registrada",
+            (
+                f"{membro.mention} recebeu uma advertência.\n"
+                f"**Motivo:** {motivo}"
             ),
         )
 
