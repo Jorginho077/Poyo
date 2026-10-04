@@ -8,76 +8,137 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-PREFIX = ","
+PREFIXO = ","
 
 
-class ModerationBot(commands.Bot):
-    def __init__(self):
-        intents = discord.Intents.default()
+class Cartao(discord.ui.LayoutView):
+    """
+    Cartão criado com Components V2.
 
-        # Necessário para detectar membros e mensagens.
-        intents.members = True
-        intents.message_content = True
+    Não utiliza discord.Embed e não define accent_color,
+    portanto não possui a barra lateral colorida dos embeds.
+    """
 
+    def __init__(
+        self,
+        *blocos: str,
+    ) -> None:
         super().__init__(
-            command_prefix=PREFIX,
-            intents=intents,
-            case_insensitive=True,
-            help_command=None,
-            strip_after_prefix=True,
+            timeout=None
         )
 
-    async def setup_hook(self):
-        await self.load_extension("cogs.mod")
+        self.add_item(
+            discord.ui.Container(
+                *(
+                    discord.ui.TextDisplay(bloco)
+                    for bloco in blocos
+                )
+            )
+        )
 
-    async def on_ready(self):
-        atividade = discord.Game(name=f"{PREFIX}comandos | moderação")
+
+class BotModeracao(commands.Bot):
+    def __init__(self) -> None:
+        intents = discord.Intents.default()
+
+        # Necessário para o bot receber mensagens.
+        intents.message_content = True
+
+        # Necessário para trabalhar com membros.
+        intents.members = True
+
+        super().__init__(
+            command_prefix=PREFIXO,
+            intents=intents,
+            case_insensitive=True,
+            strip_after_prefix=True,
+            help_command=None,
+        )
+
+    async def setup_hook(self) -> None:
+        """
+        Carrega automaticamente a cog:
+
+        cogs/mod.py
+        """
+
+        await self.load_extension(
+            "cogs.mod"
+        )
+
+    async def on_ready(self) -> None:
+        """
+        Executado quando o bot termina de conectar.
+        """
 
         await self.change_presence(
             status=discord.Status.online,
-            activity=atividade,
+            activity=discord.Game(
+                name=f"{PREFIXO}comandos | moderação"
+            ),
         )
 
-        print(f"Conectado como {self.user} | ID: {self.user.id}")
-        print(f"Servidores conectados: {len(self.guilds)}")
-        print(f"Prefixo atual: {PREFIX}")
+        print("=" * 50)
+        print(f"Bot conectado como: {self.user}")
+        print(f"ID do bot: {self.user.id}")
+        print(f"Servidores: {len(self.guilds)}")
+        print(f"Prefixo: {PREFIXO}")
+        print("Components V2 ativado.")
+        print("Sistema iniciado com sucesso.")
+        print("=" * 50)
 
 
-bot = ModerationBot()
+bot = BotModeracao()
 
 
 @bot.command(
     name="comandos",
-    aliases=("ajuda", "help"),
+    aliases=(
+        "ajuda",
+        "help",
+    ),
     extras={
         "categoria": "Informações",
         "uso": ",comandos",
-        "descricao": "Mostra todos os comandos disponíveis e explica como usar cada um.",
+        "descricao": (
+            "Mostra todos os comandos disponíveis "
+            "e explica a função de cada um."
+        ),
     },
 )
-async def comandos(ctx: commands.Context):
+async def comandos(
+    ctx: commands.Context,
+) -> None:
     """
-    Mostra uma lista dinâmica de todos os comandos registrados no bot.
+    Mostra a central de comandos usando Components V2.
+
+    A lista é criada automaticamente a partir
+    dos comandos registrados nas cogs.
     """
 
-    embed = discord.Embed(
-        title="Central de comandos",
-        description=(
-            "Aqui está tudo o que eu consigo fazer neste servidor.\n"
-            "Use os comandos exatamente como aparecem abaixo."
-        ),
-    )
+    blocos = [
+        (
+            "## Central de comandos\n\n"
+            "Confira todos os comandos disponíveis "
+            "neste servidor.\n\n"
+            "A lista é atualizada automaticamente quando "
+            "novos comandos são adicionados."
+        )
+    ]
 
-    categorias = {}
+    categorias: dict[
+        str,
+        list[commands.Command],
+    ] = {}
 
-    for command in bot.commands:
-        if command.hidden:
+    for comando in bot.commands:
+        if comando.hidden:
             continue
 
-        if command.name == "comandos":
+        if comando.name == "comandos":
             continue
 
-        categoria = command.extras.get(
+        categoria = comando.extras.get(
             "categoria",
             "Outros",
         )
@@ -85,164 +146,178 @@ async def comandos(ctx: commands.Context):
         if categoria not in categorias:
             categorias[categoria] = []
 
-        categorias[categoria].append(command)
+        categorias[categoria].append(
+            comando
+        )
 
-    ordem_categorias = [
+    ordem_das_categorias = [
         "Moderação",
         "Utilidades",
         "Informações",
         "Outros",
     ]
 
-    categorias_ordenadas = sorted(
+    categorias_organizadas = sorted(
         categorias.items(),
         key=lambda item: (
-            ordem_categorias.index(item[0])
-            if item[0] in ordem_categorias
-            else len(ordem_categorias),
+            ordem_das_categorias.index(item[0])
+            if item[0] in ordem_das_categorias
+            else len(ordem_das_categorias),
             item[0],
         ),
     )
 
-    for categoria, lista_comandos in categorias_ordenadas:
-        linhas = []
+    for categoria, lista_de_comandos in categorias_organizadas:
+        linhas = [
+            f"### {categoria}"
+        ]
 
-        for command in sorted(
-            lista_comandos,
-            key=lambda comando: comando.name,
+        for comando in sorted(
+            lista_de_comandos,
+            key=lambda item: item.name,
         ):
-            descricao = command.extras.get(
-                "descricao",
-                command.help or "Sem descrição disponível.",
+            uso = comando.extras.get(
+                "uso",
+                f"{PREFIXO}{comando.qualified_name}",
             )
 
-            uso = command.extras.get(
-                "uso",
-                f"{PREFIX}{command.qualified_name}",
+            descricao = comando.extras.get(
+                "descricao",
+                comando.help or "Sem descrição disponível.",
             )
 
             linhas.append(
-                f"`{uso}`\n"
+                f"**`{uso}`**\n"
                 f"{descricao}"
             )
 
-        if linhas:
-            embed.add_field(
-                name=categoria,
-                value="\n\n".join(linhas),
-                inline=False,
-            )
+        blocos.append(
+            "\n\n".join(linhas)
+        )
 
-    embed.set_footer(
-        text="Dica: mencione um membro sempre que o comando pedir @membro."
+    blocos.append(
+        "-# As mensagens de moderação desaparecem automaticamente após 5 segundos."
     )
 
-    await ctx.send(embed=embed)
+    await ctx.send(
+        view=Cartao(
+            *blocos
+        )
+    )
 
 
 @bot.event
 async def on_command_error(
     ctx: commands.Context,
     error: commands.CommandError,
-):
+) -> None:
     """
-    Trata os erros dos comandos com mensagens claras e profissionais.
+    Trata erros dos comandos usando Components V2.
+
+    Os avisos de erro desaparecem após 5 segundos.
     """
 
     if hasattr(ctx.command, "on_error"):
         return
 
-    original_error = getattr(
+    erro = getattr(
         error,
         "original",
         error,
     )
 
+    # Não envia mensagem para comandos inexistentes.
     if isinstance(
-        original_error,
+        erro,
         commands.CommandNotFound,
     ):
         return
 
     if isinstance(
-        original_error,
+        erro,
         commands.NoPrivateMessage,
     ):
         mensagem = (
-            "Esse comando só pode ser usado dentro de um servidor."
+            "Esse comando só pode ser usado "
+            "dentro de um servidor."
         )
 
     elif isinstance(
-        original_error,
+        erro,
         commands.MissingPermissions,
     ):
         mensagem = (
-            "Você não tem a permissão necessária para usar este comando."
+            "Você não possui a permissão necessária "
+            "para usar este comando."
         )
 
     elif isinstance(
-        original_error,
+        erro,
         commands.BotMissingPermissions,
     ):
         mensagem = (
-            "Eu não tenho as permissões necessárias para executar essa ação."
+            "Eu não possuo as permissões necessárias "
+            "para executar esta ação."
         )
 
     elif isinstance(
-        original_error,
+        erro,
         commands.MissingRequiredArgument,
     ):
+        nome_do_argumento = erro.param.name
+
         mensagem = (
             f"Está faltando o argumento "
-            f"`{original_error.param.name}`.\n\n"
-            f"Use `{PREFIX}comandos` para consultar o formato correto."
+            f"`{nome_do_argumento}`.\n\n"
+            f"Use `{PREFIXO}comandos` para consultar "
+            "o formato correto."
         )
 
     elif isinstance(
-        original_error,
+        erro,
         commands.BadArgument,
     ):
         mensagem = (
-            "Não consegui entender algum argumento.\n"
-            "Confira a menção, o ID ou o tempo informado e tente novamente."
+            "Não consegui identificar algum argumento.\n"
+            "Confira a menção, o ID ou o tempo informado "
+            "e tente novamente."
         )
 
     elif isinstance(
-        original_error,
+        erro,
         commands.CommandOnCooldown,
     ):
         mensagem = (
-            f"Aguarde {original_error.retry_after:.1f} segundos "
-            "antes de usar esse comando novamente."
+            f"Aguarde {erro.retry_after:.1f} segundos "
+            "antes de tentar novamente."
         )
 
     else:
         print(
-            f"Erro no comando "
+            "Erro no comando "
             f"{getattr(ctx.command, 'qualified_name', 'desconhecido')}: "
-            f"{original_error!r}"
+            f"{erro!r}"
         )
 
         mensagem = (
-            "Não consegui concluir essa ação agora.\n"
+            "Não consegui concluir esta ação agora.\n"
             "Verifique minhas permissões e tente novamente."
         )
 
-    embed = discord.Embed(
-        title="Não foi possível concluir",
-        description=mensagem,
-    )
-
     await ctx.send(
-        embed=embed,
-        delete_after=10,
+        view=Cartao(
+            "## Não foi possível concluir",
+            mensagem,
+        ),
+        delete_after=5,
     )
 
 
 if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError(
-            "A variável DISCORD_TOKEN não foi encontrada."
+            "A variável DISCORD_TOKEN não foi encontrada "
+            "na hospedagem."
         )
 
     bot.run(TOKEN)
