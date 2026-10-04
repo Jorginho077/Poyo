@@ -23,17 +23,76 @@ UNIDADES = {
 }
 
 
-# Tempo que os containers de resposta ficam visíveis.
 TEMPO_DAS_RESPOSTAS = 25
+
+EMOJI_INICIO = "<:axolote:1556443018557661234>"
+EMOJI_FINAL = "<a:emoji_481:1556442987691647068>"
+
+
+def analisar_duracao(
+    texto: str,
+) -> Optional[int]:
+    """
+    Converte formatos como:
+
+    30s = 30 segundos
+    1m  = 1 minuto
+    1h  = 1 hora
+    2h  = 2 horas
+    28d = 28 dias
+    1w  = 1 semana
+    """
+
+    correspondencia = DURACAO_RE.fullmatch(
+        texto.lower().strip()
+    )
+
+    if not correspondencia:
+        return None
+
+    valor = int(
+        correspondencia.group("valor")
+    )
+
+    unidade = correspondencia.group(
+        "unidade"
+    ).lower()
+
+    return valor * UNIDADES[unidade]
+
+
+def formatar_duracao(
+    segundos: int,
+) -> str:
+    partes = []
+
+    for nome, divisor in (
+        ("semana", 604800),
+        ("dia", 86400),
+        ("hora", 3600),
+        ("minuto", 60),
+        ("segundo", 1),
+    ):
+        quantidade, segundos = divmod(
+            segundos,
+            divisor,
+        )
+
+        if quantidade:
+            plural = "s" if quantidade != 1 else ""
+
+            partes.append(
+                f"{quantidade} {nome}{plural}"
+            )
+
+    return ", ".join(partes)
 
 
 class Cartao(discord.ui.LayoutView):
     """
-    Cartão criado com Components V2.
+    Cartão curto e fofo usando Components V2.
 
     Não utiliza discord.Embed.
-    Não define accent_color, então não possui
-    a barra lateral colorida dos embeds tradicionais.
     """
 
     def __init__(
@@ -46,7 +105,7 @@ class Cartao(discord.ui.LayoutView):
         )
 
         texto = (
-            f"## {titulo}\n\n"
+            f"{EMOJI_INICIO}  **{titulo}**  {EMOJI_FINAL}\n\n"
             f"{descricao}"
         )
 
@@ -90,71 +149,9 @@ async def responder(
     )
 
 
-def analisar_duracao(
-    texto: str,
-) -> Optional[int]:
-    """
-    Converte formatos como:
-
-    30s = 30 segundos
-    1m  = 1 minuto
-    1h  = 1 hora
-    2h  = 2 horas
-    28d = 28 dias
-    1w  = 1 semana
-    """
-
-    correspondencia = DURACAO_RE.fullmatch(
-        texto.lower().strip()
-    )
-
-    if not correspondencia:
-        return None
-
-    valor = int(
-        correspondencia.group("valor")
-    )
-
-    unidade = correspondencia.group(
-        "unidade"
-    ).lower()
-
-    return valor * UNIDADES[unidade]
-
-
-def formatar_duracao(
-    segundos: int,
-) -> str:
-    partes = []
-
-    unidades = (
-        ("semana", 604800),
-        ("dia", 86400),
-        ("hora", 3600),
-        ("minuto", 60),
-        ("segundo", 1),
-    )
-
-    for nome, divisor in unidades:
-        quantidade, segundos = divmod(
-            segundos,
-            divisor,
-        )
-
-        if quantidade:
-            plural = "s" if quantidade != 1 else ""
-
-            partes.append(
-                f"{quantidade} "
-                f"{nome}{plural}"
-            )
-
-    return ", ".join(partes)
-
-
 class Moderacao(commands.Cog):
     """
-    Comandos de moderação do servidor.
+    Comandos de moderação.
 
     O comando ,calado não utiliza o timeout nativo
     do Discord.
@@ -169,7 +166,7 @@ class Moderacao(commands.Cog):
     ) -> None:
         self.bot = bot
 
-        # Estrutura:
+        # Formato:
         #
         # {
         #     id_do_servidor: {
@@ -186,10 +183,6 @@ class Moderacao(commands.Cog):
         self,
         ctx: commands.Context,
     ) -> bool:
-        """
-        Permite o uso dos comandos somente dentro de servidores.
-        """
-
         if ctx.guild is None:
             raise commands.NoPrivateMessage()
 
@@ -226,9 +219,7 @@ class Moderacao(commands.Cog):
         if expiracao is None:
             return
 
-        agora = time.time()
-
-        if agora >= expiracao:
+        if time.time() >= expiracao:
             calados_do_servidor.pop(
                 membro_id,
                 None,
@@ -262,7 +253,7 @@ class Moderacao(commands.Cog):
             "uso": ",calado @membro 1h",
             "descricao": (
                 "Apaga as mensagens de um membro durante "
-                "o período informado, sem usar timeout nativo."
+                "o período informado."
             ),
         },
     )
@@ -281,11 +272,6 @@ class Moderacao(commands.Cog):
         *,
         motivo: str = "Nenhum motivo informado",
     ) -> None:
-        """
-        Deixa um membro calado sem utilizar
-        o timeout nativo do Discord.
-        """
-
         segundos = analisar_duracao(
             tempo
         )
@@ -299,7 +285,7 @@ class Moderacao(commands.Cog):
                 ctx,
                 cartao_erro(
                     (
-                        "Informe um tempo válido entre `1s` e `28d`.\n"
+                        "Informe um tempo entre `1s` e `28d`.\n"
                         "Exemplos: `1m`, `1h`, `2h` ou `28d`."
                     )
                 ),
@@ -334,8 +320,8 @@ class Moderacao(commands.Cog):
                 ctx,
                 cartao_erro(
                     (
-                        "Esse membro possui um cargo igual ou "
-                        "superior ao seu cargo mais alto."
+                        "Esse membro possui um cargo igual "
+                        "ou superior ao seu."
                     )
                 ),
             )
@@ -368,13 +354,12 @@ class Moderacao(commands.Cog):
         await responder(
             ctx,
             cartao_sucesso(
-                "Membro calado",
+                "Calado com sucesso",
                 (
                     f"{membro.mention} ficará calado por "
                     f"**{formatar_duracao(segundos)}**.\n\n"
-                    "Durante esse período, todas as mensagens "
-                    "novas enviadas por ele serão apagadas "
-                    "automaticamente.\n\n"
+                    "As mensagens dele serão apagadas durante "
+                    "esse período.\n\n"
                     f"**Motivo:** {motivo}"
                 ),
             ),
@@ -406,10 +391,6 @@ class Moderacao(commands.Cog):
         ctx: commands.Context,
         membro: discord.Member,
     ) -> None:
-        """
-        Remove o modo calado de um membro.
-        """
-
         calados_do_servidor = self.calados.get(
             ctx.guild.id,
             {},
@@ -439,7 +420,7 @@ class Moderacao(commands.Cog):
         await responder(
             ctx,
             cartao_sucesso(
-                "Modo calado removido",
+                "Calado removido",
                 (
                     f"{membro.mention} já pode enviar "
                     "mensagens normalmente."
@@ -452,10 +433,7 @@ class Moderacao(commands.Cog):
         extras={
             "categoria": "Moderação",
             "uso": ",banir @membro [motivo]",
-            "descricao": (
-                "Bane um membro e remove as mensagens "
-                "recentes dele."
-            ),
+            "descricao": "Bane um membro do servidor.",
         },
     )
     @commands.guild_only()
@@ -498,9 +476,9 @@ class Moderacao(commands.Cog):
         await responder(
             ctx,
             cartao_sucesso(
-                "Banimento aplicado",
+                "Banido com sucesso",
                 (
-                    f"**{membro}** foi banido do servidor.\n"
+                    f"**{membro}** foi banido.\n"
                     f"**Motivo:** {motivo}"
                 ),
             ),
@@ -512,7 +490,7 @@ class Moderacao(commands.Cog):
             "categoria": "Moderação",
             "uso": ",rban ID",
             "descricao": (
-                "Remove o banimento de um usuário pelo ID."
+                "Remove o banimento pelo ID do usuário."
             ),
         },
     )
@@ -574,8 +552,8 @@ class Moderacao(commands.Cog):
             cartao_sucesso(
                 "Banimento removido",
                 (
-                    f"**{banimento.user}** pode entrar no "
-                    "servidor novamente."
+                    f"**{banimento.user}** pode entrar "
+                    "no servidor novamente."
                 ),
             ),
         )
@@ -633,9 +611,9 @@ class Moderacao(commands.Cog):
         await responder(
             ctx,
             cartao_sucesso(
-                "Membro expulso",
+                "Expulso com sucesso",
                 (
-                    f"**{membro}** foi removido do servidor.\n"
+                    f"**{membro}** foi removido.\n"
                     f"**Motivo:** {motivo}"
                 ),
             ),
@@ -647,10 +625,6 @@ class Moderacao(commands.Cog):
         membro: discord.Member,
         acao: str,
     ) -> bool:
-        """
-        Verifica se o autor e o bot podem punir o membro.
-        """
-
         if membro == ctx.guild.owner:
             await responder(
                 ctx,
@@ -667,7 +641,7 @@ class Moderacao(commands.Cog):
                 cartao_erro(
                     (
                         "Esse membro possui um cargo igual "
-                        "ou superior ao seu cargo mais alto."
+                        "ou superior ao seu."
                     )
                 ),
             )
@@ -700,8 +674,7 @@ class Moderacao(commands.Cog):
             "categoria": "Moderação",
             "uso": ",trancar",
             "descricao": (
-                "Impede membros comuns de enviar mensagens "
-                "no canal atual."
+                "Tranca o canal atual para membros comuns."
             ),
         },
     )
@@ -745,8 +718,7 @@ class Moderacao(commands.Cog):
             "categoria": "Moderação",
             "uso": ",destrancar",
             "descricao": (
-                "Libera novamente o envio de mensagens "
-                "no canal atual."
+                "Libera novamente o envio de mensagens."
             ),
         },
     )
@@ -829,6 +801,7 @@ class Moderacao(commands.Cog):
                 ),
             ),
         )
+
 
 async def setup(
     bot: commands.Bot,
