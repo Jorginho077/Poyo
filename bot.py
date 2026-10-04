@@ -1,4 +1,5 @@
 import os
+import pkgutil
 
 import discord
 from discord.ext import commands
@@ -7,11 +8,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
 TOKEN = os.getenv("DISCORD_TOKEN")
 PREFIXO = ","
 
+
 EMOJI_INICIO = "<:axolote:1556443018557661234>"
 EMOJI_FINAL = "<a:emoji_481:1556442987691647068>"
+
 
 BANNER_URL = (
     "https://cdn.discordapp.com/attachments/"
@@ -22,8 +26,17 @@ BANNER_URL = (
 )
 
 
+TEMPO_DAS_RESPOSTAS = 25
+
+
 class Cartao(discord.ui.LayoutView):
-    """Container Components V2 com banner acima e abaixo."""
+    """
+    Container V2 com o banner dentro:
+
+    Banner
+    Texto
+    Banner
+    """
 
     def __init__(
         self,
@@ -33,17 +46,9 @@ class Cartao(discord.ui.LayoutView):
             timeout=None
         )
 
-        banner_cima = discord.ui.MediaGallery(
-            discord.MediaGalleryItem(BANNER_URL)
-        )
-
-        banner_baixo = discord.ui.MediaGallery(
-            discord.MediaGalleryItem(BANNER_URL)
-        )
+        blocos = list(blocos)
 
         if blocos:
-            blocos = list(blocos)
-
             blocos[0] = (
                 f"{EMOJI_INICIO}  "
                 f"{blocos[0]}"
@@ -54,18 +59,32 @@ class Cartao(discord.ui.LayoutView):
                 f"{EMOJI_FINAL}"
             )
 
-        self.add_item(banner_cima)
+        componentes = [
+            discord.ui.MediaGallery(
+                discord.MediaGalleryItem(
+                    BANNER_URL
+                )
+            )
+        ]
 
-        self.add_item(
-            discord.ui.Container(
-                *(
-                    discord.ui.TextDisplay(bloco)
-                    for bloco in blocos
-                ),
+        componentes.extend(
+            discord.ui.TextDisplay(bloco)
+            for bloco in blocos
+        )
+
+        componentes.append(
+            discord.ui.MediaGallery(
+                discord.MediaGalleryItem(
+                    BANNER_URL
+                )
             )
         )
 
-        self.add_item(banner_baixo)
+        self.add_item(
+            discord.ui.Container(
+                *componentes
+            )
+        )
 
 
 class BotModeracao(commands.Bot):
@@ -84,9 +103,44 @@ class BotModeracao(commands.Bot):
         )
 
     async def setup_hook(self) -> None:
-        await self.load_extension(
-            "cogs.mod"
+        """
+        Carrega automaticamente todos os arquivos .py
+        encontrados dentro da pasta cogs.
+
+        Exemplos carregados automaticamente:
+
+        cogs/mod.py
+        cogs/geral.py
+        cogs/diversao.py
+        cogs/logs.py
+        cogs/boas_vindas.py
+        """
+
+        import cogs
+
+        modulos = sorted(
+            pkgutil.iter_modules(
+                cogs.__path__
+            ),
+            key=lambda item: item.name,
         )
+
+        for modulo in modulos:
+            # Ignora __init__.py e arquivos privados.
+            if modulo.name.startswith("_"):
+                continue
+
+            nome_da_cog = (
+                f"cogs.{modulo.name}"
+            )
+
+            await self.load_extension(
+                nome_da_cog
+            )
+
+            print(
+                f"Cog carregada: {nome_da_cog}"
+            )
 
     async def on_ready(self) -> None:
         await self.change_presence(
@@ -96,12 +150,26 @@ class BotModeracao(commands.Bot):
             ),
         )
 
-        print(f"Conectado como: {self.user}")
-        print(f"ID: {self.user.id}")
-        print(f"Servidores: {len(self.guilds)}")
-        print(f"Prefixo: {PREFIXO}")
-        print("Components V2 ativado.")
-        print("Bot iniciado com sucesso.")
+        print("=" * 50)
+        print(
+            f"Bot conectado como: {self.user}"
+        )
+        print(
+            f"ID: {self.user.id}"
+        )
+        print(
+            f"Servidores: {len(self.guilds)}"
+        )
+        print(
+            f"Prefixo: {PREFIXO}"
+        )
+        print(
+            "Components V2 ativado."
+        )
+        print(
+            "Todas as cogs foram carregadas."
+        )
+        print("=" * 50)
 
 
 bot = BotModeracao()
@@ -124,7 +192,10 @@ bot = BotModeracao()
 async def comandos(
     ctx: commands.Context,
 ) -> None:
-    """Mostra a central de comandos."""
+    """
+    Mostra automaticamente todos os comandos
+    encontrados nas cogs carregadas.
+    """
 
     blocos = [
         (
@@ -159,6 +230,7 @@ async def comandos(
         "Moderação",
         "Utilidades",
         "Informações",
+        "Diversão",
         "Outros",
     ]
 
@@ -201,13 +273,14 @@ async def comandos(
         )
 
     blocos.append(
-        "-# Mensagens de moderação somem em 25 segundos."
+        "-# As respostas somem em 25 segundos."
     )
 
     await ctx.send(
         view=Cartao(
             *blocos
-        )
+        ),
+        delete_after=TEMPO_DAS_RESPOSTAS,
     )
 
 
@@ -216,7 +289,9 @@ async def on_command_error(
     ctx: commands.Context,
     error: commands.CommandError,
 ) -> None:
-    """Trata os erros dos comandos."""
+    """
+    Mostra os erros usando Components V2.
+    """
 
     if hasattr(
         ctx.command,
@@ -299,17 +374,18 @@ async def on_command_error(
 
     await ctx.send(
         view=Cartao(
-            "## Não foi possível concluir",
+            "Não foi possível concluir",
             mensagem,
         ),
-        delete_after=25,
+        delete_after=TEMPO_DAS_RESPOSTAS,
     )
 
 
 if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError(
-            "A variável DISCORD_TOKEN não foi encontrada."
+            "A variável DISCORD_TOKEN "
+            "não foi encontrada."
         )
 
     bot.run(TOKEN)
