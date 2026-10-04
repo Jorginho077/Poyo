@@ -214,7 +214,7 @@ async def on_command_error(
     """
     Trata erros dos comandos usando Components V2.
 
-    Os avisos de erro desaparecem após 5 segundos.
+    Os avisos de erro desaparecem após 25 segundos.
     """
 
     if hasattr(ctx.command, "on_error"):
