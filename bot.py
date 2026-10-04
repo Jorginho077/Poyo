@@ -11,12 +11,13 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 PREFIXO = ","
 
 
+EMOJI_INICIO = "<:axolote:1556443018557661234>"
+EMOJI_FINAL = "<a:emoji_481:1556442987691647068>"
+
+
 class Cartao(discord.ui.LayoutView):
     """
-    Cartão criado com Components V2.
-
-    Não utiliza discord.Embed e não define accent_color,
-    portanto não possui a barra lateral colorida dos embeds.
+    Container feito com Components V2.
     """
 
     def __init__(
@@ -26,6 +27,19 @@ class Cartao(discord.ui.LayoutView):
         super().__init__(
             timeout=None
         )
+
+        if blocos:
+            blocos = list(blocos)
+
+            blocos[0] = (
+                f"{EMOJI_INICIO}  "
+                f"{blocos[0]}"
+            )
+
+            blocos[-1] = (
+                f"{blocos[-1]}\n\n"
+                f"{EMOJI_FINAL}"
+            )
 
         self.add_item(
             discord.ui.Container(
@@ -41,10 +55,7 @@ class BotModeracao(commands.Bot):
     def __init__(self) -> None:
         intents = discord.Intents.default()
 
-        # Necessário para o bot receber mensagens.
         intents.message_content = True
-
-        # Necessário para trabalhar com membros.
         intents.members = True
 
         super().__init__(
@@ -56,21 +67,11 @@ class BotModeracao(commands.Bot):
         )
 
     async def setup_hook(self) -> None:
-        """
-        Carrega automaticamente a cog:
-
-        cogs/mod.py
-        """
-
         await self.load_extension(
             "cogs.mod"
         )
 
     async def on_ready(self) -> None:
-        """
-        Executado quando o bot termina de conectar.
-        """
-
         await self.change_presence(
             status=discord.Status.online,
             activity=discord.Game(
@@ -84,7 +85,7 @@ class BotModeracao(commands.Bot):
         print(f"Servidores: {len(self.guilds)}")
         print(f"Prefixo: {PREFIXO}")
         print("Components V2 ativado.")
-        print("Sistema iniciado com sucesso.")
+        print("Bot iniciado com sucesso.")
         print("=" * 50)
 
 
@@ -102,7 +103,7 @@ bot = BotModeracao()
         "uso": ",comandos",
         "descricao": (
             "Mostra todos os comandos disponíveis "
-            "e explica a função de cada um."
+            "e explica cada função."
         ),
     },
 )
@@ -110,19 +111,14 @@ async def comandos(
     ctx: commands.Context,
 ) -> None:
     """
-    Mostra a central de comandos usando Components V2.
-
-    A lista é criada automaticamente a partir
-    dos comandos registrados nas cogs.
+    Central dinâmica de comandos.
     """
 
     blocos = [
         (
             "## Central de comandos\n\n"
-            "Confira todos os comandos disponíveis "
-            "neste servidor.\n\n"
-            "A lista é atualizada automaticamente quando "
-            "novos comandos são adicionados."
+            "Confira os comandos disponíveis "
+            "neste servidor."
         )
     ]
 
@@ -143,14 +139,12 @@ async def comandos(
             "Outros",
         )
 
-        if categoria not in categorias:
-            categorias[categoria] = []
+        categorias.setdefault(
+            categoria,
+            [],
+        ).append(comando)
 
-        categorias[categoria].append(
-            comando
-        )
-
-    ordem_das_categorias = [
+    ordem = [
         "Moderação",
         "Utilidades",
         "Informações",
@@ -160,20 +154,20 @@ async def comandos(
     categorias_organizadas = sorted(
         categorias.items(),
         key=lambda item: (
-            ordem_das_categorias.index(item[0])
-            if item[0] in ordem_das_categorias
-            else len(ordem_das_categorias),
+            ordem.index(item[0])
+            if item[0] in ordem
+            else len(ordem),
             item[0],
         ),
     )
 
-    for categoria, lista_de_comandos in categorias_organizadas:
+    for categoria, lista in categorias_organizadas:
         linhas = [
             f"### {categoria}"
         ]
 
         for comando in sorted(
-            lista_de_comandos,
+            lista,
             key=lambda item: item.name,
         ):
             uso = comando.extras.get(
@@ -183,7 +177,7 @@ async def comandos(
 
             descricao = comando.extras.get(
                 "descricao",
-                comando.help or "Sem descrição disponível.",
+                comando.help or "Sem descrição.",
             )
 
             linhas.append(
@@ -196,7 +190,7 @@ async def comandos(
         )
 
     blocos.append(
-        "-# As mensagens de moderação desaparecem automaticamente após 25 segundos."
+        "-# As respostas de moderação somem em 25 segundos."
     )
 
     await ctx.send(
@@ -212,12 +206,13 @@ async def on_command_error(
     error: commands.CommandError,
 ) -> None:
     """
-    Trata erros dos comandos usando Components V2.
-
-    Os avisos de erro desaparecem após 25 segundos.
+    Mostra erros usando Components V2.
     """
 
-    if hasattr(ctx.command, "on_error"):
+    if hasattr(
+        ctx.command,
+        "on_error",
+    ):
         return
 
     erro = getattr(
@@ -226,7 +221,6 @@ async def on_command_error(
         error,
     )
 
-    # Não envia mensagem para comandos inexistentes.
     if isinstance(
         erro,
         commands.CommandNotFound,
@@ -264,11 +258,9 @@ async def on_command_error(
         erro,
         commands.MissingRequiredArgument,
     ):
-        nome_do_argumento = erro.param.name
-
         mensagem = (
             f"Está faltando o argumento "
-            f"`{nome_do_argumento}`.\n\n"
+            f"`{erro.param.name}`.\n\n"
             f"Use `{PREFIXO}comandos` para consultar "
             "o formato correto."
         )
@@ -279,8 +271,7 @@ async def on_command_error(
     ):
         mensagem = (
             "Não consegui identificar algum argumento.\n"
-            "Confira a menção, o ID ou o tempo informado "
-            "e tente novamente."
+            "Confira a menção, o ID ou o tempo informado."
         )
 
     elif isinstance(
@@ -294,7 +285,7 @@ async def on_command_error(
 
     else:
         print(
-            "Erro no comando "
+            f"Erro no comando "
             f"{getattr(ctx.command, 'qualified_name', 'desconhecido')}: "
             f"{erro!r}"
         )
@@ -309,7 +300,7 @@ async def on_command_error(
             "## Não foi possível concluir",
             mensagem,
         ),
-        delete_after=5,
+        delete_after=25,
     )
 
 
