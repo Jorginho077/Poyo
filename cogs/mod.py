@@ -13,8 +13,7 @@ DURACAO_RE = re.compile(
     re.IGNORECASE,
 )
 
-
-UNIDADES_EM_SEGUNDOS = {
+UNIDADES = {
     "s": 1,
     "m": 60,
     "h": 60 * 60,
@@ -22,14 +21,16 @@ UNIDADES_EM_SEGUNDOS = {
     "w": 60 * 60 * 24 * 7,
 }
 
+TEMPO_DAS_RESPOSTAS = 5
 
-def criar_embed(
+
+def embed_sucesso(
     titulo: str,
     descricao: str,
 ) -> discord.Embed:
     """
-    Cria um embed sem definir cor.
-    Assim, ele não possui a borda/faixa colorida lateral.
+    Embed sem cor definida.
+    Isso remove a faixa lateral colorida personalizada.
     """
 
     return discord.Embed(
@@ -38,25 +39,26 @@ def criar_embed(
     )
 
 
-def criar_erro(
+def embed_erro(
     descricao: str,
 ) -> discord.Embed:
-    return criar_embed(
-        "Ação não realizada",
-        descricao,
+    return discord.Embed(
+        title="Ação não realizada",
+        description=descricao,
     )
 
 
-def converter_tempo(
+def analisar_duracao(
     texto: str,
 ) -> Optional[int]:
     """
-    Converte:
+    Converte formatos como:
 
     30s = 30 segundos
-    10m = 10 minutos
+    1m  = 1 minuto
+    1h  = 1 hora
     2h  = 2 horas
-    7d  = 7 dias
+    28d = 28 dias
     1w  = 1 semana
     """
 
@@ -75,27 +77,21 @@ def converter_tempo(
         "unidade"
     ).lower()
 
-    return valor * UNIDADES_EM_SEGUNDOS[unidade]
+    return valor * UNIDADES[unidade]
 
 
-def formatar_tempo(
+def formatar_duracao(
     segundos: int,
 ) -> str:
-    """
-    Transforma segundos em um texto amigável.
-    """
-
     partes = []
 
-    unidades = (
+    for nome, divisor in (
         ("semana", 604800),
         ("dia", 86400),
         ("hora", 3600),
         ("minuto", 60),
         ("segundo", 1),
-    )
-
-    for nome, divisor in unidades:
+    ):
         quantidade, segundos = divmod(
             segundos,
             divisor,
@@ -111,24 +107,36 @@ def formatar_tempo(
     return ", ".join(partes)
 
 
+async def responder(
+    ctx: commands.Context,
+    embed: discord.Embed,
+) -> discord.Message:
+    """
+    Todas as respostas da moderação desaparecem após 5 segundos.
+    """
+
+    return await ctx.send(
+        embed=embed,
+        delete_after=TEMPO_DAS_RESPOSTAS,
+    )
+
+
 class Moderacao(commands.Cog):
     """
-    Comandos de moderação.
+    Comandos de moderação do servidor.
 
-    O silenciamento deste bot NÃO usa o timeout nativo
+    O comando ,calado não utiliza o timeout nativo
     do Discord.
 
-    O sistema funciona de forma personalizada:
-    - O membro continua podendo enviar mensagens.
-    - O bot identifica as mensagens dele.
-    - O bot apaga essas mensagens automaticamente.
-    - Quando o tempo termina, as mensagens deixam de ser apagadas.
+    O membro continua podendo enviar mensagens,
+    mas o bot apaga automaticamente tudo que ele
+    enviar durante o período determinado.
     """
 
     def __init__(
         self,
         bot: commands.Bot,
-    ):
+    ) -> None:
         self.bot = bot
 
         # Estrutura:
@@ -139,14 +147,14 @@ class Moderacao(commands.Cog):
         #     }
         # }
         #
-        self.silenciados: dict[int, dict[int, float]] = {}
+        self.calados: dict[int, dict[int, float]] = {}
 
     async def cog_check(
         self,
         ctx: commands.Context,
     ) -> bool:
         """
-        Os comandos só podem ser usados dentro de servidores.
+        Impede o uso dos comandos em mensagens privadas.
         """
 
         if ctx.guild is None:
@@ -158,15 +166,10 @@ class Moderacao(commands.Cog):
     async def on_message(
         self,
         message: discord.Message,
-    ):
+    ) -> None:
         """
-        Apaga automaticamente as mensagens de membros
-        que estejam dentro do período de silenciamento.
-
-        Este sistema não utiliza:
-        - timeout nativo;
-        - cargo de silenciado;
-        - alteração de permissões do membro.
+        Apaga mensagens de membros calados
+        até o tempo terminar.
         """
 
         if message.guild is None:
@@ -178,13 +181,13 @@ class Moderacao(commands.Cog):
         guild_id = message.guild.id
         membro_id = message.author.id
 
-        silenciados_do_servidor = self.silenciados.get(
+        calados_do_servidor = self.calados.get(
             guild_id,
             {},
         )
 
-        expiracao = silenciados_do_servidor.get(
-            membro_id
+        expiracao = calados_do_servidor.get(
+            membro_id,
         )
 
         if expiracao is None:
@@ -192,47 +195,41 @@ class Moderacao(commands.Cog):
 
         agora = time.time()
 
-        # Quando o período acaba, remove o membro
-        # da lista de silenciados.
         if agora >= expiracao:
-            silenciados_do_servidor.pop(
+            calados_do_servidor.pop(
                 membro_id,
                 None,
             )
 
-            if not silenciados_do_servidor:
-                self.silenciados.pop(
+            if not calados_do_servidor:
+                self.calados.pop(
                     guild_id,
                     None,
                 )
 
             return
 
-        # O período ainda está ativo.
-        # A mensagem é apagada imediatamente.
         try:
             await message.delete()
 
         except discord.NotFound:
-            # A mensagem já foi apagada.
             pass
 
         except discord.Forbidden:
-            # O bot não tem Gerenciar mensagens no canal.
             pass
 
         except discord.HTTPException:
-            # Evita que um erro da API derrube o bot.
             pass
 
     @commands.command(
-        name="silenciar",
+        name="calado",
+        aliases=("silenciar",),
         extras={
             "categoria": "Moderação",
-            "uso": ",silenciar @membro 1h",
+            "uso": ",calado @membro 1h",
             "descricao": (
-                "Silencia um membro apagando automaticamente "
-                "as mensagens dele durante o período."
+                "Apaga as mensagens de um membro durante "
+                "o período informado, sem usar o timeout nativo."
             ),
         },
     )
@@ -243,131 +240,116 @@ class Moderacao(commands.Cog):
     @commands.bot_has_permissions(
         manage_messages=True,
     )
-    async def silenciar(
+    async def calado(
         self,
         ctx: commands.Context,
         membro: discord.Member,
         tempo: str,
         *,
         motivo: str = "Nenhum motivo informado",
-    ):
+    ) -> None:
         """
-        Silencia um membro sem usar o timeout nativo do Discord.
+        Deixa um membro calado sem utilizar timeout nativo.
         """
 
-        segundos = converter_tempo(tempo)
+        segundos = analisar_duracao(
+            tempo
+        )
 
-        if segundos is None:
-            await ctx.send(
-                embed=criar_erro(
+        if (
+            segundos is None
+            or segundos < 1
+            or segundos > 28 * 86400
+        ):
+            await responder(
+                ctx,
+                embed_erro(
                     "O tempo informado é inválido.\n\n"
-                    "Use um formato como:\n"
-                    "`30s`, `10m`, `2h`, `7d` ou `1w`."
+                    "Use um dos formatos abaixo:\n"
+                    "`30s`, `1m`, `1h`, `2h` ou `28d`."
                 ),
-                delete_after=10,
-            )
-
-            return
-
-        # Limite definido pelo bot.
-        # Como não é timeout nativo, você pode alterar este valor.
-        limite_maximo = 28 * 24 * 60 * 60
-
-        if segundos > limite_maximo:
-            await ctx.send(
-                embed=criar_erro(
-                    "O silenciamento não pode ultrapassar 28 dias."
-                ),
-                delete_after=10,
             )
 
             return
 
         if membro == ctx.author:
-            await ctx.send(
-                embed=criar_erro(
-                    "Você não pode silenciar a si mesmo."
+            await responder(
+                ctx,
+                embed_erro(
+                    "Você não pode deixar a si mesmo calado."
                 ),
-                delete_after=10,
             )
 
             return
 
         if membro == ctx.guild.owner:
-            await ctx.send(
-                embed=criar_erro(
-                    "O dono do servidor não pode ser silenciado."
+            await responder(
+                ctx,
+                embed_erro(
+                    "O dono do servidor não pode ser deixado calado."
                 ),
-                delete_after=10,
-            )
-
-            return
-
-        if membro.top_role >= ctx.author.top_role:
-            await ctx.send(
-                embed=criar_erro(
-                    "Esse membro possui um cargo igual ou superior "
-                    "ao seu cargo mais alto."
-                ),
-                delete_after=10,
             )
 
             return
 
         bot_membro = ctx.guild.me
 
-        if bot_membro is None:
-            await ctx.send(
-                embed=criar_erro(
-                    "Não consegui verificar a hierarquia do servidor."
+        if membro.top_role >= ctx.author.top_role:
+            await responder(
+                ctx,
+                embed_erro(
+                    "Esse membro possui um cargo igual ou superior "
+                    "ao seu cargo mais alto."
                 ),
-                delete_after=10,
             )
 
             return
 
-        if membro.top_role >= bot_membro.top_role:
-            await ctx.send(
-                embed=criar_erro(
+        if (
+            bot_membro is None
+            or membro.top_role >= bot_membro.top_role
+        ):
+            await responder(
+                ctx,
+                embed_erro(
                     "Meu cargo precisa estar acima do cargo "
                     "desse membro."
                 ),
-                delete_after=10,
             )
 
             return
 
-        guild_id = ctx.guild.id
-        membro_id = membro.id
         expiracao = time.time() + segundos
 
-        if guild_id not in self.silenciados:
-            self.silenciados[guild_id] = {}
+        if ctx.guild.id not in self.calados:
+            self.calados[ctx.guild.id] = {}
 
-        # Se ele já estiver silenciado, o novo comando
-        # atualiza o tempo para o novo período.
-        self.silenciados[guild_id][membro_id] = expiracao
+        # Se já estiver calado, atualiza o tempo.
+        self.calados[ctx.guild.id][membro.id] = expiracao
 
-        await ctx.send(
-            embed=criar_embed(
-                "Membro silenciado",
+        await responder(
+            ctx,
+            embed_sucesso(
+                "Membro calado",
                 (
-                    f"{membro.mention} foi silenciado por "
-                    f"**{formatar_tempo(segundos)}**.\n\n"
-                    "Durante esse período, qualquer mensagem nova "
-                    "enviada por ele será apagada automaticamente.\n\n"
+                    f"{membro.mention} ficará calado por "
+                    f"**{formatar_duracao(segundos)}**.\n\n"
+                    "Durante esse período, todas as mensagens "
+                    "novas enviadas por ele serão apagadas "
+                    "automaticamente.\n\n"
                     f"**Motivo:** {motivo}"
                 ),
-            )
+            ),
         )
 
     @commands.command(
-        name="rsilenciar",
+        name="nchoraxx",
+        aliases=("rcalado", "rsilenciar"),
         extras={
             "categoria": "Moderação",
-            "uso": ",rsilenciar @membro",
+            "uso": ",nchoraxx @membro",
             "descricao": (
-                "Remove o silenciamento personalizado de um membro."
+                "Remove o modo calado personalizado de um membro."
             ),
         },
     )
@@ -378,53 +360,50 @@ class Moderacao(commands.Cog):
     @commands.bot_has_permissions(
         manage_messages=True,
     )
-    async def rsilenciar(
+    async def nchoraxx(
         self,
         ctx: commands.Context,
         membro: discord.Member,
-    ):
+    ) -> None:
         """
-        Remove o membro da lista de silenciados.
+        Remove o membro da lista de calados.
         """
 
-        guild_id = ctx.guild.id
-        membro_id = membro.id
-
-        silenciados_do_servidor = self.silenciados.get(
-            guild_id,
+        calados_do_servidor = self.calados.get(
+            ctx.guild.id,
             {},
         )
 
-        if membro_id not in silenciados_do_servidor:
-            await ctx.send(
-                embed=criar_erro(
-                    f"{membro.mention} não está silenciado pelo bot."
+        if membro.id not in calados_do_servidor:
+            await responder(
+                ctx,
+                embed_erro(
+                    f"{membro.mention} não está calado pelo bot."
                 ),
-                delete_after=10,
             )
 
             return
 
-        silenciados_do_servidor.pop(
-            membro_id,
+        calados_do_servidor.pop(
+            membro.id,
             None,
         )
 
-        if not silenciados_do_servidor:
-            self.silenciados.pop(
-                guild_id,
+        if not calados_do_servidor:
+            self.calados.pop(
+                ctx.guild.id,
                 None,
             )
 
-        await ctx.send(
-            embed=criar_embed(
-                "Silenciamento removido",
+        await responder(
+            ctx,
+            embed_sucesso(
+                "Modo calado removido",
                 (
-                    f"O silenciamento de {membro.mention} "
-                    "foi removido.\n"
-                    "As mensagens dele não serão mais apagadas."
+                    f"{membro.mention} já pode enviar mensagens "
+                    "normalmente."
                 ),
-            )
+            ),
         )
 
     @commands.command(
@@ -432,7 +411,9 @@ class Moderacao(commands.Cog):
         extras={
             "categoria": "Moderação",
             "uso": ",banir @membro [motivo]",
-            "descricao": "Bane um membro do servidor.",
+            "descricao": (
+                "Bane um membro e remove as mensagens recentes dele."
+            ),
         },
     )
     @commands.guild_only()
@@ -448,36 +429,12 @@ class Moderacao(commands.Cog):
         membro: discord.Member,
         *,
         motivo: str = "Nenhum motivo informado",
-    ):
-        """
-        Bane um membro do servidor.
-        """
-
-        if membro == ctx.guild.owner:
-            await ctx.send(
-                embed=criar_erro(
-                    "O dono do servidor não pode ser banido."
-                ),
-                delete_after=10,
-            )
-
-            return
-
-        bot_membro = ctx.guild.me
-
-        if (
-            membro.top_role >= ctx.author.top_role
-            or bot_membro is None
-            or membro.top_role >= bot_membro.top_role
+    ) -> None:
+        if not await self._pode_punir(
+            ctx,
+            membro,
+            "banir",
         ):
-            await ctx.send(
-                embed=criar_erro(
-                    "Não posso banir esse membro por causa "
-                    "da hierarquia de cargos."
-                ),
-                delete_after=10,
-            )
-
             return
 
         try:
@@ -487,23 +444,24 @@ class Moderacao(commands.Cog):
             )
 
         except discord.Forbidden:
-            await ctx.send(
-                embed=criar_erro(
+            await responder(
+                ctx,
+                embed_erro(
                     "Não tenho permissão para banir esse membro."
                 ),
-                delete_after=10,
             )
 
             return
 
-        await ctx.send(
-            embed=criar_embed(
+        await responder(
+            ctx,
+            embed_sucesso(
                 "Banimento aplicado",
                 (
-                    f"**{membro}** foi banido do servidor.\n\n"
+                    f"**{membro}** foi banido do servidor.\n"
                     f"**Motivo:** {motivo}"
                 ),
-            )
+            ),
         )
 
     @commands.command(
@@ -511,7 +469,9 @@ class Moderacao(commands.Cog):
         extras={
             "categoria": "Moderação",
             "uso": ",rban ID",
-            "descricao": "Remove o banimento de um usuário usando o ID.",
+            "descricao": (
+                "Remove o banimento de um usuário pelo ID."
+            ),
         },
     )
     @commands.guild_only()
@@ -525,11 +485,7 @@ class Moderacao(commands.Cog):
         self,
         ctx: commands.Context,
         usuario_id: int,
-    ):
-        """
-        Remove um banimento através do ID do usuário.
-        """
-
+    ) -> None:
         try:
             banimento = await ctx.guild.fetch_ban(
                 discord.Object(id=usuario_id)
@@ -541,33 +497,34 @@ class Moderacao(commands.Cog):
             )
 
         except discord.NotFound:
-            await ctx.send(
-                embed=criar_erro(
+            await responder(
+                ctx,
+                embed_erro(
                     "Não encontrei um banimento ativo para esse ID."
                 ),
-                delete_after=10,
             )
 
             return
 
         except discord.Forbidden:
-            await ctx.send(
-                embed=criar_erro(
+            await responder(
+                ctx,
+                embed_erro(
                     "Não tenho permissão para remover banimentos."
                 ),
-                delete_after=10,
             )
 
             return
 
-        await ctx.send(
-            embed=criar_embed(
+        await responder(
+            ctx,
+            embed_sucesso(
                 "Banimento removido",
                 (
-                    f"O usuário **{banimento.user}** "
-                    "pode entrar no servidor novamente."
+                    f"**{banimento.user}** pode entrar no "
+                    "servidor novamente."
                 ),
-            )
+            ),
         )
 
     @commands.command(
@@ -576,7 +533,9 @@ class Moderacao(commands.Cog):
         extras={
             "categoria": "Moderação",
             "uso": ",expulsar @membro [motivo]",
-            "descricao": "Expulsa um membro do servidor.",
+            "descricao": (
+                "Expulsa um membro sem impedir que ele volte."
+            ),
         },
     )
     @commands.guild_only()
@@ -592,36 +551,12 @@ class Moderacao(commands.Cog):
         membro: discord.Member,
         *,
         motivo: str = "Nenhum motivo informado",
-    ):
-        """
-        Expulsa um membro do servidor.
-        """
-
-        if membro == ctx.guild.owner:
-            await ctx.send(
-                embed=criar_erro(
-                    "O dono do servidor não pode ser expulso."
-                ),
-                delete_after=10,
-            )
-
-            return
-
-        bot_membro = ctx.guild.me
-
-        if (
-            membro.top_role >= ctx.author.top_role
-            or bot_membro is None
-            or membro.top_role >= bot_membro.top_role
+    ) -> None:
+        if not await self._pode_punir(
+            ctx,
+            membro,
+            "expulsar",
         ):
-            await ctx.send(
-                embed=criar_erro(
-                    "Não posso expulsar esse membro por causa "
-                    "da hierarquia de cargos."
-                ),
-                delete_after=10,
-            )
-
             return
 
         try:
@@ -630,24 +565,74 @@ class Moderacao(commands.Cog):
             )
 
         except discord.Forbidden:
-            await ctx.send(
-                embed=criar_erro(
+            await responder(
+                ctx,
+                embed_erro(
                     "Não tenho permissão para expulsar esse membro."
                 ),
-                delete_after=10,
             )
 
             return
 
-        await ctx.send(
-            embed=criar_embed(
+        await responder(
+            ctx,
+            embed_sucesso(
                 "Membro expulso",
                 (
-                    f"**{membro}** foi removido do servidor.\n\n"
+                    f"**{membro}** foi removido do servidor.\n"
                     f"**Motivo:** {motivo}"
                 ),
-            )
+            ),
         )
+
+    async def _pode_punir(
+        self,
+        ctx: commands.Context,
+        membro: discord.Member,
+        acao: str,
+    ) -> bool:
+        """
+        Confere a hierarquia antes de banir ou expulsar.
+        """
+
+        if membro == ctx.guild.owner:
+            await responder(
+                ctx,
+                embed_erro(
+                    f"O dono do servidor não pode ser {acao}."
+                ),
+            )
+
+            return False
+
+        if membro.top_role >= ctx.author.top_role:
+            await responder(
+                ctx,
+                embed_erro(
+                    "Esse membro possui um cargo igual ou superior "
+                    "ao seu cargo mais alto."
+                ),
+            )
+
+            return False
+
+        bot_membro = ctx.guild.me
+
+        if (
+            bot_membro is None
+            or membro.top_role >= bot_membro.top_role
+        ):
+            await responder(
+                ctx,
+                embed_erro(
+                    "Meu cargo precisa estar acima do cargo "
+                    "desse membro."
+                ),
+            )
+
+            return False
+
+        return True
 
     @commands.command(
         name="trancar",
@@ -670,11 +655,7 @@ class Moderacao(commands.Cog):
     async def trancar(
         self,
         ctx: commands.Context,
-    ):
-        """
-        Tranca o canal atual.
-        """
-
+    ) -> None:
         permissao = ctx.channel.overwrites_for(
             ctx.guild.default_role
         )
@@ -687,15 +668,15 @@ class Moderacao(commands.Cog):
             reason=f"Canal trancado por {ctx.author}",
         )
 
-        await ctx.send(
-            embed=criar_embed(
+        await responder(
+            ctx,
+            embed_sucesso(
                 "Canal trancado",
                 (
-                    "Este canal foi trancado.\n"
                     "Membros comuns não poderão enviar mensagens "
-                    "até que ele seja destrancado."
+                    "até que o canal seja destrancado."
                 ),
-            )
+            ),
         )
 
     @commands.command(
@@ -719,11 +700,7 @@ class Moderacao(commands.Cog):
     async def destrancar(
         self,
         ctx: commands.Context,
-    ):
-        """
-        Destranca o canal atual.
-        """
-
+    ) -> None:
         permissao = ctx.channel.overwrites_for(
             ctx.guild.default_role
         )
@@ -736,11 +713,12 @@ class Moderacao(commands.Cog):
             reason=f"Canal destrancado por {ctx.author}",
         )
 
-        await ctx.send(
-            embed=criar_embed(
+        await responder(
+            ctx,
+            embed_sucesso(
                 "Canal destrancado",
                 "O envio de mensagens foi liberado novamente.",
-            )
+            ),
         )
 
     @commands.command(
@@ -749,7 +727,9 @@ class Moderacao(commands.Cog):
         extras={
             "categoria": "Moderação",
             "uso": ",limpar 20",
-            "descricao": "Apaga de 1 a 100 mensagens recentes.",
+            "descricao": (
+                "Apaga de 1 a 100 mensagens recentes do canal."
+            ),
         },
     )
     @commands.guild_only()
@@ -764,17 +744,13 @@ class Moderacao(commands.Cog):
         self,
         ctx: commands.Context,
         quantidade: int,
-    ):
-        """
-        Apaga mensagens recentes do canal.
-        """
-
+    ) -> None:
         if quantidade < 1 or quantidade > 100:
-            await ctx.send(
-                embed=criar_erro(
+            await responder(
+                ctx,
+                embed_erro(
                     "Escolha uma quantidade entre 1 e 100."
                 ),
-                delete_after=8,
             )
 
             return
@@ -783,24 +759,25 @@ class Moderacao(commands.Cog):
             limit=quantidade + 1
         )
 
-        aviso = await ctx.send(
-            embed=criar_embed(
+        await responder(
+            ctx,
+            embed_sucesso(
                 "Limpeza concluída",
                 (
-                    f"{len(apagadas) - 1} mensagens foram "
-                    "removidas deste canal."
+                    f"{max(len(apagadas) - 1, 0)} mensagens "
+                    "foram removidas deste canal."
                 ),
-            )
+            ),
         )
-
-        await aviso.delete(delay=5)
 
     @commands.command(
         name="aviso",
         extras={
             "categoria": "Moderação",
             "uso": ",aviso @membro motivo",
-            "descricao": "Registra uma advertência no canal.",
+            "descricao": (
+                "Registra uma advertência pública e organizada."
+            ),
         },
     )
     @commands.guild_only()
@@ -813,26 +790,22 @@ class Moderacao(commands.Cog):
         membro: discord.Member,
         *,
         motivo: str,
-    ):
-        """
-        Registra uma advertência pública.
-        """
-
-        await ctx.send(
-            embed=criar_embed(
+    ) -> None:
+        await responder(
+            ctx,
+            embed_sucesso(
                 "Advertência registrada",
                 (
-                    f"{membro.mention} recebeu uma advertência "
-                    f"de {ctx.author.mention}.\n\n"
+                    f"{membro.mention} recebeu uma advertência.\n"
                     f"**Motivo:** {motivo}"
                 ),
-            )
+            ),
         )
 
 
 async def setup(
     bot: commands.Bot,
-):
+) -> None:
     await bot.add_cog(
         Moderacao(bot)
     )
