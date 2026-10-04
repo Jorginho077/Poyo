@@ -10,15 +10,20 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 PREFIXO = ","
 
-
 EMOJI_INICIO = "<:axolote:1556443018557661234>"
 EMOJI_FINAL = "<a:emoji_481:1556442987691647068>"
 
+BANNER_URL = (
+    "https://cdn.discordapp.com/attachments/"
+    "1556052693511053397/1556449326891401307/"
+    "GIF_image_3.gif?backend=b2&ex=6ac433e4&"
+    "is=6ac2e264&hm=7bd09ac806e541b3edadc60c2c796f17"
+    "dfcffe12b617209c6a735eb7e741ce9e&"
+)
+
 
 class Cartao(discord.ui.LayoutView):
-    """
-    Container feito com Components V2.
-    """
+    """Container Components V2 com banner acima e abaixo."""
 
     def __init__(
         self,
@@ -26,6 +31,14 @@ class Cartao(discord.ui.LayoutView):
     ) -> None:
         super().__init__(
             timeout=None
+        )
+
+        banner_cima = discord.ui.MediaGallery(
+            discord.MediaGalleryItem(BANNER_URL)
+        )
+
+        banner_baixo = discord.ui.MediaGallery(
+            discord.MediaGalleryItem(BANNER_URL)
         )
 
         if blocos:
@@ -41,14 +54,18 @@ class Cartao(discord.ui.LayoutView):
                 f"{EMOJI_FINAL}"
             )
 
+        self.add_item(banner_cima)
+
         self.add_item(
             discord.ui.Container(
                 *(
                     discord.ui.TextDisplay(bloco)
                     for bloco in blocos
-                )
+                ),
             )
         )
+
+        self.add_item(banner_baixo)
 
 
 class BotModeracao(commands.Bot):
@@ -79,14 +96,12 @@ class BotModeracao(commands.Bot):
             ),
         )
 
-        print("=" * 50)
-        print(f"Bot conectado como: {self.user}")
-        print(f"ID do bot: {self.user.id}")
+        print(f"Conectado como: {self.user}")
+        print(f"ID: {self.user.id}")
         print(f"Servidores: {len(self.guilds)}")
         print(f"Prefixo: {PREFIXO}")
         print("Components V2 ativado.")
         print("Bot iniciado com sucesso.")
-        print("=" * 50)
 
 
 bot = BotModeracao()
@@ -102,23 +117,19 @@ bot = BotModeracao()
         "categoria": "Informações",
         "uso": ",comandos",
         "descricao": (
-            "Mostra todos os comandos disponíveis "
-            "e explica cada função."
+            "Mostra os comandos disponíveis."
         ),
     },
 )
 async def comandos(
     ctx: commands.Context,
 ) -> None:
-    """
-    Central dinâmica de comandos.
-    """
+    """Mostra a central de comandos."""
 
     blocos = [
         (
             "## Central de comandos\n\n"
-            "Confira os comandos disponíveis "
-            "neste servidor."
+            "Confira os comandos disponíveis."
         )
     ]
 
@@ -190,7 +201,7 @@ async def comandos(
         )
 
     blocos.append(
-        "-# As respostas de moderação somem em 25 segundos."
+        "-# Mensagens de moderação somem em 25 segundos."
     )
 
     await ctx.send(
@@ -205,9 +216,7 @@ async def on_command_error(
     ctx: commands.Context,
     error: commands.CommandError,
 ) -> None:
-    """
-    Mostra erros usando Components V2.
-    """
+    """Trata os erros dos comandos."""
 
     if hasattr(
         ctx.command,
@@ -241,8 +250,7 @@ async def on_command_error(
         commands.MissingPermissions,
     ):
         mensagem = (
-            "Você não possui a permissão necessária "
-            "para usar este comando."
+            "Você não possui a permissão necessária."
         )
 
     elif isinstance(
@@ -250,8 +258,7 @@ async def on_command_error(
         commands.BotMissingPermissions,
     ):
         mensagem = (
-            "Eu não possuo as permissões necessárias "
-            "para executar esta ação."
+            "Eu não possuo as permissões necessárias."
         )
 
     elif isinstance(
@@ -259,10 +266,8 @@ async def on_command_error(
         commands.MissingRequiredArgument,
     ):
         mensagem = (
-            f"Está faltando o argumento "
-            f"`{erro.param.name}`.\n\n"
-            f"Use `{PREFIXO}comandos` para consultar "
-            "o formato correto."
+            f"Está faltando `{erro.param.name}`.\n\n"
+            f"Use `{PREFIXO}comandos`."
         )
 
     elif isinstance(
@@ -270,7 +275,6 @@ async def on_command_error(
         commands.BadArgument,
     ):
         mensagem = (
-            "Não consegui identificar algum argumento.\n"
             "Confira a menção, o ID ou o tempo informado."
         )
 
@@ -279,8 +283,7 @@ async def on_command_error(
         commands.CommandOnCooldown,
     ):
         mensagem = (
-            f"Aguarde {erro.retry_after:.1f} segundos "
-            "antes de tentar novamente."
+            f"Aguarde {erro.retry_after:.1f} segundos."
         )
 
     else:
@@ -291,8 +294,7 @@ async def on_command_error(
         )
 
         mensagem = (
-            "Não consegui concluir esta ação agora.\n"
-            "Verifique minhas permissões e tente novamente."
+            "Não consegui concluir essa ação."
         )
 
     await ctx.send(
@@ -307,8 +309,7 @@ async def on_command_error(
 if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError(
-            "A variável DISCORD_TOKEN não foi encontrada "
-            "na hospedagem."
+            "A variável DISCORD_TOKEN não foi encontrada."
         )
 
     bot.run(TOKEN)
