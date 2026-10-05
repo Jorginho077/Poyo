@@ -118,21 +118,23 @@ CAT_DEFAULTS = {
 
 DEFAULTS = {
     "painel": {
-        "titulo": "Support  ( ´ ｀ )",
+        "titulo": "Central de Atendimento",
         "descricao": (
-            "ᶻᶻ ∫ .  🌸  only if you need help\n"
-            "selecione uma opção no menu abaixo para abrir\n"
+            "selecione uma opção abaixo para abrir\n"
             "um atendimento privado com a nossa equipe ♡"
         ),
         "info": (
             "-# 🌷 somente você e a equipe têm acesso ao canal\n"
             "-# 📜 a transcrição é enviada na sua DM ao encerrar"
         ),
-        "rodape": "um ticket por pessoa  ˚ ༘♡ ⋆｡˚",
-        # none = banenr padrao do bot · "" = sem banner · link = imagem propria
-        "banner": os.getenv("TICKET_BANNER_URL", "").strip(),
+        "rodape": "um ticket por pessoa  ·  ♡",
+        # none = banner padrao do bot · "" = sem banner · link = imagem propria
+        "banner": os.getenv(
+            "TICKET_BANNER_URL",
+            "https://media.base44.com/images/public/6ac4034e14bc929d3a3e823e/7314ef2f6_generated_image.png",
+        ).strip(),
         "cor": COQUETTE_PINK,
-        "modo": "menu",            # botoes | menu
+        "modo": "botoes",          # botoes | menu
         "botao": "",               # vazio = nome da categoria (no menu: texto do seletor)
     },
     "ticket": {
@@ -473,6 +475,9 @@ def build_panel_view(cfg):
     banner = _banner_url(p)
     if banner:
         children.append(discord.ui.MediaGallery(discord.MediaGalleryItem(banner)))
+
+    # faixa decorativa de fitas no topo
+    children.append(discord.ui.TextDisplay("-# 🎀  🎀  🎀  🎀  🎀"))
 
     head = f"# {p['titulo']}" if p.get("titulo") else ""
     if p.get("descricao"):
