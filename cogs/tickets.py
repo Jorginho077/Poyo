@@ -80,55 +80,58 @@ COLOR_NAMES = {
 
 # campos de uma categoria (o que falatr no arquivo cai aqui)
 CAT_BLANK = {
-    "emoji": "💬", "label": "Categoria", "hint": "", "botao": "cinza",
+    "emoji": "", "label": "Categoria", "hint": "", "botao": "cinza",
     "cor": None, "staff": None, "categoria": None, "boasvindas": None,
 }
 
 CAT_DEFAULTS = {
     "suporte": {
-        **CAT_BLANK, "emoji": "🛠️", "label": "Suporte", "botao": "azul",
+        **CAT_BLANK, "label": "Suporte",
         "hint": "Descreva o problema ou a dúvida com o máximo de detalhes.",
     },
     "denuncia": {
-        **CAT_BLANK, "emoji": "🚨", "label": "Denúncia", "botao": "vermelho",
+        **CAT_BLANK, "label": "Denúncia",
         "hint": "Conte quem, onde e quando aconteceu. Prints ajudam muito.",
     },
     "parceria": {
-        **CAT_BLANK, "emoji": "🤝", "label": "Parceria", "botao": "verde",
+        **CAT_BLANK, "label": "Parceria",
         "hint": "Mande o link do seu servidor e o que você propõe.",
     },
     "outros": {
-        **CAT_BLANK, "emoji": "💬", "label": "Outros", "botao": "cinza",
+        **CAT_BLANK, "label": "Outros",
         "hint": "Qualquer outro assunto que precise da Staff.",
     },
 }
 
+# preto e branco: barra do container branca, sem emoji colorido
+MONO = 0xFFFFFF
+
 DEFAULTS = {
     "painel": {
-        "titulo": "🎫 Central de Atendimento",
+        "titulo": "Central de Atendimento",
         "descricao": (
-            "Precisa de ajuda, quer denunciar algo ou fechar uma parceria?\n"
-            "Escolha uma categoria e abra um atendimento **privado** com a nossa equipe."
+            "Selecione uma opção no menu abaixo para abrir\n"
+            "um atendimento privado com a nossa equipe."
         ),
         "info": (
-            "-# 🔒  Só você e a Staff enxergam o ticket\n"
-            "-# 📄  Ao fechar, a transcrição chega na sua DM (se estiver aberta)"
+            "-# Somente você e a equipe têm acesso ao canal\n"
+            "-# A transcrição é enviada na sua DM ao encerrar"
         ),
-        "rodape": "Um ticket por pessoa · não abra tickets à toa",
+        "rodape": "Um ticket por pessoa",
         # none = banenr padrao do bot · "" = sem banner · link = imagem propria
-        "banner": os.getenv("TICKET_BANNER_URL", "").strip() or None,
-        "cor": None,
-        "modo": "botoes",          # botoes | menu
+        "banner": os.getenv("TICKET_BANNER_URL", "").strip(),
+        "cor": MONO,
+        "modo": "menu",            # botoes | menu
         "botao": "",               # vazio = nome da categoria (no menu: texto do seletor)
     },
     "ticket": {
         "boas_vindas": (
-            "Olá, {usuario}! Obrigado por entrar em contato.\n"
-            "Nossa equipe já foi avisada{staff} e vai te atender em breve."
+            "Olá, {usuario}. Recebemos a sua solicitação.\n"
+            "A nossa equipe já foi avisada{staff} e responderá em breve."
         ),
-        "rodape": "Use o menu acima para chamar mais alguém para este ticket.",
-        "nome_canal": "{emoji}・{tipo}-{usuario}",
-        "cor": None,
+        "rodape": "Use o menu acima para assumir, adicionar alguém ou encerrar o atendimento.",
+        "nome_canal": "{tipo}-{usuario}",
+        "cor": MONO,
     },
     "modal": {"assunto": "Assunto", "detalhes": "Detalhes"},
     "staff": os.getenv("TICKET_STAFF_ROLE", "Staff"),   # id do cargo ou nome
@@ -310,6 +313,28 @@ def _quote(text, limit):
     return "\n".join(f"> {line}" if line.strip() else ">" for line in text.splitlines())
 
 
+# icone so aparece se a categoria tiver emoji
+def _ico(c) -> str:
+    return f"{c['emoji']} " if c.get("emoji") else ""
+
+
+# um menu so com as acoes do ticket (assumir / adicionar / encerrar)
+class TicketMenu(discord.ui.Select):
+    def __init__(self, claimed: bool = False):
+        ops = []
+        if not claimed:
+            ops.append(discord.SelectOption(
+                label="Assumir ticket", value="claim", description="Você passa a cuidar deste atendimento"))
+        ops.append(discord.SelectOption(
+            label="Adicionar membro", value="add", description="Dá acesso a mais uma pessoa"))
+        ops.append(discord.SelectOption(
+            label="Encerrar ticket", value="close", description="Fecha o canal e envia a transcrição"))
+        super().__init__(custom_id="tk:menu", placeholder="Ações do ticket", options=ops)
+
+    async def callback(self, interaction: discord.Interaction):
+        await _menu_action(interaction, self.values[0])
+
+
 # monta o cartao do ticket
 def build_ticket_view(data, cfg, ping=""):
     t = cat_of(cfg, data["tipo"])
@@ -321,13 +346,9 @@ def build_ticket_view(data, cfg, ping=""):
         usuario=f"<@{data['owner']}>", staff=f" {ping}" if ping else "",
         categoria=t["label"], emoji=t["emoji"],
     )
-    header = f"# {t['emoji']} {t['label']}\n{welcome}"
-    attendant = f"🙋 <@{claimed}>" if claimed else "⏳ Aguardando atendimento"
-    info = (
-        f"**Categoria**  {t['emoji']} {t['label']}\n"
-        f"**Aberto**  <t:{data['opened']}:R>\n"
-        f"**Atendente**  {attendant}"
-    )
+    header = f"-# ATENDIMENTO PRIVADO\n# {_ico(t)}{t['label']}\n{welcome}"
+    attendant = f"<@{claimed}>" if claimed else "aguardando"
+    info = f"-# Aberto <t:{data['opened']}:R>  ·  Atendente: {attendant}"
 
     # foto do lado se tiver
     if data.get("avatar"):
@@ -345,8 +366,7 @@ def build_ticket_view(data, cfg, ping=""):
         discord.ui.Separator(),
         discord.ui.TextDisplay(info),
         discord.ui.Separator(spacing=discord.SeparatorSpacing.large, visible=False),
-        TicketButtonsRow(claimed=bool(claimed)),
-        AddMemberRow(),
+        discord.ui.ActionRow(TicketMenu(claimed=bool(claimed))),
     ]
     if cfg["ticket"].get("rodape"):
         children.append(discord.ui.TextDisplay(f"-# {cfg['ticket']['rodape']}"))
@@ -385,7 +405,7 @@ class NewTicketButton(
 # modo menu: um seletor com todas as categorias
 class PanelSelect(discord.ui.Select):
     def __init__(self, cfg=None):
-        options, placeholder = [], "Escolha uma categoria…"
+        options, placeholder = [], "Selecione o tipo de atendimento"
         if cfg:
             placeholder = (cfg["painel"].get("botao") or placeholder)[:150]
             for tipo, c in cfg["categorias"].items():
@@ -436,8 +456,8 @@ def build_panel_view(cfg):
 
     cats = cfg["categorias"]
     lines = []
-    for c in cats.values():
-        lines.append(f"{c['emoji']}  **{c['label']}**" + (f"\n-# {c['hint']}" if c.get("hint") else ""))
+    for i, c in enumerate(cats.values(), 1):
+        lines.append(f"`{i:02d}`  {_ico(c)}**{c['label']}**" + (f"\n-# {c['hint']}" if c.get("hint") else ""))
     if lines:
         children += [discord.ui.Separator(), discord.ui.TextDisplay("\n".join(lines))]
 
@@ -619,11 +639,7 @@ async def create_ticket(interaction: discord.Interaction, tipo: str, assunto: st
         allowed_mentions=discord.AllowedMentions(users=[user], roles=roles or False),
     )
     await interaction.followup.send(
-        view=Card(
-            "Ticket criado! ✅",
-            "Já pode falar com a nossa equipe.",
-            discord.ui.ActionRow(discord.ui.Button(label="Ir para o ticket", url=channel.jump_url)),
-        ),
+        view=Card("Ticket criado", f"Continue o atendimento em {channel.mention}."),
         ephemeral=True,
     )
 
@@ -634,6 +650,65 @@ def _can_manage(member, data, cfg):
     return member.id == data["owner"] or is_staff(member, cfg, data["tipo"])
 
 
+async def _menu_action(interaction: discord.Interaction, action: str):
+    cfg = get_cfg(interaction.guild.id)
+    data = _data_for(interaction.channel)
+    user = interaction.user
+    erro = None
+    if action == "claim":
+        if not is_staff(user, cfg, data["tipo"]):
+            erro = ("Apenas a equipe", "Somente a equipe pode assumir tickets.")
+        elif data.get("claimed"):
+            erro = ("Já assumido", f"Atendente responsável: <@{data['claimed']}>")
+        else:
+            data["claimed"] = user.id
+            _save()
+    elif not _can_manage(user, data, cfg):
+        erro = ("Sem permissão", "Somente a equipe ou quem abriu o ticket pode usar esta ação.")
+
+    # recria o cartao: isso limpa a opcao escolhida no menu
+    await interaction.response.edit_message(view=build_ticket_view(data, cfg))
+
+    if erro:
+        await interaction.followup.send(view=Card(*erro), ephemeral=True)
+    elif action == "claim":
+        await interaction.followup.send(
+            view=Card("Ticket assumido", f"{user.mention} será o responsável pelo seu atendimento."),
+            allowed_mentions=discord.AllowedMentions(users=[discord.Object(data["owner"])]),
+        )
+    elif action == "add":
+        await interaction.followup.send(view=AddMemberView(), ephemeral=True)
+    elif action == "close":
+        await interaction.followup.send(view=ConfirmCloseView(), ephemeral=True)
+
+
+class AddMemberPick(discord.ui.ActionRow):
+    @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Selecione a pessoa", min_values=1, max_values=1)
+    async def pick(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
+        member = select.values[0]
+        if member.bot:
+            await interaction.response.edit_message(view=Card("Seleção inválida", "Escolha uma pessoa, não um bot."))
+            return
+        await interaction.channel.set_permissions(
+            member, view_channel=True, send_messages=True, read_message_history=True, attach_files=True
+        )
+        await interaction.response.edit_message(view=Card("Membro adicionado", f"{member.mention} agora tem acesso."))
+        await interaction.channel.send(
+            view=Card("Membro adicionado", f"{member.mention} agora tem acesso a este ticket."),
+            allowed_mentions=discord.AllowedMentions(users=[member]),
+        )
+
+
+class AddMemberView(discord.ui.LayoutView):
+    def __init__(self):
+        super().__init__(timeout=120)
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("### Adicionar membro\nQuem você quer incluir neste ticket?"),
+            AddMemberPick(),
+        ))
+
+
+# --- compatibilidade: tickets antigos ainda tem os botoes (so respondem, nao sao mais criados)
 class TicketButtonsRow(discord.ui.ActionRow):
     def __init__(self, claimed: bool = False):
         super().__init__()
@@ -711,15 +786,22 @@ class AddMemberRow(discord.ui.ActionRow):
         )
 
 
-class ConfirmCloseRow(discord.ui.ActionRow):
-    @discord.ui.button(label="Fechar ticket", emoji="🔒", style=discord.ButtonStyle.danger)
-    async def yes(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(view=Card("Fechando...", "Gerando a transcrição."))
-        await close_ticket(interaction.channel, interaction.user)
+class ConfirmCloseSelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(
+            placeholder="Confirmar",
+            options=[
+                discord.SelectOption(label="Encerrar ticket", value="yes", description="Apaga o canal e envia a transcrição"),
+                discord.SelectOption(label="Manter aberto", value="no", description="Cancela e continua o atendimento"),
+            ],
+        )
 
-    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary)
-    async def no(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(view=Card("Tudo certo", "O ticket continua aberto."))
+    async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "yes":
+            await interaction.response.edit_message(view=Card("Encerrando", "Gerando a transcrição."))
+            await close_ticket(interaction.channel, interaction.user)
+        else:
+            await interaction.response.edit_message(view=Card("Tudo certo", "O ticket continua aberto."))
 
 
 class ConfirmCloseView(discord.ui.LayoutView):
@@ -728,10 +810,10 @@ class ConfirmCloseView(discord.ui.LayoutView):
         self.add_item(
             discord.ui.Container(
                 discord.ui.TextDisplay(
-                    "### Fechar este ticket?\n"
+                    "### Encerrar este ticket?\n"
                     "O canal será apagado e a transcrição da conversa será enviada."
                 ),
-                ConfirmCloseRow(),
+                discord.ui.ActionRow(ConfirmCloseSelect()),
             )
         )
 
@@ -776,7 +858,7 @@ async def close_ticket(channel, closer):
             if log_channel is not None:
                 try:
                     await log_channel.send(
-                        f"📄 Transcrição de **{channel.name}** · aberto por <@{data['owner']}> · "
+                        f"Transcrição de **{channel.name}** · aberto por <@{data['owner']}> · "
                         f"fechado por {closer.mention}",
                         file=mk_file(),
                         allowed_mentions=NO_MENTIONS,
@@ -788,7 +870,7 @@ async def close_ticket(channel, closer):
             if cfg["transcricao_dm"] and owner is not None:
                 try:
                     await owner.send(
-                        f"📄 Aqui está a transcrição do seu ticket em **{channel.guild.name}**.",
+                        f"Aqui está a transcrição do seu ticket em **{channel.guild.name}**.",
                         file=mk_file(),
                     )
                 except discord.HTTPException:
@@ -797,7 +879,7 @@ async def close_ticket(channel, closer):
         wait = f"**{delay} segundos**" if delay else "instantes"
         try:
             await channel.send(
-                view=Card("🔒 Ticket fechado", f"Fechado por {closer.mention}. Este canal será apagado em {wait}."),
+                view=Card("Ticket encerrado", f"Encerrado por {closer.mention}. Este canal será apagado em {wait}."),
                 allowed_mentions=NO_MENTIONS,
             )
         except discord.HTTPException:
@@ -822,6 +904,9 @@ def register_views(client):
     seletor = discord.ui.LayoutView(timeout=None)
     seletor.add_item(discord.ui.ActionRow(PanelSelect()))
     client.add_view(seletor)
+    legado = discord.ui.LayoutView(timeout=None)   # botoes dos tickets antigos
+    legado.add_item(discord.ui.Container(TicketButtonsRow(), AddMemberRow()))
+    client.add_view(legado)
     cfg = copy.deepcopy(DEFAULTS)
     client.add_view(
         build_ticket_view(
@@ -864,7 +949,7 @@ SETTINGS = {
 
 # campos de categoria: nome do comando -> (campo salvo tipo limite vazio)
 CAT_FIELDS = {
-    "emoji": ("emoji", "texto", 40, False),
+    "emoji": ("emoji", "texto", 40, True),
     "nome": ("label", "texto", 30, False),
     "dica": ("hint", "texto", 100, True),
     "botao": ("botao", "estilo", None, False),
@@ -1200,7 +1285,7 @@ class CatEditModal(discord.ui.Modal):
         c = get_cfg(painel.guild.id)["categorias"][key]
         # campo valor atual tamanho max pode ficar vazio paragrafo
         specs = (
-            ("emoji", c["emoji"], 40, False, False),
+            ("emoji", c["emoji"], 40, True, False),
             ("nome", c["label"], 30, False, False),
             ("dica", c.get("hint") or "", 100, True, False),
             ("cor", _hex(c.get("cor")), 20, True, False),
@@ -1248,7 +1333,7 @@ class NewCatModal(discord.ui.Modal):
         super().__init__(title="➕ Nova categoria")
         self.painel = painel
         self.chave = discord.ui.TextInput(label="Chave (letras minúsculas, números e _)", max_length=20, placeholder="ex: vip")
-        self.emoji = discord.ui.TextInput(label="Emoji", max_length=40, placeholder="ex: ⭐")
+        self.emoji = discord.ui.TextInput(label="Emoji (opcional)", max_length=40, required=False, placeholder="deixe vazio para ficar só texto")
         self.nome = discord.ui.TextInput(label="Nome", max_length=30, placeholder="ex: Suporte VIP")
         for ti in (self.chave, self.emoji, self.nome):
             self.add_item(ti)
@@ -1262,8 +1347,8 @@ class NewCatModal(discord.ui.Modal):
             await _erro_card(interaction, "Essa chave já existe", "Escolha outra.")
         elif len(cats) >= MAX_CATEGORIAS:
             await _erro_card(interaction, "Limite de categorias", f"O máximo são {MAX_CATEGORIAS}.")
-        elif not emoji or not nome:
-            await _erro_card(interaction, "Faltou algo", "Emoji e nome são obrigatórios.")
+        elif not nome:
+            await _erro_card(interaction, "Faltou algo", "O nome é obrigatório.")
         else:
             cats[chave] = {**CAT_BLANK, "emoji": emoji, "label": nome}
             _save_cfg()
