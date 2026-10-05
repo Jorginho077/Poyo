@@ -157,33 +157,41 @@ class Moderacao(commands.Cog):
             dict[int, float],
         ] = {}
 
-    @staticmethod
-    def _equipe_pode_falar(
-        membro: discord.Member,
-    ) -> bool:
-        """
-        A equipe pode usar os comandos do Poyo
-        mesmo estando calada.
-        """
-
-        permissoes = membro.guild_permissions
-
-        return any(
-            (
-                permissoes.administrator,
-                permissoes.manage_messages,
-                permissoes.manage_channels,
-                permissoes.kick_members,
-                permissoes.ban_members,
-            )
-        )
-
     async def cog_check(
         self,
         ctx: commands.Context,
     ) -> bool:
+        """
+        Impede qualquer membro calado de usar
+        comandos do Poyo, inclusive administradores.
+        """
+
         if ctx.guild is None:
             raise commands.NoPrivateMessage()
+
+        guild_calados = self.calados.get(
+            ctx.guild.id,
+            {},
+        )
+
+        expiracao = guild_calados.get(
+            ctx.author.id,
+        )
+
+        if expiracao is not None:
+            if time.time() < expiracao:
+                raise commands.CheckFailure()
+
+            guild_calados.pop(
+                ctx.author.id,
+                None,
+            )
+
+            if not guild_calados:
+                self.calados.pop(
+                    ctx.guild.id,
+                    None,
+                )
 
         return True
 
@@ -193,10 +201,7 @@ class Moderacao(commands.Cog):
         message: discord.Message,
     ) -> None:
         """
-        Apaga mensagens de membros calados.
-
-        Administradores e moderadores autorizados
-        são ignorados pelo sistema de calado.
+        Apaga todas as mensagens de membros calados.
         """
 
         if message.guild is None:
@@ -204,15 +209,6 @@ class Moderacao(commands.Cog):
 
         if message.author.bot:
             return
-
-        if isinstance(
-            message.author,
-            discord.Member,
-        ):
-            if self._equipe_pode_falar(
-                message.author
-            ):
-                return
 
         guild_calados = self.calados.get(
             message.guild.id,
@@ -250,6 +246,63 @@ class Moderacao(commands.Cog):
         ):
             pass
 
+    @commands.Cog.listener()
+    async def on_voice_state_update(
+        self,
+        membro: discord.Member,
+        antes: discord.VoiceState,
+        depois: discord.VoiceState,
+    ) -> None:
+        """
+        Remove da call quem estiver calado.
+        Se tentar entrar novamente, será removido.
+        """
+
+        guild_calados = self.calados.get(
+            membro.guild.id,
+            {},
+        )
+
+        expiracao = guild_calados.get(
+            membro.id,
+        )
+
+        if expiracao is None:
+            return
+
+        if time.time() >= expiracao:
+            guild_calados.pop(
+                membro.id,
+                None,
+            )
+
+            if not guild_calados:
+                self.calados.pop(
+                    membro.guild.id,
+                    None,
+                )
+
+            return
+
+        if depois.channel is None:
+            return
+
+        try:
+            await membro.move_to(
+                None,
+                reason=(
+                    "Membro calado não pode "
+                    "permanecer em call."
+                ),
+            )
+
+        except (
+            discord.NotFound,
+            discord.Forbidden,
+            discord.HTTPException,
+        ):
+            pass
+
     @commands.command(
         name="calado",
         aliases=(
@@ -259,7 +312,8 @@ class Moderacao(commands.Cog):
             "categoria": "Moderação",
             "uso": ",calado @membro 1h",
             "descricao": (
-                "Impede mensagens durante o tempo informado."
+                "Impede mensagens durante "
+                "o tempo informado."
             ),
         },
     )
@@ -269,6 +323,7 @@ class Moderacao(commands.Cog):
     )
     @commands.bot_has_permissions(
         manage_messages=True,
+        move_members=True,
     )
     async def calado(
         self,
@@ -341,6 +396,23 @@ class Moderacao(commands.Cog):
         )[membro.id] = (
             time.time() + segundos
         )
+
+        if membro.voice is not None:
+            try:
+                await membro.move_to(
+                    None,
+                    reason=(
+                        "Membro calado removido "
+                        "da call."
+                    ),
+                )
+
+            except (
+                discord.NotFound,
+                discord.Forbidden,
+                discord.HTTPException,
+            ):
+                pass
 
         await responder(
             ctx,
@@ -440,7 +512,9 @@ class Moderacao(commands.Cog):
 
         try:
             await membro.ban(
-                reason=f"{ctx.author} — {motivo}",
+                reason=(
+                    f"{ctx.author} — {motivo}"
+                ),
                 delete_message_seconds=86400,
             )
 
@@ -552,7 +626,9 @@ class Moderacao(commands.Cog):
 
         try:
             await membro.kick(
-                reason=f"{ctx.author} — {motivo}",
+                reason=(
+                    f"{ctx.author} — {motivo}"
+                ),
             )
 
         except discord.Forbidden:
