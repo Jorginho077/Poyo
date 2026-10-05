@@ -123,14 +123,12 @@ def _open_tickets(guild: discord.Guild, user_id: int) -> list:
     ]
 
 
-# cartao simples
+# cartao simples (container puro, sem barra colorida)
 class Card(discord.ui.LayoutView):
-    def __init__(self, title: str, text: str = "", *extra, color: Optional[int] = None):
+    def __init__(self, title: str, text: str = "", *extra):
         super().__init__(timeout=None)
         body = f"### {title}" + (f"\n{text}" if text else "")
-        self.add_item(
-            discord.ui.Container(discord.ui.TextDisplay(body), *extra, accent_colour=color)
-        )
+        self.add_item(discord.ui.Container(discord.ui.TextDisplay(body), *extra))
 
 
 def _quote(text, limit):
@@ -174,19 +172,26 @@ def build_ticket_view(data, ping=""):
         TicketButtonsRow(claimed=bool(claimed)),
         AddMemberRow(),
         discord.ui.TextDisplay("-# Use o menu acima para chamar mais alguém para este ticket."),
-        accent_colour=t["color"],
     )
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(container)
     return view
 
 
-# painel com os botoes
-def build_panel_view():
-    lines = []
-    for t in TYPES.values():
-        lines.append(f"{t['emoji']}  **{t['label']}** — {t['hint']}")
+# botao de abrir ticket (fica ao lado de cada categoria)
+class NewTicketButton(discord.ui.Button):
+    def __init__(self, tipo: str):
+        super().__init__(
+            label="Abrir", style=TYPES[tipo]["style"], custom_id=f"tk:new:{tipo}"
+        )
+        self.tipo = tipo
 
+    async def callback(self, interaction: discord.Interaction):
+        await _start(interaction, self.tipo)
+
+
+# painel: um container so, cada categoria com seu botao ao lado
+def build_panel_view():
     children = []
     if BANNER_URL:
         children.append(discord.ui.MediaGallery(discord.MediaGalleryItem(BANNER_URL)))
@@ -194,21 +199,27 @@ def build_panel_view():
         discord.ui.TextDisplay(
             "# 🎫 Central de Atendimento\n"
             "Precisa de ajuda, quer denunciar algo ou fechar uma parceria?\n"
-            "Escolha uma opção abaixo e abra um atendimento **privado** com a nossa equipe."
+            "Escolha uma categoria e abra um atendimento **privado** com a nossa equipe."
         ),
         discord.ui.Separator(),
-        discord.ui.TextDisplay("### Como funciona\n" + "\n".join(lines)),
+    ]
+    for tipo, t in TYPES.items():
+        children.append(
+            discord.ui.Section(
+                f"### {t['emoji']} {t['label']}\n-# {t['hint']}",
+                accessory=NewTicketButton(tipo),
+            )
+        )
+    children += [
         discord.ui.Separator(),
         discord.ui.TextDisplay(
             "🔒  Só você e a Staff enxergam o ticket\n"
             "📄  Ao fechar, a transcrição chega na sua DM (se estiver aberta)"
         ),
-        discord.ui.Separator(spacing=discord.SeparatorSpacing.large, visible=False),
-        PanelRow(),
         discord.ui.TextDisplay("-# Um ticket por pessoa · não abra tickets à toa"),
     ]
     view = discord.ui.LayoutView(timeout=None)
-    view.add_item(discord.ui.Container(*children, accent_colour=0x5865F2))
+    view.add_item(discord.ui.Container(*children))
     return view
 
 
@@ -244,30 +255,11 @@ async def _start(interaction, tipo):
             view=Card(
                 "Você já tem um ticket aberto",
                 f"Continue por aqui: {existing[0].mention}",
-                color=TYPES["denuncia"]["color"],
             ),
             ephemeral=True,
         )
         return
     await interaction.response.send_modal(TicketModal(tipo))
-
-
-class PanelRow(discord.ui.ActionRow):
-    @discord.ui.button(label="Suporte", emoji="🛠️", style=TYPES["suporte"]["style"], custom_id="tk:new:suporte")
-    async def suporte(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _start(interaction, "suporte")
-
-    @discord.ui.button(label="Denúncia", emoji="🚨", style=TYPES["denuncia"]["style"], custom_id="tk:new:denuncia")
-    async def denuncia(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _start(interaction, "denuncia")
-
-    @discord.ui.button(label="Parceria", emoji="🤝", style=TYPES["parceria"]["style"], custom_id="tk:new:parceria")
-    async def parceria(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _start(interaction, "parceria")
-
-    @discord.ui.button(label="Outros", emoji="💬", style=TYPES["outros"]["style"], custom_id="tk:new:outros")
-    async def outros(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _start(interaction, "outros")
 
 
 async def create_ticket(interaction: discord.Interaction, tipo: str, assunto: str, descricao: str):
@@ -335,7 +327,6 @@ async def create_ticket(interaction: discord.Interaction, tipo: str, assunto: st
             "Ticket criado! ✅",
             "Já pode falar com a nossa equipe.",
             discord.ui.ActionRow(discord.ui.Button(label="Ir para o ticket", url=channel.jump_url)),
-            color=t["color"],
         ),
         ephemeral=True,
     )
@@ -368,7 +359,6 @@ class TicketButtonsRow(discord.ui.ActionRow):
             )
             return
         data["claimed"] = interaction.user.id
-        # print(data)
         _save()
         await interaction.response.edit_message(view=build_ticket_view(data))
         await interaction.followup.send(
@@ -441,7 +431,6 @@ class ConfirmCloseView(discord.ui.LayoutView):
                     "O canal será apagado e a transcrição da conversa será enviada."
                 ),
                 ConfirmCloseRow(),
-                accent_colour=TYPES["denuncia"]["color"],
             )
         )
 
@@ -505,7 +494,6 @@ async def close_ticket(channel, closer):
             view=Card(
                 "🔒 Ticket fechado",
                 f"Fechado por {closer.mention}. Este canal será apagado em **{CLOSE_DELAY} segundos**.",
-                color=TYPES["denuncia"]["color"],
             ),
             allowed_mentions=NO_MENTIONS,
         )
