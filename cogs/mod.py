@@ -25,10 +25,8 @@ UNIDADES = {
 
 TEMPO_DAS_RESPOSTAS = 25
 
-
 EMOJI_INICIO = "<:axolote:1556443018557661234>"
 EMOJI_FINAL = "<a:emoji_481:1556442987691647068>"
-
 
 BANNER_URL = (
     "https://cdn.discordapp.com/attachments/"
@@ -89,10 +87,7 @@ def formatar_duracao(
 
 
 class Cartao(discord.ui.LayoutView):
-    """
-    Container V2 com banner dentro,
-    título no meio e banner abaixo.
-    """
+    """Container V2 com banner, texto e banner."""
 
     def __init__(
         self,
@@ -162,8 +157,8 @@ class Moderacao(commands.Cog):
         ctx: commands.Context,
     ) -> bool:
         """
-        Impede qualquer membro calado de usar
-        comandos do Poyo, inclusive administradores.
+        Impede membros calados de usar
+        qualquer comando do Poyo.
         """
 
         if ctx.guild is None:
@@ -201,7 +196,7 @@ class Moderacao(commands.Cog):
         message: discord.Message,
     ) -> None:
         """
-        Apaga todas as mensagens de membros calados.
+        Apaga mensagens de membros calados.
         """
 
         if message.guild is None:
@@ -254,8 +249,8 @@ class Moderacao(commands.Cog):
         depois: discord.VoiceState,
     ) -> None:
         """
-        Remove da call quem estiver calado.
-        Se tentar entrar novamente, será removido.
+        Remove membros calados da call.
+        Também impede que entrem novamente.
         """
 
         guild_calados = self.calados.get(
