@@ -31,11 +31,8 @@ TEMPO_DAS_RESPOSTAS = 25
 
 class Cartao(discord.ui.LayoutView):
     """
-    Container V2 com os banners dentro:
-
-    Banner
-    Texto
-    Banner
+    Container V2 com banner dentro,
+    título no centro e banner abaixo.
     """
 
     def __init__(
@@ -100,8 +97,8 @@ class BotModeracao(commands.Bot):
 
     async def setup_hook(self) -> None:
         """
-        Carrega automaticamente todos os arquivos
-        Python dentro da pasta cogs.
+        Carrega automaticamente todas as cogs
+        encontradas dentro da pasta cogs.
         """
 
         import cogs
@@ -176,11 +173,6 @@ bot = BotModeracao()
 async def comandos(
     ctx: commands.Context,
 ) -> None:
-    """
-    Mostra automaticamente todos os comandos
-    encontrados nas cogs carregadas.
-    """
-
     blocos = [
         (
             "## Comandos\n\n"
@@ -274,17 +266,12 @@ async def on_command_error(
     error: commands.CommandError,
 ) -> None:
     """
-    Trata erros dos comandos.
+    Trata erros de todos os comandos.
 
-    Usuários sem permissão têm a mensagem
-    apagada silenciosamente.
+    Se o usuário não tiver permissão,
+    a mensagem dele é apagada e o bot
+    não envia nenhuma resposta.
     """
-
-    if hasattr(
-        ctx.command,
-        "on_error",
-    ):
-        return
 
     erro = getattr(
         error,
@@ -292,18 +279,20 @@ async def on_command_error(
         error,
     )
 
-    # Comando inexistente: não responde.
     if isinstance(
         erro,
         commands.CommandNotFound,
     ):
         return
 
-    # Usuário sem permissão:
-    # apaga a mensagem e não envia container.
     if isinstance(
         erro,
-        commands.MissingPermissions,
+        (
+            commands.MissingPermissions,
+            commands.MissingRole,
+            commands.MissingAnyRole,
+            commands.NotOwner,
+        ),
     ):
         try:
             await ctx.message.delete()
