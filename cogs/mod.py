@@ -323,7 +323,6 @@ class Moderacao(commands.Cog):
     )
     @commands.bot_has_permissions(
         manage_messages=True,
-        move_members=True,
     )
     async def calado(
         self,
@@ -412,7 +411,13 @@ class Moderacao(commands.Cog):
                 discord.Forbidden,
                 discord.HTTPException,
             ):
-                pass
+                await responder(
+                    ctx,
+                    "Call não removida",
+                    "Dê ao Poyo `Mover membros` nesta call.",
+                )
+
+                return
 
         await responder(
             ctx,
