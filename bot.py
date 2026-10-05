@@ -13,10 +13,10 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 PREFIXO = ","
 
+TEMPO_DAS_RESPOSTAS = 25
 
 EMOJI_INICIO = "<:axolote:1556443018557661234>"
 EMOJI_FINAL = "<a:emoji_481:1556442987691647068>"
-
 
 BANNER_URL = (
     "https://cdn.discordapp.com/attachments/"
@@ -27,22 +27,11 @@ BANNER_URL = (
 )
 
 
-TEMPO_DAS_RESPOSTAS = 25
-
-
 class Cartao(discord.ui.LayoutView):
-    """
-    Container V2 com banner dentro,
-    título no meio e banner abaixo.
-    """
+    """Container V2 com banner, texto e banner."""
 
-    def __init__(
-        self,
-        *blocos: str,
-    ) -> None:
-        super().__init__(
-            timeout=None
-        )
+    def __init__(self, *blocos: str) -> None:
+        super().__init__(timeout=None)
 
         blocos = list(blocos)
 
@@ -55,9 +44,7 @@ class Cartao(discord.ui.LayoutView):
 
         componentes = [
             discord.ui.MediaGallery(
-                discord.MediaGalleryItem(
-                    BANNER_URL
-                )
+                discord.MediaGalleryItem(BANNER_URL)
             )
         ]
 
@@ -68,25 +55,21 @@ class Cartao(discord.ui.LayoutView):
 
         componentes.append(
             discord.ui.MediaGallery(
-                discord.MediaGalleryItem(
-                    BANNER_URL
-                )
+                discord.MediaGalleryItem(BANNER_URL)
             )
         )
 
         self.add_item(
-            discord.ui.Container(
-                *componentes
-            )
+            discord.ui.Container(*componentes)
         )
 
 
 class BotModeracao(commands.Bot):
     def __init__(self) -> None:
         intents = discord.Intents.default()
-
         intents.message_content = True
         intents.members = True
+        intents.voice_states = True
 
         super().__init__(
             command_prefix=PREFIXO,
@@ -97,17 +80,12 @@ class BotModeracao(commands.Bot):
         )
 
     async def setup_hook(self) -> None:
-        """
-        Carrega automaticamente todos os arquivos
-        Python dentro da pasta cogs.
-        """
+        """Carrega automaticamente todas as cogs da pasta cogs."""
 
         import cogs
 
         modulos = sorted(
-            pkgutil.iter_modules(
-                cogs.__path__
-            ),
+            pkgutil.iter_modules(cogs.__path__),
             key=lambda item: item.name,
         )
 
@@ -115,13 +93,9 @@ class BotModeracao(commands.Bot):
             if modulo.name.startswith("_"):
                 continue
 
-            nome_da_cog = (
-                f"cogs.{modulo.name}"
-            )
+            nome_da_cog = f"cogs.{modulo.name}"
 
-            await self.load_extension(
-                nome_da_cog
-            )
+            await self.load_extension(nome_da_cog)
 
             print(
                 f"Cog carregada: {nome_da_cog}"
@@ -136,49 +110,49 @@ class BotModeracao(commands.Bot):
         )
 
         print("=" * 50)
-        print(
-            f"Conectado como: {self.user}"
-        )
-        print(
-            f"ID: {self.user.id}"
-        )
-        print(
-            f"Servidores: {len(self.guilds)}"
-        )
-        print(
-            f"Prefixo: {PREFIXO}"
-        )
-        print(
-            "Todas as cogs foram carregadas."
-        )
+        print(f"Conectado como: {self.user}")
+        print(f"ID: {self.user.id}")
+        print(f"Servidores: {len(self.guilds)}")
+        print(f"Prefixo: {PREFIXO}")
+        print("Todas as cogs foram carregadas.")
         print("=" * 50)
 
 
 bot = BotModeracao()
 
 
+@bot.before_invoke
+async def apagar_mensagem_do_comando(
+    ctx: commands.Context,
+) -> None:
+    """
+    Apaga a mensagem original de qualquer comando
+    reconhecido pelo Poyo.
+    """
+
+    try:
+        await ctx.message.delete()
+
+    except (
+        discord.NotFound,
+        discord.Forbidden,
+        discord.HTTPException,
+    ):
+        pass
+
+
 @bot.command(
     name="comandos",
-    aliases=(
-        "ajuda",
-        "help",
-    ),
+    aliases=("ajuda", "help"),
     extras={
         "categoria": "Informações",
         "uso": ",comandos",
-        "descricao": (
-            "Mostra todos os comandos disponíveis."
-        ),
+        "descricao": "Mostra todos os comandos disponíveis.",
     },
 )
 async def comandos(
     ctx: commands.Context,
 ) -> None:
-    """
-    Mostra automaticamente todos os comandos
-    das cogs carregadas.
-    """
-
     blocos = [
         (
             "## Comandos\n\n"
@@ -259,9 +233,7 @@ async def comandos(
     )
 
     await ctx.send(
-        view=Cartao(
-            *blocos
-        ),
+        view=Cartao(*blocos),
         delete_after=TEMPO_DAS_RESPOSTAS,
     )
 
@@ -272,10 +244,11 @@ async def on_command_error(
     error: commands.CommandError,
 ) -> None:
     """
-    Trata os erros dos comandos.
+    Trata erros gerais dos comandos.
 
-    Membros calados têm seus comandos
-    ignorados completamente.
+    Membros calados são ignorados.
+    Usuários sem permissão são apagados
+    sem receber resposta.
     """
 
     if hasattr(
@@ -296,12 +269,9 @@ async def on_command_error(
     ):
         return
 
-    # Membro calado:
-    # não responde e não executa ação.
+    # Membro calado: não responde e não executa ação.
     if ctx.guild is not None:
-        moderacao = bot.get_cog(
-            "Moderacao"
-        )
+        moderacao = bot.get_cog("Moderacao")
 
         if moderacao is not None:
             calados = getattr(
@@ -328,21 +298,18 @@ async def on_command_error(
                     None,
                 )
 
+    # CheckFailure inclui membros calados.
     if isinstance(
         erro,
-        commands.NoPrivateMessage,
+        commands.CheckFailure,
     ):
-        mensagem = (
-            "Use este comando dentro "
-            "de um servidor."
-        )
+        return
 
-    elif isinstance(
+    # Usuário sem permissão: apaga e não responde.
+    if isinstance(
         erro,
         commands.MissingPermissions,
     ):
-        # Usuário sem permissão:
-        # apaga a mensagem e não responde.
         try:
             await ctx.message.delete()
 
@@ -355,12 +322,14 @@ async def on_command_error(
 
         return
 
-    elif isinstance(
+    if isinstance(
         erro,
-        commands.CheckFailure,
+        commands.NoPrivateMessage,
     ):
-        # Inclui comandos de membros calados.
-        return
+        mensagem = (
+            "Use este comando dentro "
+            "de um servidor."
+        )
 
     elif isinstance(
         erro,
@@ -385,8 +354,7 @@ async def on_command_error(
         commands.BadArgument,
     ):
         mensagem = (
-            "Confira a menção, o ID "
-            "ou o tempo informado."
+            "Confira a menção, o ID ou o tempo."
         )
 
     elif isinstance(
