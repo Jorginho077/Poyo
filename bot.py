@@ -31,7 +31,7 @@ TEMPO_DAS_RESPOSTAS = 25
 
 class Cartao(discord.ui.LayoutView):
     """
-    Container V2 com o banner dentro:
+    Container V2 com os banners dentro:
 
     Banner
     Texto
@@ -51,11 +51,7 @@ class Cartao(discord.ui.LayoutView):
         if blocos:
             blocos[0] = (
                 f"{EMOJI_INICIO}  "
-                f"{blocos[0]}"
-            )
-
-            blocos[-1] = (
-                f"{blocos[-1]}\n\n"
+                f"{blocos[0]}  "
                 f"{EMOJI_FINAL}"
             )
 
@@ -104,16 +100,8 @@ class BotModeracao(commands.Bot):
 
     async def setup_hook(self) -> None:
         """
-        Carrega automaticamente todos os arquivos .py
-        encontrados dentro da pasta cogs.
-
-        Exemplos carregados automaticamente:
-
-        cogs/mod.py
-        cogs/geral.py
-        cogs/diversao.py
-        cogs/logs.py
-        cogs/boas_vindas.py
+        Carrega automaticamente todos os arquivos
+        Python dentro da pasta cogs.
         """
 
         import cogs
@@ -126,7 +114,6 @@ class BotModeracao(commands.Bot):
         )
 
         for modulo in modulos:
-            # Ignora __init__.py e arquivos privados.
             if modulo.name.startswith("_"):
                 continue
 
@@ -164,9 +151,6 @@ class BotModeracao(commands.Bot):
             f"Prefixo: {PREFIXO}"
         )
         print(
-            "Components V2 ativado."
-        )
-        print(
             "Todas as cogs foram carregadas."
         )
         print("=" * 50)
@@ -185,7 +169,7 @@ bot = BotModeracao()
         "categoria": "Informações",
         "uso": ",comandos",
         "descricao": (
-            "Mostra os comandos disponíveis."
+            "Mostra todos os comandos disponíveis."
         ),
     },
 )
@@ -199,8 +183,8 @@ async def comandos(
 
     blocos = [
         (
-            "## Central de comandos\n\n"
-            "Confira os comandos disponíveis."
+            "## Comandos\n\n"
+            "Use um dos comandos abaixo."
         )
     ]
 
@@ -273,7 +257,7 @@ async def comandos(
         )
 
     blocos.append(
-        "-# As respostas somem em 25 segundos."
+        "-# Respostas somem em 25 segundos."
     )
 
     await ctx.send(
@@ -290,7 +274,10 @@ async def on_command_error(
     error: commands.CommandError,
 ) -> None:
     """
-    Mostra os erros usando Components V2.
+    Trata erros dos comandos.
+
+    Usuários sem permissão têm a mensagem
+    apagada silenciosamente.
     """
 
     if hasattr(
@@ -305,10 +292,29 @@ async def on_command_error(
         error,
     )
 
+    # Comando inexistente: não responde.
     if isinstance(
         erro,
         commands.CommandNotFound,
     ):
+        return
+
+    # Usuário sem permissão:
+    # apaga a mensagem e não envia container.
+    if isinstance(
+        erro,
+        commands.MissingPermissions,
+    ):
+        try:
+            await ctx.message.delete()
+
+        except (
+            discord.NotFound,
+            discord.Forbidden,
+            discord.HTTPException,
+        ):
+            pass
+
         return
 
     if isinstance(
@@ -316,16 +322,7 @@ async def on_command_error(
         commands.NoPrivateMessage,
     ):
         mensagem = (
-            "Esse comando só pode ser usado "
-            "dentro de um servidor."
-        )
-
-    elif isinstance(
-        erro,
-        commands.MissingPermissions,
-    ):
-        mensagem = (
-            "Você não possui a permissão necessária."
+            "Use este comando dentro de um servidor."
         )
 
     elif isinstance(
@@ -333,7 +330,7 @@ async def on_command_error(
         commands.BotMissingPermissions,
     ):
         mensagem = (
-            "Eu não possuo as permissões necessárias."
+            "Eu não tenho as permissões necessárias."
         )
 
     elif isinstance(
@@ -341,7 +338,8 @@ async def on_command_error(
         commands.MissingRequiredArgument,
     ):
         mensagem = (
-            f"Está faltando `{erro.param.name}`.\n\n"
+            f"Está faltando "
+            f"`{erro.param.name}`.\n\n"
             f"Use `{PREFIXO}comandos`."
         )
 
@@ -350,7 +348,7 @@ async def on_command_error(
         commands.BadArgument,
     ):
         mensagem = (
-            "Confira a menção, o ID ou o tempo informado."
+            "Confira a menção, o ID ou o tempo."
         )
 
     elif isinstance(
@@ -358,7 +356,8 @@ async def on_command_error(
         commands.CommandOnCooldown,
     ):
         mensagem = (
-            f"Aguarde {erro.retry_after:.1f} segundos."
+            f"Aguarde "
+            f"{erro.retry_after:.1f} segundos."
         )
 
     else:
