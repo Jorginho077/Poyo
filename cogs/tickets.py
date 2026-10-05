@@ -54,7 +54,7 @@ def _read_json(path: Path) -> dict:
 
 
 def _write_json(path: Path, data: dict):
-    # escreve num arquivo temporario e troca, pra nao corromper se cair no meio
+    # escreve num arquivo temporario e troca pra nao corromper se cair no meio
     tmp = path.with_name(path.name + ".tmp")
     try:
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -78,7 +78,7 @@ COLOR_NAMES = {
     "preto": 0x000000, "branco": 0xFFFFFF,
 }
 
-# campos de uma categoria (o que faltar no arquivo cai aqui)
+# campos de uma categoria (o que falatr no arquivo cai aqui)
 CAT_BLANK = {
     "emoji": "💬", "label": "Categoria", "hint": "", "botao": "cinza",
     "cor": None, "staff": None, "categoria": None, "boasvindas": None,
@@ -115,7 +115,7 @@ DEFAULTS = {
             "-# 📄  Ao fechar, a transcrição chega na sua DM (se estiver aberta)"
         ),
         "rodape": "Um ticket por pessoa · não abra tickets à toa",
-        # None = banner padrao do bot · "" = sem banner · link = imagem propria
+        # none = banenr padrao do bot · "" = sem banner · link = imagem propria
         "banner": os.getenv("TICKET_BANNER_URL", "").strip() or None,
         "cor": None,
         "modo": "botoes",          # botoes | menu
@@ -133,13 +133,13 @@ DEFAULTS = {
     "modal": {"assunto": "Assunto", "detalhes": "Detalhes"},
     "staff": os.getenv("TICKET_STAFF_ROLE", "Staff"),   # id do cargo ou nome
     "log": os.getenv("TICKET_LOG_CHANNEL", "chat-staff"),  # id do canal ou pedaco do nome
-    "categoria": None,         # categoria do discord onde os tickets nascem
+    "categoria": None,         # categoria do discord onde os ticets nascem
     "limite": max(1, _env_int("TICKET_MAX_PER_USER", 1)),
     "delay": 10,               # segundos ate apagar o canal
     "transcricao_dm": True,
     "transcricao_log": True,
     "categorias": CAT_DEFAULTS,
-    "paineis": [],             # [[canal, mensagem], ...] pra atualizar sozinho
+    "paineis": [],             # [[canal mensagem] ] pra atualizar sozinho
 }
 
 MAX_CATEGORIAS = 10
@@ -191,12 +191,12 @@ def _cats_over(guild_id) -> dict:
 
 
 def cat_of(cfg, tipo) -> dict:
-    # categoria apagada: tickets antigos continuam funcionando
+    # categoria apagada: tickets antgios continam funcionando
     return cfg["categorias"].get(tipo) or {**CAT_BLANK, "label": str(tipo).title()}
 
 
 def _ui_emoji(e: str):
-    # so devolve emoji valido pro Discord (custom ou unicode); texto comum vira None
+    # so devolve emoji valido pro discord (custom ou unicode) texto comum vira none
     e = (e or "").strip()
     if re.fullmatch(r"<a?:\w+:\d{13,20}>", e):
         return discord.PartialEmoji.from_str(e)
@@ -297,7 +297,7 @@ def _open_tickets(guild: discord.Guild, user_id: int) -> list:
 
 # ---------------------------------------------------------------- visual
 
-# cartao simples (container puro, sem barra colorida)
+# cartao simples (container puro sem barra colorida)
 class Card(discord.ui.LayoutView):
     def __init__(self, title: str, text: str = "", *extra):
         super().__init__(timeout=None)
@@ -357,8 +357,8 @@ def build_ticket_view(data, cfg, ping=""):
     return view
 
 
-# botao de abrir ticket. o id leva o nome da categoria, entao funciona
-# em qualquer painel e continua valendo depois de reiniciar
+# botao de abrir ticket o id leva o nome da categoria entao funcinoa
+# em qlqr painel e continua valendo dps de reiniciar
 class NewTicketButton(
     discord.ui.DynamicItem[discord.ui.Button],
     template=r"tk:new:(?P<tipo>[a-z0-9_]+)",
@@ -406,7 +406,7 @@ class PanelSelect(discord.ui.Select):
 
 
 def _banner_url(p):
-    # None = banner padrao (anexo) · "" = sem banner · link = imagem propria
+    # none = banner padrao (anexo) · "" = sem banner · link = imagem propria
     if p.get("banner"):
         return p["banner"]
     if p.get("banner") is None and BANNER_FILE.exists():
@@ -420,7 +420,7 @@ def panel_files(cfg) -> list:
     return []
 
 
-# painel: banner, titulo, lista das categorias e os botoes (ou menu) embaixo
+# painel: banner titulo lista das categorias e os botoes (ou menu) embaixo
 def build_panel_view(cfg):
     p = cfg["painel"]
     children = []
@@ -473,7 +473,7 @@ async def post_panel(channel: discord.TextChannel) -> discord.Message:
 
 
 async def refresh_panels(guild: discord.Guild) -> int:
-    # reedita todos os paineis ja postados com a config nova
+    # reedita todos os paineis ja postados com a conifg nova
     cfg = get_cfg(guild.id)
     view_ok, mantidos = 0, []
     for cid, mid in cfg["paineis"]:
@@ -580,7 +580,7 @@ async def create_ticket(interaction: discord.Interaction, tipo: str, assunto: st
             attach_files=True, manage_messages=True,
         )
 
-    # categoria do discord: a da categoria de ticket, depois a geral, depois a do painel
+    # categoria do discord: a da categoria de ticket dps a geral dps a do painel
     parent = None
     for ref in (t.get("categoria"), cfg.get("categoria")):
         found = guild.get_channel(ref) if isinstance(ref, int) else None
@@ -816,7 +816,7 @@ async def close_ticket(channel, closer):
         log.warning("nao consegui apagar o ticket %s: %s", channel.name, e)
 
 
-# botoes continuam depois de reiniciar
+# botoes continuam dps de reiniciar
 def register_views(client):
     client.add_dynamic_items(NewTicketButton)
     seletor = discord.ui.LayoutView(timeout=None)
@@ -837,7 +837,7 @@ NONE_WORDS = {"nenhum", "nenhuma", "vazio", "remover", "-"}
 TRUE_WORDS = {"sim", "s", "on", "true", "1", "ligar", "ligado", "ativar"}
 FALSE_WORDS = {"nao", "não", "n", "off", "false", "0", "desligar", "desligado", "desativar"}
 
-# chave: (caminho, tipo, limite, pode_ficar_vazio, descricao)
+# chave: (caminho tipo limite pode_ficar_vazio descricao)
 SETTINGS = {
     "titulo": (("painel", "titulo"), "texto", 100, True, "título do painel"),
     "descricao": (("painel", "descricao"), "texto", 1000, True, "texto de abertura do painel"),
@@ -862,7 +862,7 @@ SETTINGS = {
     "transcricao_log": (("transcricao_log",), "bool", None, False, "enviar transcrição pro canal de log"),
 }
 
-# campos de categoria: nome do comando -> (campo salvo, tipo, limite, vazio?)
+# campos de categoria: nome do comando -> (campo salvo tipo limite vazio)
 CAT_FIELDS = {
     "emoji": ("emoji", "texto", 40, False),
     "nome": ("label", "texto", 30, False),
@@ -982,37 +982,6 @@ def _show(guild, key, cfg) -> str:
     return f"`{_short(v)}`"
 
 
-def _config_summary(guild, cfg) -> list:
-    """textos do resumo da configuracao: painel, ticket, geral e categorias"""
-    def block(title, keys):
-        rows = [f"**{k}**  {_show(guild, k, cfg)}" for k in keys]
-        return f"### {title}\n" + "\n".join(rows)
-
-    cats = []
-    for key, c in cfg["categorias"].items():
-        extra = []
-        if c.get("staff"):
-            r = _role(guild, c["staff"])
-            extra.append(f"cargo {r.mention if r else c['staff']}")
-        if c.get("categoria"):
-            ch = guild.get_channel(c["categoria"])
-            extra.append(f"em {ch.mention if ch else c['categoria']}")
-        if c.get("cor"):
-            extra.append(f"barra `#{c['cor']:06X}`")
-        cats.append(
-            f"{c['emoji']} **{c['label']}**  `{key}` · botão {c['botao']}"
-            + (f" · {' · '.join(extra)}" if extra else "")
-        )
-
-    return [
-        block("Painel", ["modo", "titulo", "descricao", "info", "rodape", "banner", "cor", "botao"]),
-        block("Dentro do ticket", ["boasvindas", "rodape_ticket", "cor_ticket", "nome_canal",
-                                   "campo_assunto", "campo_detalhes"]),
-        block("Geral", ["staff", "log", "categoria", "limite", "delay", "transcricao_dm", "transcricao_log"]),
-        "### Categorias\n" + "\n".join(cats),
-    ]
-
-
 HELP_1 = (
     "## ⚙️ Como configurar\n"
     "**Pelos botões:** use `,ticketconfig` (sem nada depois) e clique.\n"
@@ -1070,15 +1039,15 @@ LABELS = {
     "delay": "Segundos até apagar (0 a 60)",
 }
 
-# janelas de edicao: nome -> (titulo, opcoes de SETTINGS). o Discord aceita 5 campos por janela
+# cada janela tem no max 5 campos (limite do discord)
 MODALS = {
     "painel": ("📋 Textos do painel", ["titulo", "descricao", "info", "rodape", "banner"]),
-    "ticket": ("🎟️ Dentro do ticket", ["boasvindas", "rodape_ticket", "nome_canal", "campo_assunto", "campo_detalhes"]),
-    "visual": ("🎨 Cores e botões", ["cor", "cor_ticket", "botao"]),
-    "regras": ("⚖️ Regras", ["limite", "delay"]),
+    "painelvisual": ("🎨 Cor e botões do painel", ["cor", "botao"]),
+    "ticket": ("🎟️ Mensagens do ticket", ["boasvindas", "rodape_ticket", "nome_canal", "campo_assunto", "campo_detalhes"]),
+    "ticketregras": ("⚖️ Regras e cor do ticket", ["limite", "delay", "cor_ticket"]),
 }
 
-# o que muda a cara do painel postado (so isso precisa reeditar os paineis)
+# so essas mudam a cara do painel postado
 PANEL_KEYS = {"titulo", "descricao", "info", "rodape", "banner", "cor", "modo", "botao"}
 
 STYLE_ICONS = {"azul": "🔵", "cinza": "⚪", "verde": "🟢", "vermelho": "🔴"}
@@ -1091,15 +1060,12 @@ CAT_LABELS = {
     "boasvindas": "Boas-vindas só desta categoria",
 }
 
-
-def _dig(cfg, path):
-    for k in path:
-        cfg = cfg[k]
-    return cfg
+sep = discord.ui.Separator   # atalho pq eu uso mt
 
 
-def _hex(v) -> str:
-    return f"#{v:06X}" if isinstance(v, int) else ""
+def _sec(titulo, sub=""):
+    # titulo de cada parte da tela
+    return discord.ui.TextDisplay(f"### {titulo}" + (f"\n-# {sub}" if sub else ""))
 
 
 def _modal_default(key, cfg) -> str:
@@ -1110,6 +1076,16 @@ def _modal_default(key, cfg) -> str:
     if kind == "cor":
         return _hex(v)
     return "" if v is None else str(v)
+
+
+def _hex(v) -> str:
+    return f"#{v:06X}" if isinstance(v, int) else ""
+
+
+def _dig(cfg, path):
+    for k in path:
+        cfg = cfg[k]
+    return cfg
 
 
 def _cat_set(guild_id, key, field, value):
@@ -1140,7 +1116,7 @@ async def _erro_card(interaction, title, text=""):
         await interaction.response.send_message(view=card, ephemeral=True)
 
 
-# itens que chamam uma funcao: fn(interaction, item)
+# itens q chamam uma funcao qlqr fn(interaction item)
 class _Fn:
     def __init__(self, fn, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -1166,9 +1142,8 @@ class _ChanSel(_Fn, discord.ui.ChannelSelect):
     pass
 
 
+# janela generica serve pra varias opcoes do settings
 class SettingsModal(discord.ui.Modal):
-    """janela generica pra editar varias opcoes de SETTINGS de uma vez"""
-
     def __init__(self, painel, title, keys):
         super().__init__(title=title[:45])
         self.painel = painel
@@ -1197,6 +1172,7 @@ class SettingsModal(discord.ui.Modal):
                 if not vazio:
                     erros.append(f"**{LABELS[k]}**: não pode ficar vazio.")
                     continue
+                # vazio no banner = padrao vazio na cor = sem cor
                 raw = {"url": "padrao", "cor": "nenhum"}.get(kind, raw)
             valor, erro = await parse_value(None, kind, raw, limit, vazio)
             if erro:
@@ -1204,6 +1180,7 @@ class SettingsModal(discord.ui.Modal):
             else:
                 valores[k] = valor
         if erros:
+            # se um campo ta errado nao salva nenhum
             await _erro_card(interaction, "Nada foi salvo", "\n".join(erros))
             return
         for k, v in valores.items():
@@ -1215,13 +1192,13 @@ class SettingsModal(discord.ui.Modal):
         await _erro_card(interaction, "Algo deu errado", "Tente de novo.")
 
 
+# editar uma categoria (emoji nome dica cor boasvindas)
 class CatEditModal(discord.ui.Modal):
-    """edita emoji, nome, dica, cor e boas-vindas de uma categoria"""
-
     def __init__(self, painel, key):
         super().__init__(title="✏️ Editar categoria")
         self.painel, self.key = painel, key
         c = get_cfg(painel.guild.id)["categorias"][key]
+        # campo valor atual tamanho max pode ficar vazio paragrafo
         specs = (
             ("emoji", c["emoji"], 40, False, False),
             ("nome", c["label"], 30, False, False),
@@ -1298,9 +1275,8 @@ class NewCatModal(discord.ui.Modal):
         await _erro_card(interaction, "Algo deu errado", "Tente de novo.")
 
 
+# a tela principal toda so quem abriu mexe
 class ConfigView(discord.ui.LayoutView):
-    """painel de configuracao com botoes. so quem abriu consegue mexer"""
-
     def __init__(self, author_id: int, guild: discord.Guild, page=("home",)):
         super().__init__(timeout=600)
         self.author_id, self.guild = author_id, guild
@@ -1311,8 +1287,6 @@ class ConfigView(discord.ui.LayoutView):
     async def open(cls, ctx, page=("home",)):
         view = cls(ctx.author.id, ctx.guild, page)
         view.sent = await ctx.send(view=view)
-
-    # ---- infraestrutura
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -1328,6 +1302,7 @@ class ConfigView(discord.ui.LayoutView):
         return True
 
     async def on_timeout(self):
+        # desliga os botoes qnd expira
         if self.sent is None:
             return
         for item in self.walk_children():
@@ -1342,8 +1317,8 @@ class ConfigView(discord.ui.LayoutView):
         log.exception("erro no painel de config", exc_info=error)
         await _erro_card(interaction, "Algo deu errado", "Tente de novo.")
 
+    # redesenha a tela refresh=true reedita os paineis postados tambem
     async def update(self, interaction, notice="", refresh=False, vazio=""):
-        """redesenha o painel. refresh=True reedita tambem os paineis de ticket ja postados"""
         if refresh:
             if not interaction.response.is_done():
                 await interaction.response.defer()
@@ -1362,7 +1337,7 @@ class ConfigView(discord.ui.LayoutView):
 
     def render(self):
         cfg = get_cfg(self.guild.id)
-        # categoria apagada enquanto o painel estava aberto
+        # categoria foi apagada com o painel aberto
         if self.page[0] in ("cat", "delcat") and self.page[1] not in cfg["categorias"]:
             self.page = ("cats",)
         children = getattr(self, f"_page_{self.page[0]}")(cfg)
@@ -1371,7 +1346,7 @@ class ConfigView(discord.ui.LayoutView):
         self.clear_items()
         self.add_item(discord.ui.Container(*children))
 
-    # ---- atalhos pra montar itens
+    # ---- coisinhas pra montar os itens
 
     def _btn(self, label, fn, style=discord.ButtonStyle.secondary, emoji=None, disabled=False):
         return _Btn(fn, label=label[:80], style=style, emoji=emoji, disabled=disabled)
@@ -1396,11 +1371,11 @@ class ConfigView(discord.ui.LayoutView):
             await self.update(interaction, "✅ Salvo", refresh=path == ("painel", "modo"))
         return h
 
-    def _pick(self, path, refresh=False):
-        # seletor de cargo/canal: guarda o id escolhido
+    def _pick(self, path):
+        # sletor de cargo ou canal salva o id
         async def h(interaction, item):
             set_path(self.guild.id, path, item.values[0].id)
-            await self.update(interaction, "✅ Salvo", refresh=refresh)
+            await self.update(interaction, "✅ Salvo")
         return h
 
     def _clear(self, path):
@@ -1409,84 +1384,118 @@ class ConfigView(discord.ui.LayoutView):
             await self.update(interaction, "✅ Removido")
         return h
 
-    # ---- paginas
-
-    def _page_home(self, cfg):
-        painel_t, ticket_t, geral_t, cats_t = _config_summary(self.guild, cfg)
-        menu = cfg["painel"]["modo"] == "menu"
-        sim = discord.ButtonStyle.success
-        nao = discord.ButtonStyle.secondary
-        dm, lg = cfg["transcricao_dm"], cfg["transcricao_log"]
-        sep = discord.ui.Separator
-        return [
-            discord.ui.TextDisplay(
-                "## ⚙️ Configuração dos tickets\n"
-                "-# Edite pelos botões. Tudo é salvo na hora e os painéis postados se atualizam sozinhos."
-            ),
-            sep(),
-            discord.ui.TextDisplay(painel_t),
-            sep(),
-            discord.ui.TextDisplay(ticket_t),
-            sep(),
-            discord.ui.TextDisplay(geral_t),
-            sep(),
-            discord.ui.TextDisplay(cats_t),
-            sep(),
-            discord.ui.ActionRow(
-                self._btn("Painel", self._modal("painel"), emoji="📋"),
-                self._btn("Ticket", self._modal("ticket"), emoji="🎟️"),
-                self._btn("Cores", self._modal("visual"), emoji="🎨"),
-                self._btn("Regras", self._modal("regras"), emoji="⚖️"),
-            ),
-            discord.ui.ActionRow(
-                self._btn(f"Painel: {'menu' if menu else 'botões'}", self._toggle(("painel", "modo")),
-                          sim if menu else nao, "🔀"),
-                self._btn(f"DM: {'sim' if dm else 'não'}", self._toggle(("transcricao_dm",)),
-                          sim if dm else nao, "📩"),
-                self._btn(f"Log: {'sim' if lg else 'não'}", self._toggle(("transcricao_log",)),
-                          sim if lg else nao, "📄"),
-            ),
-            discord.ui.ActionRow(
-                self._btn("Equipe e canais", self._goto("geral"), emoji="👥"),
-                self._btn("Categorias", self._goto("cats"), emoji="🗂️"),
-            ),
-            discord.ui.ActionRow(
-                self._btn("Atualizar painéis", self._refresh_all, discord.ButtonStyle.primary, "🔄"),
-                self._btn("Resetar", self._goto("reset"), discord.ButtonStyle.danger, "♻️"),
-            ),
-        ]
-
     async def _refresh_all(self, interaction, item):
         await self.update(interaction, "🔄 Painéis reeditados", refresh=True,
                           vazio=" · nenhum painel postado ainda (use `,painelticket`)")
 
+    # ---- tela inicial, cada parte tem titulo + explicacao + botoes
+
+    def _page_home(self, cfg):
+        g = self.guild
+        menu = cfg["painel"]["modo"] == "menu"
+        dm, lg = cfg["transcricao_dm"], cfg["transcricao_log"]
+        verde, cinza = discord.ButtonStyle.success, discord.ButtonStyle.secondary
+        cats = "\n".join(f"{c['emoji']} **{c['label']}**  `{k}`" for k, c in cfg["categorias"].items())
+
+        return [
+            discord.ui.TextDisplay(
+                "## ⚙️ Central de configuração\n"
+                "-# clique nos botões de cada parte pra mudar. tudo salva na hora e os painéis se atualizam sozinhos"
+            ),
+            sep(),
+
+            # parte 1
+            _sec("📋 Painel de abertura", "a mensagem onde o pessoal clica pra abrir ticket"),
+            discord.ui.TextDisplay(
+                f"**Modo**  {_show(g, 'modo', cfg)}\n**Título**  {_show(g, 'titulo', cfg)}\n"
+                f"**Banner**  {_show(g, 'banner', cfg)}\n**Cor**  {_show(g, 'cor', cfg)}"
+            ),
+            discord.ui.ActionRow(
+                self._btn("Editar textos", self._modal("painel"), emoji="✏️"),
+                self._btn("Cor e botões", self._modal("painelvisual"), emoji="🎨"),
+                self._btn(f"Modo: {'menu' if menu else 'botões'}", self._toggle(("painel", "modo")),
+                          verde if menu else cinza, "🔀"),
+            ),
+            sep(),
+
+            # parte 2
+            _sec("🎟️ Dentro do ticket", "o que aparece no canal quando alguém abre"),
+            discord.ui.TextDisplay(
+                f"**Boas-vindas**  {_show(g, 'boasvindas', cfg)}\n**Nome do canal**  {_show(g, 'nome_canal', cfg)}\n"
+                f"**Tickets por pessoa**  {_show(g, 'limite', cfg)}\n**Segundos até apagar**  {_show(g, 'delay', cfg)}"
+            ),
+            discord.ui.ActionRow(
+                self._btn("Editar mensagens", self._modal("ticket"), emoji="✏️"),
+                self._btn("Regras e cor", self._modal("ticketregras"), emoji="⚖️"),
+            ),
+            sep(),
+
+            # parte 3
+            _sec("📩 Transcrições", "quando o ticket fecha a conversa vira um .txt, escolha pra onde manda"),
+            discord.ui.ActionRow(
+                self._btn(f"Enviar na DM: {'sim' if dm else 'não'}", self._toggle(("transcricao_dm",)),
+                          verde if dm else cinza, "📩"),
+                self._btn(f"Enviar no log: {'sim' if lg else 'não'}", self._toggle(("transcricao_log",)),
+                          verde if lg else cinza, "📄"),
+            ),
+            sep(),
+
+            # parte 4
+            _sec("👥 Equipe e canais", "quem atende e onde as coisas ficam"),
+            discord.ui.TextDisplay(
+                f"**Cargo**  {_show(g, 'staff', cfg)}\n**Canal das transcrições**  {_show(g, 'log', cfg)}\n"
+                f"**Categoria dos tickets**  {_show(g, 'categoria', cfg)}"
+            ),
+            discord.ui.ActionRow(self._btn("Escolher cargo e canais", self._goto("geral"), emoji="👥")),
+            sep(),
+
+            # parte 5
+            _sec("🗂️ Categorias", "os tipos de ticket (suporte, denúncia...)"),
+            discord.ui.TextDisplay(cats),
+            discord.ui.ActionRow(self._btn("Gerenciar categorias", self._goto("cats"), emoji="🗂️")),
+            sep(),
+
+            # parte 6
+            _sec("🔧 Manutenção"),
+            discord.ui.ActionRow(
+                self._btn("Atualizar painéis", self._refresh_all, discord.ButtonStyle.primary, "🔄"),
+                self._btn("Resetar tudo", self._goto("reset"), discord.ButtonStyle.danger, "♻️"),
+            ),
+        ]
+
+    # ---- cargo e canais
+
     def _page_geral(self, cfg):
         g = self.guild
         return [
-            discord.ui.TextDisplay(
-                "## 👥 Equipe e canais\n"
-                f"**Cargo da equipe**  {_show(g, 'staff', cfg)}\n"
-                f"**Canal das transcrições**  {_show(g, 'log', cfg)}\n"
-                f"**Categoria dos tickets**  {_show(g, 'categoria', cfg)}\n"
-                "-# Quem tem Administrador ou Gerenciar Mensagens já conta como Staff."
-            ),
-            discord.ui.Separator(),
-            discord.ui.ActionRow(_RoleSel(self._pick(("staff",)), placeholder="Cargo da equipe", min_values=1, max_values=1)),
+            discord.ui.TextDisplay("## 👥 Equipe e canais\n-# escolha nos menus, salva na hora"),
+            sep(),
+
+            _sec("🛡️ Cargo da equipe", f"agora: {_show(g, 'staff', cfg)}  ·  admin e gerenciar mensagens já contam como staff"),
+            discord.ui.ActionRow(_RoleSel(self._pick(("staff",)), placeholder="Escolher o cargo", min_values=1, max_values=1)),
+            discord.ui.ActionRow(self._btn("Tirar cargo", self._clear(("staff",)))),
+            sep(),
+
+            _sec("📄 Canal das transcrições", f"agora: {_show(g, 'log', cfg)}"),
             discord.ui.ActionRow(_ChanSel(
-                self._pick(("log",)), placeholder="Canal das transcrições",
+                self._pick(("log",)), placeholder="Escolher o canal",
                 channel_types=[discord.ChannelType.text], min_values=1, max_values=1,
             )),
+            discord.ui.ActionRow(self._btn("Tirar canal", self._clear(("log",)))),
+            sep(),
+
+            _sec("📁 Categoria do Discord", f"agora: {_show(g, 'categoria', cfg)}  ·  onde os canais de ticket nascem"),
             discord.ui.ActionRow(_ChanSel(
-                self._pick(("categoria",)), placeholder="Categoria do Discord pros tickets",
+                self._pick(("categoria",)), placeholder="Escolher a categoria",
                 channel_types=[discord.ChannelType.category], min_values=1, max_values=1,
             )),
-            discord.ui.ActionRow(
-                self._btn("Voltar", self._goto("home"), emoji="⬅️"),
-                self._btn("Limpar cargo", self._clear(("staff",))),
-                self._btn("Limpar canal", self._clear(("log",))),
-                self._btn("Limpar categoria", self._clear(("categoria",))),
-            ),
+            discord.ui.ActionRow(self._btn("Tirar categoria", self._clear(("categoria",)))),
+            sep(),
+
+            discord.ui.ActionRow(self._btn("Voltar pro início", self._goto("home"), emoji="⬅️")),
         ]
+
+    # ---- lista de categorias
 
     def _page_cats(self, cfg):
         cats = cfg["categorias"]
@@ -1507,16 +1516,23 @@ class ConfigView(discord.ui.LayoutView):
             for k, c in cats.items()
         ]
         return [
-            discord.ui.TextDisplay(
-                f"## 🗂️ Categorias ({len(cats)}/{MAX_CATEGORIAS})\n" + "\n".join(linhas)
-            ),
-            discord.ui.Separator(),
-            discord.ui.ActionRow(_Sel(escolher, placeholder="Escolha uma categoria pra editar", options=opcoes)),
+            discord.ui.TextDisplay(f"## 🗂️ Categorias ({len(cats)}/{MAX_CATEGORIAS})\n" + "\n".join(linhas)),
+            sep(),
+
+            _sec("✏️ Editar uma categoria", "escolha qual no menu"),
+            discord.ui.ActionRow(_Sel(escolher, placeholder="Escolher categoria", options=opcoes)),
+            sep(),
+
+            _sec("➕ Criar categoria", f"máximo de {MAX_CATEGORIAS}"),
             discord.ui.ActionRow(
-                self._btn("Nova categoria", nova, discord.ButtonStyle.success, "➕", disabled=len(cats) >= MAX_CATEGORIAS),
-                self._btn("Voltar", self._goto("home"), emoji="⬅️"),
+                self._btn("Nova categoria", nova, discord.ButtonStyle.success, "➕", disabled=len(cats) >= MAX_CATEGORIAS)
             ),
+            sep(),
+
+            discord.ui.ActionRow(self._btn("Voltar pro início", self._goto("home"), emoji="⬅️")),
         ]
+
+    # ---- uma categoria
 
     def _page_cat(self, cfg):
         key = self.page[1]
@@ -1539,15 +1555,14 @@ class ConfigView(discord.ui.LayoutView):
                 await self.update(interaction, "✅ Ordem alterada", refresh=True)
             return h
 
-        async def limpar(campo, interaction):
-            _cat_set(g.id, key, campo, None)
+        # os dois "tirar" fazem quase a mesma coisa ta dupliacdo msm
+        async def tirar_cargo(interaction, item):
+            _cat_set(g.id, key, "staff", None)
             await self.update(interaction, "✅ Removido")
 
-        async def limpar_cargo(interaction, item):
-            await limpar("staff", interaction)
-
-        async def limpar_cat(interaction, item):
-            await limpar("categoria", interaction)
+        async def tirar_cat(interaction, item):
+            _cat_set(g.id, key, "categoria", None)
+            await self.update(interaction, "✅ Removido")
 
         def escolher(campo):
             async def h(interaction, item):
@@ -1559,33 +1574,44 @@ class ConfigView(discord.ui.LayoutView):
             discord.SelectOption(label=f"Botão {n}", value=n, emoji=STYLE_ICONS[n], default=n == c["botao"])
             for n in BUTTON_STYLES
         ]
+        pos = ordem.index(key)
         return [
             discord.ui.TextDisplay(
                 f"## {c['emoji']} {c['label']}  `{key}`\n"
                 f"**Dica**  {_short(c['hint']) if c.get('hint') else '*(vazio)*'}\n"
-                f"**Botão**  {STYLE_ICONS.get(c['botao'], '')} {c['botao']}\n"
                 f"**Cor da barra**  {'`' + _hex(c['cor']) + '`' if c.get('cor') else '*(padrão)*'}\n"
-                f"**Cargo só desta categoria**  {cargo.mention if cargo else '*(usa o geral)*'}\n"
-                f"**Categoria do Discord**  {cat_dc.mention if cat_dc else '*(usa a geral)*'}\n"
                 f"**Boas-vindas própria**  {_short(c['boasvindas']) if c.get('boasvindas') else '*(usa a geral)*'}"
             ),
-            discord.ui.Separator(),
-            discord.ui.ActionRow(_Sel(estilo, placeholder="Cor do botão", options=estilos)),
+            sep(),
+
+            _sec("🎨 Aparência", "emoji, nome, dica, cor da barra, boas-vindas e a cor do botão"),
+            discord.ui.ActionRow(self._btn("Editar textos e cor da barra", editar, discord.ButtonStyle.primary, "✏️")),
+            discord.ui.ActionRow(_Sel(estilo, placeholder=f"Cor do botão (agora: {c['botao']})", options=estilos)),
+            sep(),
+
+            _sec("👥 Quem atende", f"cargo: {cargo.mention if cargo else '*(usa o geral)*'}  ·  categoria do Discord: {cat_dc.mention if cat_dc else '*(usa a geral)*'}"),
             discord.ui.ActionRow(_RoleSel(escolher("staff"), placeholder="Cargo só desta categoria", min_values=1, max_values=1)),
             discord.ui.ActionRow(_ChanSel(
                 escolher("categoria"), placeholder="Categoria do Discord só desta",
                 channel_types=[discord.ChannelType.category], min_values=1, max_values=1,
             )),
             discord.ui.ActionRow(
-                self._btn("Editar", editar, discord.ButtonStyle.primary, "✏️"),
-                self._btn("", mover(-1), emoji="⬆️", disabled=ordem.index(key) == 0),
-                self._btn("", mover(1), emoji="⬇️", disabled=ordem.index(key) == len(ordem) - 1),
-                self._btn("Apagar", self._goto("delcat", key), discord.ButtonStyle.danger, "🗑️", disabled=len(ordem) <= 1),
-                self._btn("Voltar", self._goto("cats"), emoji="⬅️"),
+                self._btn("Tirar cargo", tirar_cargo),
+                self._btn("Tirar categoria", tirar_cat),
             ),
+            sep(),
+
+            _sec("↕️ Ordem no painel", f"posição {pos + 1} de {len(ordem)}"),
             discord.ui.ActionRow(
-                self._btn("Limpar cargo", limpar_cargo),
-                self._btn("Limpar categoria", limpar_cat),
+                self._btn("Subir", mover(-1), emoji="⬆️", disabled=pos == 0),
+                self._btn("Descer", mover(1), emoji="⬇️", disabled=pos == len(ordem) - 1),
+            ),
+            sep(),
+
+            _sec("⚠️ Outros"),
+            discord.ui.ActionRow(
+                self._btn("Apagar categoria", self._goto("delcat", key), discord.ButtonStyle.danger, "🗑️", disabled=len(ordem) <= 1),
+                self._btn("Voltar", self._goto("cats"), emoji="⬅️"),
             ),
         ]
 
@@ -1607,7 +1633,7 @@ class ConfigView(discord.ui.LayoutView):
                 "Os tickets já abertos dela continuam funcionando."
             ),
             discord.ui.ActionRow(
-                self._btn("Apagar", apagar, discord.ButtonStyle.danger, "🗑️"),
+                self._btn("Sim, apagar", apagar, discord.ButtonStyle.danger, "🗑️"),
                 self._btn("Cancelar", self._goto("cat", key)),
             ),
         ]
@@ -1627,7 +1653,7 @@ class ConfigView(discord.ui.LayoutView):
                 "Os painéis já postados continuam sendo atualizados."
             ),
             discord.ui.ActionRow(
-                self._btn("Resetar tudo", resetar, discord.ButtonStyle.danger, "♻️"),
+                self._btn("Sim, resetar tudo", resetar, discord.ButtonStyle.danger, "♻️"),
                 self._btn("Cancelar", self._goto("home")),
             ),
         ]
@@ -1649,7 +1675,7 @@ class Tickets(commands.Cog):
 
     @commands.Cog.listener()
     async def on_guild_channel_delete(self, channel):
-        # ticket apagado na mao: limpa o registro
+        # ticket apagado na mao: limpa o regisrto
         if state["tickets"].pop(str(channel.id), None) is not None:
             _save()
 
@@ -1728,7 +1754,7 @@ class Tickets(commands.Cog):
         _save_cfg()
         await self._updated(ctx, "Tudo voltou ao padrão")
 
-    # ------------------------------------------------------------ categorias
+    #  categorias
 
     @ticketconfig.group(name="cat", aliases=("categorias", "cats"), invoke_without_command=True)
     async def cfg_cat(self, ctx):
