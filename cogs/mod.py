@@ -90,11 +90,8 @@ def formatar_duracao(
 
 class Cartao(discord.ui.LayoutView):
     """
-    Container V2 com o banner dentro:
-
-    Banner
-    Texto
-    Banner
+    Container V2 com banner dentro,
+    título no meio e banner abaixo.
     """
 
     def __init__(
@@ -147,13 +144,7 @@ async def responder(
 
 
 class Moderacao(commands.Cog):
-    """
-    Comandos de moderação.
-
-    O comando ,calado não usa timeout nativo.
-    As mensagens do membro são apagadas
-    enquanto o tempo estiver ativo.
-    """
+    """Comandos de moderação do servidor."""
 
     def __init__(
         self,
@@ -165,6 +156,27 @@ class Moderacao(commands.Cog):
             int,
             dict[int, float],
         ] = {}
+
+    @staticmethod
+    def _equipe_pode_falar(
+        membro: discord.Member,
+    ) -> bool:
+        """
+        A equipe pode usar os comandos do Poyo
+        mesmo estando calada.
+        """
+
+        permissoes = membro.guild_permissions
+
+        return any(
+            (
+                permissoes.administrator,
+                permissoes.manage_messages,
+                permissoes.manage_channels,
+                permissoes.kick_members,
+                permissoes.ban_members,
+            )
+        )
 
     async def cog_check(
         self,
@@ -182,6 +194,9 @@ class Moderacao(commands.Cog):
     ) -> None:
         """
         Apaga mensagens de membros calados.
+
+        Administradores e moderadores autorizados
+        são ignorados pelo sistema de calado.
         """
 
         if message.guild is None:
@@ -190,30 +205,36 @@ class Moderacao(commands.Cog):
         if message.author.bot:
             return
 
-        guild_id = message.guild.id
-        membro_id = message.author.id
+        if isinstance(
+            message.author,
+            discord.Member,
+        ):
+            if self._equipe_pode_falar(
+                message.author
+            ):
+                return
 
-        calados_do_servidor = self.calados.get(
-            guild_id,
+        guild_calados = self.calados.get(
+            message.guild.id,
             {},
         )
 
-        expiracao = calados_do_servidor.get(
-            membro_id,
+        expiracao = guild_calados.get(
+            message.author.id,
         )
 
         if expiracao is None:
             return
 
         if time.time() >= expiracao:
-            calados_do_servidor.pop(
-                membro_id,
+            guild_calados.pop(
+                message.author.id,
                 None,
             )
 
-            if not calados_do_servidor:
+            if not guild_calados:
                 self.calados.pop(
-                    guild_id,
+                    message.guild.id,
                     None,
                 )
 
@@ -231,7 +252,9 @@ class Moderacao(commands.Cog):
 
     @commands.command(
         name="calado",
-        aliases=("silenciar",),
+        aliases=(
+            "silenciar",
+        ),
         extras={
             "categoria": "Moderação",
             "uso": ",calado @membro 1h",
@@ -315,7 +338,9 @@ class Moderacao(commands.Cog):
         self.calados.setdefault(
             ctx.guild.id,
             {},
-        )[membro.id] = time.time() + segundos
+        )[membro.id] = (
+            time.time() + segundos
+        )
 
         await responder(
             ctx,
@@ -383,7 +408,9 @@ class Moderacao(commands.Cog):
 
     @commands.command(
         name="sai",
-        aliases=("banir",),
+        aliases=(
+            "banir",
+        ),
         extras={
             "categoria": "Moderação",
             "uso": ",sai @membro",
@@ -493,7 +520,9 @@ class Moderacao(commands.Cog):
 
     @commands.command(
         name="expulsar",
-        aliases=("kick",),
+        aliases=(
+            "kick",
+        ),
         extras={
             "categoria": "Moderação",
             "uso": ",expulsar @membro",
@@ -609,7 +638,10 @@ class Moderacao(commands.Cog):
         await ctx.channel.set_permissions(
             ctx.guild.default_role,
             overwrite=permissao,
-            reason=f"Canal trancado por {ctx.author}",
+            reason=(
+                f"Canal trancado por "
+                f"{ctx.author}"
+            ),
         )
 
         await responder(
@@ -646,7 +678,10 @@ class Moderacao(commands.Cog):
         await ctx.channel.set_permissions(
             ctx.guild.default_role,
             overwrite=permissao,
-            reason=f"Canal destrancado por {ctx.author}",
+            reason=(
+                f"Canal destrancado por "
+                f"{ctx.author}"
+            ),
         )
 
         await responder(
@@ -657,7 +692,9 @@ class Moderacao(commands.Cog):
 
     @commands.command(
         name="limpar",
-        aliases=("clear",),
+        aliases=(
+            "clear",
+        ),
         extras={
             "categoria": "Moderação",
             "uso": ",limpar 20",
