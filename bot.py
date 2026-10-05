@@ -1,5 +1,6 @@
 import os
 import pkgutil
+import time
 
 import discord
 from discord.ext import commands
@@ -32,7 +33,7 @@ TEMPO_DAS_RESPOSTAS = 25
 class Cartao(discord.ui.LayoutView):
     """
     Container V2 com banner dentro,
-    título no centro e banner abaixo.
+    título no meio e banner abaixo.
     """
 
     def __init__(
@@ -97,8 +98,8 @@ class BotModeracao(commands.Bot):
 
     async def setup_hook(self) -> None:
         """
-        Carrega automaticamente todas as cogs
-        encontradas dentro da pasta cogs.
+        Carrega automaticamente todos os arquivos
+        Python dentro da pasta cogs.
         """
 
         import cogs
@@ -136,7 +137,7 @@ class BotModeracao(commands.Bot):
 
         print("=" * 50)
         print(
-            f"Bot conectado como: {self.user}"
+            f"Conectado como: {self.user}"
         )
         print(
             f"ID: {self.user.id}"
@@ -173,6 +174,11 @@ bot = BotModeracao()
 async def comandos(
     ctx: commands.Context,
 ) -> None:
+    """
+    Mostra automaticamente todos os comandos
+    das cogs carregadas.
+    """
+
     blocos = [
         (
             "## Comandos\n\n"
@@ -266,12 +272,17 @@ async def on_command_error(
     error: commands.CommandError,
 ) -> None:
     """
-    Trata erros de todos os comandos.
+    Trata os erros dos comandos.
 
-    Se o usuário não tiver permissão,
-    a mensagem dele é apagada e o bot
-    não envia nenhuma resposta.
+    Membros calados têm seus comandos
+    ignorados completamente.
     """
+
+    if hasattr(
+        ctx.command,
+        "on_error",
+    ):
+        return
 
     erro = getattr(
         error,
@@ -285,15 +296,53 @@ async def on_command_error(
     ):
         return
 
+    # Membro calado:
+    # não responde e não executa ação.
+    if ctx.guild is not None:
+        moderacao = bot.get_cog(
+            "Moderacao"
+        )
+
+        if moderacao is not None:
+            calados = getattr(
+                moderacao,
+                "calados",
+                {},
+            )
+
+            guild_calados = calados.get(
+                ctx.guild.id,
+                {},
+            )
+
+            expiracao = guild_calados.get(
+                ctx.author.id,
+            )
+
+            if expiracao is not None:
+                if time.time() < expiracao:
+                    return
+
+                guild_calados.pop(
+                    ctx.author.id,
+                    None,
+                )
+
     if isinstance(
         erro,
-        (
-            commands.MissingPermissions,
-            commands.MissingRole,
-            commands.MissingAnyRole,
-            commands.NotOwner,
-        ),
+        commands.NoPrivateMessage,
     ):
+        mensagem = (
+            "Use este comando dentro "
+            "de um servidor."
+        )
+
+    elif isinstance(
+        erro,
+        commands.MissingPermissions,
+    ):
+        # Usuário sem permissão:
+        # apaga a mensagem e não responde.
         try:
             await ctx.message.delete()
 
@@ -306,13 +355,12 @@ async def on_command_error(
 
         return
 
-    if isinstance(
+    elif isinstance(
         erro,
-        commands.NoPrivateMessage,
+        commands.CheckFailure,
     ):
-        mensagem = (
-            "Use este comando dentro de um servidor."
-        )
+        # Inclui comandos de membros calados.
+        return
 
     elif isinstance(
         erro,
@@ -337,7 +385,8 @@ async def on_command_error(
         commands.BadArgument,
     ):
         mensagem = (
-            "Confira a menção, o ID ou o tempo."
+            "Confira a menção, o ID "
+            "ou o tempo informado."
         )
 
     elif isinstance(
