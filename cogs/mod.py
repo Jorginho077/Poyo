@@ -1,584 +1,245 @@
 from __future__ import annotations
 
-import asyncio
-from dataclasses import dataclass, field
+import os
+import re
+import time
 from typing import Optional
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
+
+DURACAO_RE = re.compile(
+    r"^(?P<valor>[1-9]\d*)(?P<unidade>s|m|h|d|w)$",
+    re.IGNORECASE,
+)
+
+UNIDADES = {
+    "s": 1,
+    "m": 60,
+    "h": 60 * 60,
+    "d": 60 * 60 * 24,
+    "w": 60 * 60 * 24 * 7,
+}
+
+TEMPO_DAS_RESPOSTAS = 25
+LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0") or "0")
 
 EMOJI_INICIO = "<:axolote:1556443018557661234>"
 EMOJI_FINAL = "<a:emoji_481:1556442987691647068>"
 
-EVENTOS_BANNER_URL = (
+MOD_BANNER_URL = (
     'https://cdn.discordapp.com/attachments/1556065837830639676/1557126421896372254/Tumblr_l_67143811701311.gif?backend=b2&ex=6ac6aa7c&is=6ac558fc&hm=05eabefc1e0d8f17b1c9e9afedb11113d956579e45035bfd070c51cdd32150b6&'
 )
 
-EVENTO_IMAGEM_URL = (
-    "https://cdn.discordapp.com/attachments/"
-    "1556264005700423690/1557149918378852484/"
-    "Lucy_Axolotl_JE2.webp?backend=b2&"
-    "ex=6ac6c05e&is=6ac56ede&"
-    "hm=79ac6af16cb1ce9f471e50244988b1a0"
-    "6f5a9fbd37b37380f31be53d5c8df977&"
-)
+
+def analisar_duracao(texto: str) -> Optional[int]:
+    correspondencia = DURACAO_RE.fullmatch(texto.lower().strip())
+    if not correspondencia:
+        return None
+
+    valor = int(correspondencia.group("valor"))
+    unidade = correspondencia.group("unidade").lower()
+    return valor * UNIDADES[unidade]
 
 
-@dataclass
-class Configuracao:
-    autor_id: int
-    guild_id: int
-    cargo: Optional[discord.Role] = None
-    canal: Optional[discord.TextChannel] = None
-    limite: Optional[int] = None
-    texto: Optional[str] = None
-    painel: Optional[discord.Message] = None
+def formatar_duracao(segundos: int) -> str:
+    partes = []
+
+    for nome, divisor in (
+        ("semana", 604800),
+        ("dia", 86400),
+        ("hora", 3600),
+        ("minuto", 60),
+        ("segundo", 1),
+    ):
+        quantidade, segundos = divmod(segundos, divisor)
+        if quantidade:
+            plural = "s" if quantidade != 1 else ""
+            partes.append(f"{quantidade} {nome}{plural}")
+
+    return ", ".join(partes)
 
 
-@dataclass
-class Evento:
-    cargo: discord.Role
-    limite: int
-    ganhadores: set[int] = field(default_factory=set)
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    mensagem: Optional[discord.Message] = None
-    mensagem_personalizada: Optional[discord.Message] = None
+class ModeracaoCartao(discord.ui.LayoutView):
+    """Container V2 com banner dentro, acima e abaixo do texto."""
 
-
-class EventoCartao(discord.ui.LayoutView):
-    def __init__(self, titulo: str, texto: str) -> None:
+    def __init__(self, titulo: str, descricao: str) -> None:
         super().__init__(timeout=None)
+
         self.add_item(
             discord.ui.Container(
                 discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(EVENTOS_BANNER_URL)
+                    discord.MediaGalleryItem(MOD_BANNER_URL)
                 ),
                 discord.ui.TextDisplay(
-                    f"{EMOJI_INICIO}  **{titulo}**  {EMOJI_FINAL}\n\n{texto}"
+                    f"{EMOJI_INICIO}  **{titulo}**  {EMOJI_FINAL}\n\n"
+                    f"{descricao}"
                 ),
                 discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(EVENTOS_BANNER_URL)
+                    discord.MediaGalleryItem(MOD_BANNER_URL)
                 ),
             )
         )
 
 
-class TextoModal(discord.ui.Modal, title="Mensagem do evento"):
-    texto = discord.ui.TextInput(
-        label="Mensagem enviada junto do evento",
-        placeholder="Digite a mensagem do evento.",
-        style=discord.TextStyle.paragraph,
-        max_length=2000,
-        required=True,
+async def responder(
+    ctx: commands.Context,
+    titulo: str,
+    texto: str,
+) -> discord.Message:
+    return await ctx.send(
+        view=ModeracaoCartao(titulo, texto),
+        delete_after=TEMPO_DAS_RESPOSTAS,
     )
 
-    def __init__(self, menu: "Menu") -> None:
-        super().__init__(timeout=120)
-        self.menu = menu
 
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        self.menu.config.texto = str(self.texto.value).strip()
-        await interaction.response.send_message(
-            "Mensagem definida com sucesso.",
-            ephemeral=True,
-        )
-        await self.menu.atualizar()
-
-
-class LimiteModal(discord.ui.Modal, title="Número de ganhadores"):
-    numero = discord.ui.TextInput(
-        label="Quantas pessoas poderão ganhar?",
-        placeholder="Ex.: 3",
-        min_length=1,
-        max_length=3,
-        required=True,
-    )
-
-    def __init__(self, menu: "Menu") -> None:
-        super().__init__(timeout=120)
-        self.menu = menu
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        try:
-            limite = int(str(self.numero.value).strip())
-        except ValueError:
-            await interaction.response.send_message(
-                "Digite apenas um número inteiro.",
-                ephemeral=True,
-            )
-            return
-
-        if not 1 <= limite <= 100:
-            await interaction.response.send_message(
-                "Escolha um número entre 1 e 100.",
-                ephemeral=True,
-            )
-            return
-
-        self.menu.config.limite = limite
-        await interaction.response.send_message(
-            f"Limite definido: **{limite}** ganhador(es).",
-            ephemeral=True,
-        )
-        await self.menu.atualizar()
+async def avisar_punicao(
+    membro: discord.Member,
+    texto: str,
+) -> None:
+    """Tenta avisar no privado sem impedir a punição."""
+    try:
+        await membro.send(texto)
+    except (
+        discord.Forbidden,
+        discord.HTTPException,
+        discord.NotFound,
+    ):
+        pass
 
 
-class Inicio(discord.ui.LayoutView):
-    def __init__(self, config: Configuracao) -> None:
-        super().__init__(timeout=None)
-        self.config = config
-        botao = discord.ui.Button(
-            label="RedButton",
-            style=discord.ButtonStyle.danger,
-            custom_id="evento:redbutton",
-        )
-        botao.callback = self.abrir
-        self.add_item(
-            discord.ui.Container(
-                discord.ui.TextDisplay(
-                    f"{EMOJI_INICIO}  **Configuração do evento**  {EMOJI_FINAL}\n\n"
-                    "Clique em **RedButton** para abrir as opções."
-                ),
-                discord.ui.ActionRow(botao),
-            )
-        )
+class Moderacao(commands.Cog):
+    """Comandos de moderação do servidor."""
 
-    async def abrir(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self.config.autor_id:
-            await interaction.response.send_message(
-                "Somente quem abriu o painel pode configurá-lo.",
-                ephemeral=True,
-            )
-            return
-        await interaction.response.edit_message(
-            view=Menu(self.config)
-        )
+    def __init__(self, bot: commands.Bot) -> None:
+        self.bot = bot
+        self.calados: dict[int, dict[int, float]] = {}
+        self.banimentos_temporarios: dict[int, dict[int, float]] = {}
+        self.verificar_calados.start()
 
+    def cog_unload(self) -> None:
+        self.verificar_calados.cancel()
 
-class Menu(discord.ui.LayoutView):
-    def __init__(self, config: Configuracao) -> None:
-        super().__init__(timeout=None)
-        self.config = config
-        cargo = config.cargo.mention if config.cargo else "não definido"
-        canal = config.canal.mention if config.canal else "não definido"
-        limite = str(config.limite) if config.limite else "não definido"
-        texto = "definida" if config.texto else "não definida"
-
-        botoes = {
-            "voltar": discord.ui.Button(
-                label="Voltar",
-                style=discord.ButtonStyle.secondary,
-                custom_id="evento:voltar",
-            ),
-            "cargo": discord.ui.Button(
-                label="Cargo Sorteado",
-                style=discord.ButtonStyle.primary,
-                custom_id="evento:cargo",
-            ),
-            "canal": discord.ui.Button(
-                label="Selecionar canal",
-                style=discord.ButtonStyle.primary,
-                custom_id="evento:canal",
-            ),
-            "limite": discord.ui.Button(
-                label="Número de Ganhadores",
-                style=discord.ButtonStyle.primary,
-                custom_id="evento:limite",
-            ),
-            "texto": discord.ui.Button(
-                label="Mensagem do evento",
-                style=discord.ButtonStyle.primary,
-                custom_id="evento:texto",
-            ),
-            "enviar": discord.ui.Button(
-                label="Enviar evento",
-                style=discord.ButtonStyle.success,
-                custom_id="evento:enviar",
-            ),
-        }
-
-        botoes["voltar"].callback = self.voltar
-        botoes["cargo"].callback = self.cargo
-        botoes["canal"].callback = self.canal
-        botoes["limite"].callback = self.limite
-        botoes["texto"].callback = self.texto
-        botoes["enviar"].callback = self.enviar
-
-        self.add_item(
-            discord.ui.Container(
-                discord.ui.TextDisplay(
-                    f"{EMOJI_INICIO}  **Configurar evento**  {EMOJI_FINAL}\n\n"
-                    f"Cargo: {cargo}\n"
-                    f"Canal: {canal}\n"
-                    f"Ganhadores: {limite}\n"
-                    f"Mensagem: {texto}"
-                ),
-                discord.ui.ActionRow(
-                    botoes["voltar"],
-                    botoes["cargo"],
-                    botoes["canal"],
-                    botoes["limite"],
-                    botoes["texto"],
-                ),
-                discord.ui.ActionRow(botoes["enviar"]),
-            )
-        )
-
-    async def autorizado(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self.config.autor_id:
-            return True
-        await interaction.response.send_message(
-            "Somente quem abriu o painel pode configurá-lo.",
-            ephemeral=True,
-        )
-        return False
-
-    async def atualizar(self) -> None:
-        if self.config.painel is None:
-            return
-        try:
-            await self.config.painel.edit(view=Menu(self.config))
-        except (
-            discord.NotFound,
-            discord.Forbidden,
-            discord.HTTPException,
-        ):
-            pass
-
-    async def esperar_mensagem(
+    async def registrar_log(
         self,
-        interaction: discord.Interaction,
-        pedido: str,
-    ) -> Optional[discord.Message]:
-        await interaction.response.send_message(
-            pedido,
-            ephemeral=True,
-        )
-        canal = interaction.channel
-        if canal is None:
-            return None
-
-        def check(mensagem: discord.Message) -> bool:
-            return (
-                mensagem.author.id == self.config.autor_id
-                and mensagem.channel.id == canal.id
-                and mensagem.guild is not None
-                and mensagem.guild.id == self.config.guild_id
-            )
-
-        try:
-            mensagem = await interaction.client.wait_for(
-                "message",
-                timeout=120,
-                check=check,
-            )
-        except asyncio.TimeoutError:
-            await interaction.followup.send(
-                "Tempo esgotado. Tente novamente.",
-                ephemeral=True,
-            )
-            return None
-
-        try:
-            await mensagem.delete()
-        except (
-            discord.NotFound,
-            discord.Forbidden,
-            discord.HTTPException,
-        ):
-            pass
-        return mensagem
-
-    async def voltar(self, interaction: discord.Interaction) -> None:
-        if await self.autorizado(interaction):
-            await interaction.response.edit_message(
-                view=Inicio(self.config)
-            )
-
-    async def cargo(self, interaction: discord.Interaction) -> None:
-        if not await self.autorizado(interaction):
-            return
-        mensagem = await self.esperar_mensagem(
-            interaction,
-            "Mencione o cargo que será entregue no evento.",
-        )
-        if mensagem is None or not mensagem.role_mentions:
-            if mensagem is not None:
-                await interaction.followup.send(
-                    "Não encontrei uma menção de cargo.",
-                    ephemeral=True,
-                )
-            return
-
-        cargo = mensagem.role_mentions[0]
-        bot_membro = mensagem.guild.me
-
-        if cargo.is_default() or cargo.managed:
-            await interaction.followup.send(
-                "Esse cargo não pode ser entregue.",
-                ephemeral=True,
-            )
-            return
-
-        if bot_membro is None or not bot_membro.guild_permissions.manage_roles:
-            await interaction.followup.send(
-                "O Poyo precisa da permissão `Gerenciar cargos`.",
-                ephemeral=True,
-            )
-            return
-
-        if cargo >= bot_membro.top_role:
-            await interaction.followup.send(
-                "Meu cargo precisa estar acima do cargo sorteado.",
-                ephemeral=True,
-            )
-            return
-
-        self.config.cargo = cargo
-        await interaction.followup.send(
-            f"Cargo definido: {cargo.mention}",
-            ephemeral=True,
-        )
-        await self.atualizar()
-
-    async def canal(self, interaction: discord.Interaction) -> None:
-        if not await self.autorizado(interaction):
-            return
-        mensagem = await self.esperar_mensagem(
-            interaction,
-            "Mencione o canal em que o evento será enviado.",
-        )
-        if mensagem is None or not mensagem.channel_mentions:
-            if mensagem is not None:
-                await interaction.followup.send(
-                    "Não encontrei uma menção de canal.",
-                    ephemeral=True,
-                )
-            return
-
-        canal = mensagem.channel_mentions[0]
-        if not isinstance(canal, discord.TextChannel):
-            await interaction.followup.send(
-                "Selecione um canal de texto.",
-                ephemeral=True,
-            )
-            return
-
-        permissao = canal.permissions_for(mensagem.guild.me)
-        if not permissao.view_channel or not permissao.send_messages:
-            await interaction.followup.send(
-                "Não consigo ver ou enviar mensagens nesse canal.",
-                ephemeral=True,
-            )
-            return
-
-        self.config.canal = canal
-        await interaction.followup.send(
-            f"Canal definido: {canal.mention}",
-            ephemeral=True,
-        )
-        await self.atualizar()
-
-    async def limite(self, interaction: discord.Interaction) -> None:
-        if await self.autorizado(interaction):
-            await interaction.response.send_modal(
-                LimiteModal(self)
-            )
-
-    async def texto(self, interaction: discord.Interaction) -> None:
-        if await self.autorizado(interaction):
-            await interaction.response.send_modal(
-                TextoModal(self)
-            )
-
-    async def enviar(self, interaction: discord.Interaction) -> None:
-        if not await self.autorizado(interaction):
-            return
-
-        if self.config.cargo is None:
-            await interaction.response.send_message(
-                "Defina o cargo sorteado.",
-                ephemeral=True,
-            )
-            return
-        if self.config.canal is None:
-            await interaction.response.send_message(
-                "Selecione o canal.",
-                ephemeral=True,
-            )
-            return
-        if self.config.limite is None:
-            await interaction.response.send_message(
-                "Defina o número de ganhadores.",
-                ephemeral=True,
-            )
-            return
-
-        bot_membro = self.config.canal.guild.me
-        permissao = self.config.canal.permissions_for(bot_membro)
-        if not permissao.view_channel or not permissao.send_messages:
-            await interaction.response.send_message(
-                "Não consigo enviar mensagens nesse canal.",
-                ephemeral=True,
-            )
-            return
-
-        evento = Evento(
-            cargo=self.config.cargo,
-            limite=self.config.limite,
-        )
-        view = EventoView(evento)
-        texto_enviado = None
-
-        try:
-            if self.config.texto:
-                texto_enviado = await self.config.canal.send(
-                    self.config.texto,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-                evento.mensagem_personalizada = texto_enviado
-            evento.mensagem = await self.config.canal.send(view=view)
-            view.mensagem = evento.mensagem
-        except (
-            discord.Forbidden,
-            discord.HTTPException,
-        ):
-            if texto_enviado is not None:
-                try:
-                    await texto_enviado.delete()
-                except (
-                    discord.NotFound,
-                    discord.Forbidden,
-                    discord.HTTPException,
-                ):
-                    pass
-            await interaction.response.send_message(
-                "Não consegui enviar o evento.",
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.edit_message(
-            view=EventoCartao(
-                "Evento enviado",
-                "O evento foi enviado no canal escolhido.",
-            )
-        )
-
-
-class EventoView(discord.ui.LayoutView):
-    def __init__(self, evento: Evento) -> None:
-        super().__init__(timeout=None)
-        self.evento = evento
-        self.mensagem: Optional[discord.Message] = None
-
-        botao = discord.ui.Button(
-            label="Fazer carinho",
-            style=discord.ButtonStyle.danger,
-            custom_id=f"evento:fazer_carinho:{id(evento)}",
-        )
-        botao.callback = self.fazer_carinho
-
-        self.add_item(
-            discord.ui.Container(
-                discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(EVENTO_IMAGEM_URL)
-                ),
-                discord.ui.ActionRow(botao),
-            )
-        )
-
-    async def fazer_carinho(
-        self,
-        interaction: discord.Interaction,
+        guild: discord.Guild,
+        acao: str,
+        detalhes: str,
     ) -> None:
-        evento = self.evento
+        """Registra uma ação no canal configurado, sem quebrar a moderação."""
+        if LOG_CHANNEL_ID <= 0:
+            return
 
-        async with evento.lock:
-            if interaction.user.id in evento.ganhadores:
-                await interaction.response.send_message(
-                    "Você já ganhou este evento.",
-                    ephemeral=True,
-                )
-                return
+        canal = guild.get_channel(LOG_CHANNEL_ID)
 
-            if len(evento.ganhadores) >= evento.limite:
-                await interaction.response.send_message(
-                    "O limite de ganhadores já foi atingido.",
-                    ephemeral=True,
-                )
-                return
+        if canal is None or not hasattr(canal, "send"):
+            return
 
-            if interaction.guild is None:
-                await interaction.response.send_message(
-                    "Este evento só funciona no servidor.",
-                    ephemeral=True,
-                )
-                return
-
-            membro = interaction.guild.get_member(
-                interaction.user.id
-            )
-            bot_membro = interaction.guild.me
-
-            if membro is None or bot_membro is None:
-                await interaction.response.send_message(
-                    "Não consegui encontrar os membros do servidor.",
-                    ephemeral=True,
-                )
-                return
-
-            if not bot_membro.guild_permissions.manage_roles:
-                await interaction.response.send_message(
-                    "O Poyo não tem a permissão `Gerenciar cargos`.",
-                    ephemeral=True,
-                )
-                return
-
-            if evento.cargo >= bot_membro.top_role:
-                await interaction.response.send_message(
-                    "O cargo sorteado precisa estar abaixo do meu cargo.",
-                    ephemeral=True,
-                )
-                return
-
-            try:
-                await membro.add_roles(
-                    evento.cargo,
-                    reason="Ganhador de evento.",
-                )
-            except (
-                discord.Forbidden,
-                discord.HTTPException,
-            ):
-                await interaction.response.send_message(
-                    "Não consegui entregar o cargo. Verifique as permissões e a hierarquia do Poyo.",
-                    ephemeral=True,
-                )
-                return
-
-            evento.ganhadores.add(
-                interaction.user.id
-            )
-
-            await interaction.response.send_message(
+        try:
+            await canal.send(
                 (
-                    f"{interaction.user.mention} fez carinho no axolote "
-                    f"e ganhou {evento.cargo.mention}!"
+                    f"**{acao}**\n"
+                    f"{detalhes}\n"
+                    f"<t:{int(time.time())}:F>"
                 ),
-                allowed_mentions=discord.AllowedMentions(
-                    users=True,
-                    roles=True,
-                ),
+                allowed_mentions=discord.AllowedMentions.none(),
             )
+        except (
+            discord.Forbidden,
+            discord.HTTPException,
+            discord.NotFound,
+        ):
+            pass
 
-            if (
-                len(evento.ganhadores) >= evento.limite
-                and evento.mensagem is not None
-            ):
+    @tasks.loop(seconds=5)
+    async def verificar_calados(self) -> None:
+        """Libera calados e banimentos temporários expirados."""
+        agora = time.time()
+
+        for guild_id, membros in list(self.calados.items()):
+            guild = self.bot.get_guild(guild_id)
+
+            for membro_id, expiracao in list(membros.items()):
+                if agora < expiracao:
+                    continue
+
+                membros.pop(membro_id, None)
+
+                if guild is not None:
+                    membro = guild.get_member(membro_id)
+
+                    if membro is not None:
+                        await avisar_punicao(
+                            membro,
+                            (
+                                f"Seu calado no servidor "
+                                f"**{guild.name}** terminou. "
+                                "Você pode falar novamente."
+                            ),
+                        )
+                        await self.registrar_log(
+                            guild,
+                            "CALADO ENCERRADO",
+                            (
+                                f"Membro: {membro} (`{membro.id}`)\n"
+                                "O tempo terminou automaticamente."
+                            ),
+                        )
+
+            if not membros:
+                self.calados.pop(guild_id, None)
+
+        for guild_id, banimentos in list(
+            self.banimentos_temporarios.items()
+        ):
+            guild = self.bot.get_guild(guild_id)
+
+            if guild is None:
+                continue
+
+            for membro_id, expiracao in list(banimentos.items()):
+                if agora < expiracao:
+                    continue
+
                 try:
-                    await evento.mensagem.delete()
+                    await guild.unban(
+                        discord.Object(id=membro_id),
+                        reason="Banimento temporário encerrado.",
+                    )
+                except discord.NotFound:
+                    banimentos.pop(membro_id, None)
+                    continue
+                except (
+                    discord.Forbidden,
+                    discord.HTTPException,
+                ):
+                    continue
+
+                banimentos.pop(membro_id, None)
+
+                try:
+                    usuario = self.bot.get_user(membro_id)
+
+                    if usuario is None:
+                        usuario = await self.bot.fetch_user(membro_id)
+
+                    await avisar_punicao(
+                        usuario,
+                        (
+                            f"Seu banimento temporário no servidor "
+                            f"**{guild.name}** terminou. "
+                            "Você pode voltar ao servidor."
+                        ),
+                    )
+                    await self.registrar_log(
+                        guild,
+                        "BANIMENTO TEMPORÁRIO ENCERRADO",
+                        (
+                            f"Membro: {usuario} (`{membro_id}`)\n"
+                            "O banimento terminou e o usuário foi desbanido."
+                        ),
+                    )
                 except (
                     discord.NotFound,
                     discord.Forbidden,
@@ -586,51 +247,504 @@ class EventoView(discord.ui.LayoutView):
                 ):
                     pass
 
-                if evento.mensagem_personalizada is not None:
-                    try:
-                        await evento.mensagem_personalizada.edit(
-                            content="Acabado",
-                        )
-                    except (
-                        discord.NotFound,
-                        discord.Forbidden,
-                        discord.HTTPException,
-                    ):
-                        pass
+            if not banimentos:
+                self.banimentos_temporarios.pop(guild_id, None)
 
+    @verificar_calados.before_loop
+    async def aguardar_bot(self) -> None:
+        await self.bot.wait_until_ready()
 
-class Eventos(commands.Cog):
+    async def cog_check(self, ctx: commands.Context) -> bool:
+        if ctx.guild is None:
+            raise commands.NoPrivateMessage()
+
+        guild_calados = self.calados.get(ctx.guild.id, {})
+        expiracao = guild_calados.get(ctx.author.id)
+
+        if expiracao is not None:
+            if time.time() < expiracao:
+                # O membro calado não pode executar comandos do Poyo.
+                raise commands.CheckFailure()
+
+            guild_calados.pop(ctx.author.id, None)
+            if not guild_calados:
+                self.calados.pop(ctx.guild.id, None)
+
+        return True
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        """Apaga mensagens de membros calados até o tempo terminar."""
+        if message.guild is None or message.author.bot:
+            return
+
+        guild_calados = self.calados.get(message.guild.id, {})
+        expiracao = guild_calados.get(message.author.id)
+
+        if expiracao is None:
+            return
+
+        if time.time() >= expiracao:
+            guild_calados.pop(message.author.id, None)
+            if not guild_calados:
+                self.calados.pop(message.guild.id, None)
+            return
+
+        try:
+            await message.delete()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(
+        self,
+        membro: discord.Member,
+        antes: discord.VoiceState,
+        depois: discord.VoiceState,
+    ) -> None:
+        """Desconecta membros calados que estejam ou tentem entrar em call."""
+        guild_calados = self.calados.get(membro.guild.id, {})
+        expiracao = guild_calados.get(membro.id)
+
+        if expiracao is None:
+            return
+
+        if time.time() >= expiracao:
+            guild_calados.pop(membro.id, None)
+            if not guild_calados:
+                self.calados.pop(membro.guild.id, None)
+            return
+
+        if depois.channel is None:
+            return
+
+        try:
+            await membro.move_to(
+                None,
+                reason="Membro calado não pode permanecer em call.",
+            )
+        except (
+            discord.NotFound,
+            discord.Forbidden,
+            discord.HTTPException,
+        ):
+            pass
+
     @commands.command(
-        name="poyoevent",
+        name="calado",
+        aliases=("silenciar",),
         extras={
-            "categoria": "Eventos",
-            "uso": ",poyoevent",
-            "descricao": "Abre o painel de configuração de eventos.",
+            "categoria": "Moderação",
+            "uso": ",calado @membro 1h",
+            "descricao": "Impede mensagens durante o tempo informado.",
         },
     )
     @commands.guild_only()
-    @commands.has_permissions(administrator=True)
-    async def poyoevent(
+    @commands.has_permissions(manage_messages=True)
+    @commands.bot_has_permissions(manage_messages=True)
+    async def calado(
         self,
         ctx: commands.Context,
+        membro: discord.Member,
+        tempo: str,
+        *,
+        motivo: str = "Nenhum motivo informado",
     ) -> None:
-        try:
-            await ctx.message.delete()
-        except (
-            discord.NotFound,
-            discord.Forbidden,
-            discord.HTTPException,
-        ):
-            pass
+        segundos = analisar_duracao(tempo)
 
-        config = Configuracao(
-            autor_id=ctx.author.id,
-            guild_id=ctx.guild.id,
+        if segundos is None or not 1 <= segundos <= 28 * 86400:
+            await responder(ctx, "Tempo inválido", "Use `1m`, `1h` ou `28d`.")
+            return
+
+        if membro == ctx.author:
+            await responder(ctx, "Ação negada", "Você não pode se calar.")
+            return
+
+        if membro == ctx.guild.owner:
+            await responder(ctx, "Ação negada", "O dono não pode ser calado.")
+            return
+
+        if membro.top_role >= ctx.author.top_role:
+            await responder(ctx, "Ação negada", "Cargo acima do seu.")
+            return
+
+        bot_membro = ctx.guild.me
+        if bot_membro is None or membro.top_role >= bot_membro.top_role:
+            await responder(ctx, "Ação negada", "Meu cargo precisa estar acima do dele.")
+            return
+
+        self.calados.setdefault(ctx.guild.id, {})[membro.id] = time.time() + segundos
+
+        await avisar_punicao(
+            membro,
+            (
+                f"Você foi calado no servidor **{ctx.guild.name}** "
+                f"por **{formatar_duracao(segundos)}**."
+            ),
         )
-        config.painel = await ctx.send(
-            view=Inicio(config)
+
+        if membro.voice is not None:
+            try:
+                await membro.move_to(
+                    None,
+                    reason="Membro calado removido da call.",
+                )
+            except (
+                discord.NotFound,
+                discord.Forbidden,
+                discord.HTTPException,
+            ):
+                await responder(
+                    ctx,
+                    "Call não removida",
+                    "Dê ao Poyo `Mover membros` nesta call.",
+                )
+                return
+
+        await responder(
+            ctx,
+            "Calado com sucesso",
+            f"{membro.mention} não pode falar por **{formatar_duracao(segundos)}**.",
+        )
+
+        await self.registrar_log(
+            ctx.guild,
+            "MEMBRO CALADO",
+            (
+                f"Moderador: {ctx.author} (`{ctx.author.id}`)\n"
+                f"Membro: {membro} (`{membro.id}`)\n"
+                f"Duração: {formatar_duracao(segundos)}"
+            ),
+        )
+
+    @commands.command(
+        name="nchoraxx",
+        aliases=("rcalado", "rsilenciar"),
+        extras={
+            "categoria": "Moderação",
+            "uso": ",nchoraxx @membro",
+            "descricao": "Libera um membro calado.",
+        },
+    )
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    @commands.bot_has_permissions(manage_messages=True)
+    async def nchoraxx(self, ctx: commands.Context, membro: discord.Member) -> None:
+        guild_calados = self.calados.get(ctx.guild.id, {})
+
+        if membro.id not in guild_calados:
+            await responder(ctx, "Ação negada", f"{membro.mention} não está calado.")
+            return
+
+        guild_calados.pop(membro.id, None)
+        if not guild_calados:
+            self.calados.pop(ctx.guild.id, None)
+
+        await avisar_punicao(
+            membro,
+            (
+                f"Seu calado no servidor **{ctx.guild.name}** "
+                "foi removido. Você pode falar novamente."
+            ),
+        )
+
+        await responder(ctx, "Calado removido", f"{membro.mention} pode falar novamente.")
+
+        await self.registrar_log(
+            ctx.guild,
+            "CALADO REMOVIDO",
+            (
+                f"Moderador: {ctx.author} (`{ctx.author.id}`)\n"
+                f"Membro: {membro} (`{membro.id}`)"
+            ),
+        )
+
+    @commands.command(
+        name="sai",
+        aliases=("banir",),
+        extras={
+            "categoria": "Moderação",
+            "uso": ",sai @membro [tempo]",
+            "descricao": "Bane permanentemente ou por tempo definido.",
+        },
+    )
+    @commands.guild_only()
+    @commands.has_permissions(ban_members=True)
+    @commands.bot_has_permissions(ban_members=True)
+    async def sai(
+        self,
+        ctx: commands.Context,
+        membro: discord.Member,
+        tempo: Optional[str] = None,
+        *,
+        motivo: str = "Nenhum motivo informado",
+    ) -> None:
+        if not await self._pode_punir(ctx, membro, "remover"):
+            return
+
+        segundos = None
+
+        if tempo is not None:
+            segundos = analisar_duracao(tempo)
+
+            if segundos is None or segundos < 1:
+                await responder(
+                    ctx,
+                    "Tempo inválido",
+                    "Use `,sai @membro 7d` ou deixe sem tempo para ser permanente.",
+                )
+                return
+
+        texto_tempo = (
+            f" por **{formatar_duracao(segundos)}**"
+            if segundos is not None
+            else " permanentemente"
+        )
+
+        await avisar_punicao(
+            membro,
+            (
+                f"Você foi banido do servidor **{ctx.guild.name}**"
+                f"{texto_tempo}."
+            ),
+        )
+
+        try:
+            await membro.ban(
+                reason=f"{ctx.author} — {motivo}",
+                delete_message_seconds=86400,
+            )
+        except discord.Forbidden:
+            await responder(ctx, "Ação negada", "Não posso remover esse membro.")
+            return
+
+        if segundos is not None:
+            self.banimentos_temporarios.setdefault(
+                ctx.guild.id,
+                {},
+            )[membro.id] = time.time() + segundos
+
+        await responder(
+            ctx,
+            "Membro banido",
+            (
+                f"**{membro}** foi banido"
+                f"{texto_tempo}."
+            ),
+        )
+
+        await self.registrar_log(
+            ctx.guild,
+            "MEMBRO BANIDO",
+            (
+                f"Moderador: {ctx.author} (`{ctx.author.id}`)\n"
+                f"Membro: {membro} (`{membro.id}`)\n"
+                f"Tipo: {'temporário' if segundos is not None else 'permanente'}\n"
+                f"Duração: {formatar_duracao(segundos) if segundos is not None else 'permanente'}\n"
+                f"Motivo: {motivo}"
+            ),
+        )
+
+    @commands.command(
+        name="rban",
+        extras={
+            "categoria": "Moderação",
+            "uso": ",rban ID",
+            "descricao": "Remove um banimento pelo ID.",
+        },
+    )
+    @commands.guild_only()
+    @commands.has_permissions(ban_members=True)
+    @commands.bot_has_permissions(ban_members=True)
+    async def rban(self, ctx: commands.Context, usuario_id: int) -> None:
+        try:
+            banimento = await ctx.guild.fetch_ban(discord.Object(id=usuario_id))
+            await ctx.guild.unban(
+                banimento.user,
+                reason=f"Banimento removido por {ctx.author}",
+            )
+        except discord.NotFound:
+            await responder(ctx, "Ação negada", "Esse ID não está banido.")
+            return
+        except discord.Forbidden:
+            await responder(ctx, "Ação negada", "Não posso remover esse banimento.")
+            return
+
+        await responder(ctx, "Banimento removido", f"**{banimento.user}** pode voltar.")
+
+        await self.registrar_log(
+            ctx.guild,
+            "BANIMENTO REMOVIDO",
+            (
+                f"Moderador: {ctx.author} (`{ctx.author.id}`)\n"
+                f"Usuário: {banimento.user} (`{banimento.user.id}`)"
+            ),
+        )
+
+    @commands.command(
+        name="expulsar",
+        aliases=("kick",),
+        extras={
+            "categoria": "Moderação",
+            "uso": ",expulsar @membro",
+            "descricao": "Expulsa um membro do servidor.",
+        },
+    )
+    @commands.guild_only()
+    @commands.has_permissions(kick_members=True)
+    @commands.bot_has_permissions(kick_members=True)
+    async def expulsar(
+        self,
+        ctx: commands.Context,
+        membro: discord.Member,
+        *,
+        motivo: str = "Nenhum motivo informado",
+    ) -> None:
+        if not await self._pode_punir(ctx, membro, "expulsar"):
+            return
+
+        await avisar_punicao(
+            membro,
+            f"Você foi expulso do servidor **{ctx.guild.name}**.",
+        )
+
+        try:
+            await membro.kick(reason=f"{ctx.author} — {motivo}")
+        except discord.Forbidden:
+            await responder(ctx, "Ação negada", "Não posso expulsar esse membro.")
+            return
+
+        await responder(ctx, "Membro expulso", f"**{membro}** foi expulso.")
+
+        await self.registrar_log(
+            ctx.guild,
+            "MEMBRO EXPULSO",
+            (
+                f"Moderador: {ctx.author} (`{ctx.author.id}`)\n"
+                f"Membro: {membro} (`{membro.id}`)\n"
+                f"Motivo: {motivo}"
+            ),
+        )
+
+    async def _pode_punir(
+        self,
+        ctx: commands.Context,
+        membro: discord.Member,
+        acao: str,
+    ) -> bool:
+        if membro == ctx.guild.owner:
+            await responder(ctx, "Ação negada", f"O dono não pode ser {acao}.")
+            return False
+
+        if membro.top_role >= ctx.author.top_role:
+            await responder(ctx, "Ação negada", "Cargo acima do seu.")
+            return False
+
+        bot_membro = ctx.guild.me
+        if bot_membro is None or membro.top_role >= bot_membro.top_role:
+            await responder(ctx, "Ação negada", "Meu cargo precisa estar acima do dele.")
+            return False
+
+        return True
+
+    @commands.command(
+        name="trancar",
+        extras={
+            "categoria": "Moderação",
+            "uso": ",trancar",
+            "descricao": "Tranca o canal atual.",
+        },
+    )
+    @commands.guild_only()
+    @commands.has_permissions(manage_channels=True)
+    @commands.bot_has_permissions(manage_channels=True)
+    async def trancar(self, ctx: commands.Context) -> None:
+        permissao = ctx.channel.overwrites_for(ctx.guild.default_role)
+        permissao.send_messages = False
+
+        await ctx.channel.set_permissions(
+            ctx.guild.default_role,
+            overwrite=permissao,
+            reason=f"Canal trancado por {ctx.author}",
+        )
+
+        await responder(ctx, "Canal trancado", "Canal fechado.")
+
+        await self.registrar_log(
+            ctx.guild,
+            "CANAL TRANCADO",
+            (
+                f"Moderador: {ctx.author} (`{ctx.author.id}`)\n"
+                f"Canal: {ctx.channel.mention} (`{ctx.channel.id}`)"
+            ),
+        )
+
+    @commands.command(
+        name="destrancar",
+        extras={
+            "categoria": "Moderação",
+            "uso": ",destrancar",
+            "descricao": "Destranca o canal atual.",
+        },
+    )
+    @commands.guild_only()
+    @commands.has_permissions(manage_channels=True)
+    @commands.bot_has_permissions(manage_channels=True)
+    async def destrancar(self, ctx: commands.Context) -> None:
+        permissao = ctx.channel.overwrites_for(ctx.guild.default_role)
+        permissao.send_messages = None
+
+        await ctx.channel.set_permissions(
+            ctx.guild.default_role,
+            overwrite=permissao,
+            reason=f"Canal destrancado por {ctx.author}",
+        )
+
+        await responder(ctx, "Canal destrancado", "Canal liberado.")
+
+        await self.registrar_log(
+            ctx.guild,
+            "CANAL DESTRANCADO",
+            (
+                f"Moderador: {ctx.author} (`{ctx.author.id}`)\n"
+                f"Canal: {ctx.channel.mention} (`{ctx.channel.id}`)"
+            ),
+        )
+
+    @commands.command(
+        name="limpar",
+        aliases=("clear",),
+        extras={
+            "categoria": "Moderação",
+            "uso": ",limpar 20",
+            "descricao": "Apaga de 1 a 100 mensagens.",
+        },
+    )
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    @commands.bot_has_permissions(
+        manage_messages=True,
+        read_message_history=True,
+    )
+    async def limpar(self, ctx: commands.Context, quantidade: int) -> None:
+        if not 1 <= quantidade <= 100:
+            await responder(ctx, "Ação negada", "Use um número entre 1 e 100.")
+            return
+
+        apagadas = await ctx.channel.purge(limit=quantidade + 1)
+        total = max(len(apagadas) - 1, 0)
+        await responder(ctx, "Limpeza concluída", f"{total} mensagens apagadas.")
+
+        await self.registrar_log(
+            ctx.guild,
+            "MENSAGENS APAGADAS",
+            (
+                f"Moderador: {ctx.author} (`{ctx.author.id}`)\n"
+                f"Canal: {ctx.channel.mention} (`{ctx.channel.id}`)\n"
+                f"Quantidade: {total}"
+            ),
         )
 
 
 async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(Eventos(bot))
+    await bot.add_cog(Moderacao(bot))
