@@ -12,11 +12,7 @@ EMOJI_INICIO = "<:axolote:1556443018557661234>"
 EMOJI_FINAL = "<a:emoji_481:1556442987691647068>"
 
 EVENTOS_BANNER_URL = (
-    "https://cdn.discordapp.com/attachments/"
-    "1556052693511053397/1556449326891401307/"
-    "GIF_image_3.gif?backend=b2&ex=6ac433e4&"
-    "is=6ac2e264&hm=7bd09ac806e541b3edadc60c2c796f17"
-    "dfcffe12b617209c6a735eb7e741ce9&"
+    'https://cdn.discordapp.com/attachments/1556065837830639676/1557126421896372254/Tumblr_l_67143811701311.gif?backend=b2&ex=6ac6aa7c&is=6ac558fc&hm=05eabefc1e0d8f17b1c9e9afedb11113d956579e45035bfd070c51cdd32150b6&'
 )
 
 EVENTO_IMAGEM_URL = (
@@ -139,17 +135,11 @@ class Inicio(discord.ui.LayoutView):
         botao.callback = self.abrir
         self.add_item(
             discord.ui.Container(
-                discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(EVENTOS_BANNER_URL)
-                ),
                 discord.ui.TextDisplay(
                     f"{EMOJI_INICIO}  **Configuração do evento**  {EMOJI_FINAL}\n\n"
                     "Clique em **RedButton** para abrir as opções."
                 ),
                 discord.ui.ActionRow(botao),
-                discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(EVENTOS_BANNER_URL)
-                ),
             )
         )
 
@@ -216,9 +206,6 @@ class Menu(discord.ui.LayoutView):
 
         self.add_item(
             discord.ui.Container(
-                discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(EVENTOS_BANNER_URL)
-                ),
                 discord.ui.TextDisplay(
                     f"{EMOJI_INICIO}  **Configurar evento**  {EMOJI_FINAL}\n\n"
                     f"Cargo: {cargo}\n"
@@ -234,9 +221,6 @@ class Menu(discord.ui.LayoutView):
                     botoes["texto"],
                 ),
                 discord.ui.ActionRow(botoes["enviar"]),
-                discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(EVENTOS_BANNER_URL)
-                ),
             )
         )
 
@@ -496,9 +480,6 @@ class EventoView(discord.ui.LayoutView):
 
         self.add_item(
             discord.ui.Container(
-                discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(EVENTO_IMAGEM_URL)
-                ),
                 discord.ui.ActionRow(botao),
             )
         )
