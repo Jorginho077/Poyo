@@ -30,19 +30,18 @@ EVENTO_IMAGEM_URL = (
 
 
 @dataclass
-class ConfiguracaoEvento:
+class Configuracao:
     autor_id: int
     guild_id: int
     cargo: Optional[discord.Role] = None
     canal: Optional[discord.TextChannel] = None
-    ganhadores: Optional[int] = None
+    limite: Optional[int] = None
     mensagem: Optional[str] = None
     painel: Optional[discord.Message] = None
 
 
 @dataclass
-class EstadoEvento:
-    guild_id: int
+class Evento:
     cargo: discord.Role
     limite: int
     ganhadores: set[int] = field(default_factory=set)
@@ -52,11 +51,11 @@ class EstadoEvento:
     mensagem: Optional[discord.Message] = None
 
 
-class CartaoBase(discord.ui.LayoutView):
+class Cartao(discord.ui.LayoutView):
     def __init__(
         self,
         titulo: str,
-        descricao: str,
+        texto: str,
     ) -> None:
         super().__init__(timeout=None)
 
@@ -70,7 +69,7 @@ class CartaoBase(discord.ui.LayoutView):
                         f"{EMOJI_INICIO}  "
                         f"**{titulo}**  "
                         f"{EMOJI_FINAL}\n\n"
-                        f"{descricao}"
+                        f"{texto}"
                     )
                 ),
                 discord.ui.MediaGallery(
@@ -80,7 +79,7 @@ class CartaoBase(discord.ui.LayoutView):
         )
 
 
-class MensagemEventoModal(
+class MensagemModal(
     discord.ui.Modal,
     title="Mensagem do evento",
 ):
@@ -94,7 +93,7 @@ class MensagemEventoModal(
 
     def __init__(
         self,
-        menu: "MenuEvento",
+        menu: "MenuConfiguracao",
     ) -> None:
         super().__init__(timeout=120)
         self.menu = menu
@@ -103,19 +102,19 @@ class MensagemEventoModal(
         self,
         interaction: discord.Interaction,
     ) -> None:
-        self.menu.config.mensagem = (
-            str(self.mensagem.value).strip()
-        )
+        self.menu.config.mensagem = str(
+            self.mensagem.value
+        ).strip()
 
         await interaction.response.send_message(
             "Mensagem definida com sucesso.",
             ephemeral=True,
         )
 
-        await self.menu.atualizar_painel()
+        await self.menu.atualizar()
 
 
-class NumeroGanhadoresModal(
+class GanhadoresModal(
     discord.ui.Modal,
     title="Número de ganhadores",
 ):
@@ -129,7 +128,7 @@ class NumeroGanhadoresModal(
 
     def __init__(
         self,
-        menu: "MenuEvento",
+        menu: "MenuConfiguracao",
     ) -> None:
         super().__init__(timeout=120)
         self.menu = menu
@@ -139,7 +138,7 @@ class NumeroGanhadoresModal(
         interaction: discord.Interaction,
     ) -> None:
         try:
-            quantidade = int(
+            limite = int(
                 str(self.numero.value).strip()
             )
         except ValueError:
@@ -149,27 +148,27 @@ class NumeroGanhadoresModal(
             )
             return
 
-        if not 1 <= quantidade <= 100:
+        if not 1 <= limite <= 100:
             await interaction.response.send_message(
                 "Escolha um número entre 1 e 100.",
                 ephemeral=True,
             )
             return
 
-        self.menu.config.ganhadores = quantidade
+        self.menu.config.limite = limite
 
         await interaction.response.send_message(
-            f"Número definido: **{quantidade}**.",
+            f"Limite definido: **{limite}** ganhador(es).",
             ephemeral=True,
         )
 
-        await self.menu.atualizar_painel()
+        await self.menu.atualizar()
 
 
-class ConfiguracaoView(discord.ui.LayoutView):
+class PainelInicial(discord.ui.LayoutView):
     def __init__(
         self,
-        config: ConfiguracaoEvento,
+        config: Configuracao,
     ) -> None:
         super().__init__(timeout=None)
         self.config = config
@@ -177,10 +176,10 @@ class ConfiguracaoView(discord.ui.LayoutView):
         botao = discord.ui.Button(
             label="RedButton",
             style=discord.ButtonStyle.danger,
-            custom_id="evento:abrir_configuracao",
+            custom_id="evento:redbutton",
         )
 
-        botao.callback = self.abrir_configuracao
+        botao.callback = self.abrir_menu
 
         self.add_item(
             discord.ui.Container(
@@ -196,35 +195,33 @@ class ConfiguracaoView(discord.ui.LayoutView):
                         "para abrir as opções."
                     )
                 ),
-                discord.ui.ActionRow(
-                    botao,
-                ),
+                discord.ui.ActionRow(botao),
                 discord.ui.MediaGallery(
                     discord.MediaGalleryItem(BANNER_URL)
                 ),
             )
         )
 
-    async def abrir_configuracao(
+    async def abrir_menu(
         self,
         interaction: discord.Interaction,
     ) -> None:
         if interaction.user.id != self.config.autor_id:
             await interaction.response.send_message(
-                "Somente quem abriu este painel pode configurá-lo.",
+                "Somente quem abriu o painel pode configurá-lo.",
                 ephemeral=True,
             )
             return
 
         await interaction.response.edit_message(
-            view=MenuEvento(self.config)
+            view=MenuConfiguracao(self.config)
         )
 
 
-class MenuEvento(discord.ui.LayoutView):
+class MenuConfiguracao(discord.ui.LayoutView):
     def __init__(
         self,
-        config: ConfiguracaoEvento,
+        config: Configuracao,
     ) -> None:
         super().__init__(timeout=None)
         self.config = config
@@ -241,9 +238,9 @@ class MenuEvento(discord.ui.LayoutView):
             else "não definido"
         )
 
-        ganhadores = (
-            str(self.config.ganhadores)
-            if self.config.ganhadores is not None
+        limite = (
+            str(self.config.limite)
+            if self.config.limite
             else "não definido"
         )
 
@@ -269,10 +266,10 @@ class MenuEvento(discord.ui.LayoutView):
                 style=discord.ButtonStyle.primary,
                 custom_id="evento:canal",
             ),
-            "numero": discord.ui.Button(
+            "limite": discord.ui.Button(
                 label="Número de Ganhadores",
                 style=discord.ButtonStyle.primary,
-                custom_id="evento:numero",
+                custom_id="evento:limite",
             ),
             "mensagem": discord.ui.Button(
                 label="Mensagem do evento",
@@ -289,8 +286,8 @@ class MenuEvento(discord.ui.LayoutView):
         botoes["voltar"].callback = self.voltar
         botoes["cargo"].callback = self.selecionar_cargo
         botoes["canal"].callback = self.selecionar_canal
-        botoes["numero"].callback = self.numero_ganhadores
-        botoes["mensagem"].callback = self.mensagem_evento
+        botoes["limite"].callback = self.definir_limite
+        botoes["mensagem"].callback = self.definir_mensagem
         botoes["enviar"].callback = self.enviar_evento
 
         self.add_item(
@@ -305,7 +302,7 @@ class MenuEvento(discord.ui.LayoutView):
                         f"{EMOJI_FINAL}\n\n"
                         f"Cargo: {cargo}\n"
                         f"Canal: {canal}\n"
-                        f"Ganhadores: {ganhadores}\n"
+                        f"Ganhadores: {limite}\n"
                         f"Mensagem: {mensagem}"
                     )
                 ),
@@ -313,7 +310,7 @@ class MenuEvento(discord.ui.LayoutView):
                     botoes["voltar"],
                     botoes["cargo"],
                     botoes["canal"],
-                    botoes["numero"],
+                    botoes["limite"],
                     botoes["mensagem"],
                 ),
                 discord.ui.ActionRow(
@@ -333,19 +330,19 @@ class MenuEvento(discord.ui.LayoutView):
             return True
 
         await interaction.response.send_message(
-            "Somente quem abriu este painel pode configurá-lo.",
+            "Somente quem abriu o painel pode configurá-lo.",
             ephemeral=True,
         )
 
         return False
 
-    async def atualizar_painel(self) -> None:
+    async def atualizar(self) -> None:
         if self.config.painel is None:
             return
 
         try:
             await self.config.painel.edit(
-                view=MenuEvento(self.config)
+                view=MenuConfiguracao(self.config)
             )
         except (
             discord.NotFound,
@@ -375,7 +372,8 @@ class MenuEvento(discord.ui.LayoutView):
             return (
                 mensagem.author.id
                 == self.config.autor_id
-                and mensagem.channel.id == canal.id
+                and mensagem.channel.id
+                == canal.id
                 and mensagem.guild is not None
                 and mensagem.guild.id
                 == self.config.guild_id
@@ -413,7 +411,7 @@ class MenuEvento(discord.ui.LayoutView):
             return
 
         await interaction.response.edit_message(
-            view=ConfiguracaoView(self.config)
+            view=PainelInicial(self.config)
         )
 
     async def selecionar_cargo(
@@ -448,12 +446,23 @@ class MenuEvento(discord.ui.LayoutView):
             )
             return
 
-        if (
-            bot_membro is None
-            or cargo >= bot_membro.top_role
-        ):
+        if bot_membro is None:
             await interaction.followup.send(
-                "Meu cargo precisa estar acima do cargo sorteado.",
+                "Não consegui encontrar o Poyo no servidor.",
+                ephemeral=True,
+            )
+            return
+
+        if not bot_membro.guild_permissions.manage_roles:
+            await interaction.followup.send(
+                "O Poyo precisa da permissão `Gerenciar cargos`.",
+                ephemeral=True,
+            )
+            return
+
+        if cargo >= bot_membro.top_role:
+            await interaction.followup.send(
+                "O cargo do Poyo precisa estar acima do cargo sorteado.",
                 ephemeral=True,
             )
             return
@@ -465,7 +474,7 @@ class MenuEvento(discord.ui.LayoutView):
             ephemeral=True,
         )
 
-        await self.atualizar_painel()
+        await self.atualizar()
 
     async def selecionar_canal(
         self,
@@ -522,9 +531,9 @@ class MenuEvento(discord.ui.LayoutView):
             ephemeral=True,
         )
 
-        await self.atualizar_painel()
+        await self.atualizar()
 
-    async def numero_ganhadores(
+    async def definir_limite(
         self,
         interaction: discord.Interaction,
     ) -> None:
@@ -532,10 +541,10 @@ class MenuEvento(discord.ui.LayoutView):
             return
 
         await interaction.response.send_modal(
-            NumeroGanhadoresModal(self)
+            GanhadoresModal(self)
         )
 
-    async def mensagem_evento(
+    async def definir_mensagem(
         self,
         interaction: discord.Interaction,
     ) -> None:
@@ -543,7 +552,7 @@ class MenuEvento(discord.ui.LayoutView):
             return
 
         await interaction.response.send_modal(
-            MensagemEventoModal(self)
+            MensagemModal(self)
         )
 
     async def enviar_evento(
@@ -567,15 +576,16 @@ class MenuEvento(discord.ui.LayoutView):
             )
             return
 
-        if self.config.ganhadores is None:
+        if self.config.limite is None:
             await interaction.response.send_message(
                 "Defina o número de ganhadores.",
                 ephemeral=True,
             )
             return
 
+        bot_membro = self.config.canal.guild.me
         permissao = self.config.canal.permissions_for(
-            self.config.canal.guild.me
+            bot_membro
         )
 
         if (
@@ -588,31 +598,32 @@ class MenuEvento(discord.ui.LayoutView):
             )
             return
 
-        estado = EstadoEvento(
-            guild_id=self.config.guild_id,
+        evento = Evento(
             cargo=self.config.cargo,
-            limite=self.config.ganhadores,
+            limite=self.config.limite,
         )
 
-        view = EventoView(estado)
+        view = EventoView(evento)
         mensagem_texto = None
 
         try:
             if self.config.mensagem:
                 mensagem_texto = (
                     await self.config.canal.send(
-                        content=self.config.mensagem,
+                        self.config.mensagem,
                         allowed_mentions=(
                             discord.AllowedMentions.none()
                         ),
                     )
                 )
 
-            mensagem_evento = (
+            evento.mensagem = (
                 await self.config.canal.send(
                     view=view
                 )
             )
+
+            view.mensagem = evento.mensagem
 
         except (
             discord.Forbidden,
@@ -634,11 +645,8 @@ class MenuEvento(discord.ui.LayoutView):
             )
             return
 
-        estado.mensagem = mensagem_evento
-        view.mensagem = mensagem_evento
-
         await interaction.response.edit_message(
-            view=CartaoBase(
+            view=Cartao(
                 "Evento enviado",
                 "O evento foi enviado no canal escolhido.",
             )
@@ -648,20 +656,23 @@ class MenuEvento(discord.ui.LayoutView):
 class EventoView(discord.ui.LayoutView):
     def __init__(
         self,
-        estado: EstadoEvento,
+        evento: Evento,
     ) -> None:
         super().__init__(timeout=None)
 
-        self.estado = estado
+        self.evento = evento
         self.mensagem: Optional[discord.Message] = None
 
         botao = discord.ui.Button(
-            label="Participar",
+            label="Fazer carinho",
             style=discord.ButtonStyle.danger,
-            custom_id=f"evento:participar:{id(estado)}",
+            custom_id=(
+                f"evento:fazer_carinho:"
+                f"{id(evento)}"
+            ),
         )
 
-        botao.callback = self.participar
+        botao.callback = self.fazer_carinho
 
         self.add_item(
             discord.ui.Container(
@@ -671,26 +682,26 @@ class EventoView(discord.ui.LayoutView):
                     )
                 ),
                 discord.ui.ActionRow(
-                    botao,
+                    botao
                 ),
             )
         )
 
-    async def participar(
+    async def fazer_carinho(
         self,
         interaction: discord.Interaction,
     ) -> None:
-        estado = self.estado
+        async with self.evento.trava:
+            evento = self.evento
 
-        async with estado.trava:
-            if interaction.user.id in estado.ganhadores:
+            if interaction.user.id in evento.ganhadores:
                 await interaction.response.send_message(
                     "Você já ganhou este evento.",
                     ephemeral=True,
                 )
                 return
 
-            if len(estado.ganhadores) >= estado.limite:
+            if len(evento.ganhadores) >= evento.limite:
                 await interaction.response.send_message(
                     "O limite de ganhadores já foi atingido.",
                     ephemeral=True,
@@ -708,16 +719,32 @@ class EventoView(discord.ui.LayoutView):
                 interaction.user.id
             )
 
-            if membro is None:
+            bot_membro = interaction.guild.me
+
+            if membro is None or bot_membro is None:
                 await interaction.response.send_message(
-                    "Não encontrei você no servidor.",
+                    "Não consegui encontrar os membros do servidor.",
+                    ephemeral=True,
+                )
+                return
+
+            if not bot_membro.guild_permissions.manage_roles:
+                await interaction.response.send_message(
+                    "O Poyo não tem `Gerenciar cargos`.",
+                    ephemeral=True,
+                )
+                return
+
+            if evento.cargo >= bot_membro.top_role:
+                await interaction.response.send_message(
+                    "O cargo precisa estar abaixo do cargo do Poyo.",
                     ephemeral=True,
                 )
                 return
 
             try:
                 await membro.add_roles(
-                    estado.cargo,
+                    evento.cargo,
                     reason="Ganhador de evento.",
                 )
             except (
@@ -725,30 +752,33 @@ class EventoView(discord.ui.LayoutView):
                 discord.HTTPException,
             ):
                 await interaction.response.send_message(
-                    "Não consegui entregar o cargo.",
+                    (
+                        "Não consegui entregar o cargo. "
+                        "Confira as permissões e a hierarquia."
+                    ),
                     ephemeral=True,
                 )
                 return
 
-            estado.ganhadores.add(
+            evento.ganhadores.add(
                 interaction.user.id
             )
 
             await interaction.response.send_message(
                 (
                     "Você ganhou e recebeu "
-                    f"{estado.cargo.mention}!"
+                    f"{evento.cargo.mention}!"
                 ),
                 ephemeral=True,
             )
 
             if (
-                len(estado.ganhadores)
-                >= estado.limite
-                and estado.mensagem is not None
+                len(evento.ganhadores)
+                >= evento.limite
+                and evento.mensagem is not None
             ):
                 try:
-                    await estado.mensagem.delete()
+                    await evento.mensagem.delete()
                 except (
                     discord.NotFound,
                     discord.Forbidden,
@@ -776,11 +806,6 @@ class Eventos(commands.Cog):
         self,
         ctx: commands.Context,
     ) -> None:
-        config = ConfiguracaoEvento(
-            autor_id=ctx.author.id,
-            guild_id=ctx.guild.id,
-        )
-
         try:
             await ctx.message.delete()
         except (
@@ -790,11 +815,14 @@ class Eventos(commands.Cog):
         ):
             pass
 
-        mensagem = await ctx.send(
-            view=ConfiguracaoView(config)
+        config = Configuracao(
+            autor_id=ctx.author.id,
+            guild_id=ctx.guild.id,
         )
 
-        config.painel = mensagem
+        config.painel = await ctx.send(
+            view=PainelInicial(config)
+        )
 
 
 async def setup(
