@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import time
@@ -29,7 +30,8 @@ EMOJI_INICIO = "<:axolote:1556443018557661234>"
 EMOJI_FINAL = "<a:emoji_481:1556442987691647068>"
 
 MOD_BANNER_URL = (
-    'https://cdn.discordapp.com/attachments/1556065837830639676/1557126421896372254/Tumblr_l_67143811701311.gif?backend=b2&ex=6ac6aa7c&is=6ac558fc&hm=05eabefc1e0d8f17b1c9e9afedb11113d956579e45035bfd070c51cdd32150b6&'
+    "https://raw.githubusercontent.com/"
+    "Jorginho077/Poyo/main/assets/Tumblr-l-67143811701311.gif"
 )
 
 
@@ -274,26 +276,75 @@ class Moderacao(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        """Apaga mensagens de membros calados até o tempo terminar."""
+        """Apaga imediatamente mensagens novas de membros calados."""
         if message.guild is None or message.author.bot:
             return
 
-        guild_calados = self.calados.get(message.guild.id, {})
-        expiracao = guild_calados.get(message.author.id)
+        if not self._esta_calado(message.guild.id, message.author.id):
+            return
 
+        await self._apagar_mensagem_calada(message)
+
+    @commands.Cog.listener()
+    async def on_message_edit(
+        self,
+        antes: discord.Message,
+        depois: discord.Message,
+    ) -> None:
+        """Apaga uma mensagem que foi editada enquanto o membro está calado."""
+        if depois.guild is None or depois.author.bot:
+            return
+
+        if self._esta_calado(depois.guild.id, depois.author.id):
+            await self._apagar_mensagem_calada(depois)
+
+    def _esta_calado(self, guild_id: int, membro_id: int) -> bool:
+        """Retorna se o calado ainda está ativo e limpa entradas vencidas."""
+        guild_calados = self.calados.get(guild_id)
+        if not guild_calados:
+            return False
+
+        expiracao = guild_calados.get(membro_id)
         if expiracao is None:
-            return
+            return False
 
-        if time.time() >= expiracao:
-            guild_calados.pop(message.author.id, None)
-            if not guild_calados:
-                self.calados.pop(message.guild.id, None)
-            return
+        if time.time() < expiracao:
+            return True
 
+        guild_calados.pop(membro_id, None)
+        if not guild_calados:
+            self.calados.pop(guild_id, None)
+        return False
+
+    async def _apagar_mensagem_calada(
+        self,
+        mensagem: discord.Message,
+    ) -> None:
+        """Tenta apagar a mensagem, incluindo uma tentativa após rate limit."""
         try:
-            await message.delete()
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            pass
+            await mensagem.delete(reason="Mensagem enviada durante calado.")
+        except discord.NotFound:
+            # Ela já foi removida; o objetivo do mute foi cumprido.
+            return
+        except discord.Forbidden:
+            # Sem Manage Messages, não há como apagar mensagens nesse canal.
+            return
+        except discord.HTTPException as erro:
+            # Em spam, o Discord pode aplicar rate limit temporário.
+            # Aguarda apenas quando a API informa um prazo seguro e tenta uma vez.
+            retry_after = getattr(erro, "retry_after", None)
+            if retry_after is None or retry_after > 3:
+                return
+
+            await asyncio.sleep(retry_after)
+            try:
+                await mensagem.delete(reason="Mensagem enviada durante calado.")
+            except (
+                discord.NotFound,
+                discord.Forbidden,
+                discord.HTTPException,
+            ):
+                return
 
     @commands.Cog.listener()
     async def on_voice_state_update(
