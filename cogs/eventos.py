@@ -17,11 +17,11 @@ EVENTOS_BANNER_URL = (
 
 EVENTO_IMAGEM_URL = (
     "https://cdn.discordapp.com/attachments/"
-    "1556052693511053397/1557047859189260308/"
-    "Lucy_Axolotl_JE2.webp?backend=b2&"
-    "ex=6ac66152&is=6ac50fd2&"
-    "hm=f2032f422b331d2215ce7b142c15fe6d"
-    "6560a8bc94e42f0d66389d75421c268a&"
+    "1556264005700423690/1557151503104483400/"
+    "file_000000002e84820ea65c8bc4e5305070.png?backend=b2&"
+    "ex=6ac6c1d8&is=6ac57058&"
+    "hm=cb818814da786c803c5bd448b11fb8db"
+    "d5cd63abd88123a699ebfa07f8f82ca9&"
 )
 
 
@@ -43,6 +43,7 @@ class Evento:
     ganhadores: set[int] = field(default_factory=set)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     mensagem: Optional[discord.Message] = None
+    mensagem_personalizada: Optional[discord.Message] = None
 
 
 class EventoCartao(discord.ui.LayoutView):
@@ -436,6 +437,7 @@ class Menu(discord.ui.LayoutView):
                     self.config.texto,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
+                evento.mensagem_personalizada = texto_enviado
             evento.mensagem = await self.config.canal.send(view=view)
             view.mensagem = evento.mensagem
         except (
@@ -480,6 +482,9 @@ class EventoView(discord.ui.LayoutView):
 
         self.add_item(
             discord.ui.Container(
+                discord.ui.MediaGallery(
+                    discord.MediaGalleryItem(EVENTO_IMAGEM_URL)
+                ),
                 discord.ui.ActionRow(botao),
             )
         )
@@ -558,8 +563,14 @@ class EventoView(discord.ui.LayoutView):
             )
 
             await interaction.response.send_message(
-                f"Você ganhou e recebeu {evento.cargo.mention}!",
-                ephemeral=True,
+                (
+                    f"{interaction.user.mention} fez carinho no axolote "
+                    f"e ganhou {evento.cargo.mention}!"
+                ),
+                allowed_mentions=discord.AllowedMentions(
+                    users=True,
+                    roles=True,
+                ),
             )
 
             if (
@@ -574,6 +585,18 @@ class EventoView(discord.ui.LayoutView):
                     discord.HTTPException,
                 ):
                     pass
+
+                if evento.mensagem_personalizada is not None:
+                    try:
+                        await evento.mensagem_personalizada.edit(
+                            content="Acabado",
+                        )
+                    except (
+                        discord.NotFound,
+                        discord.Forbidden,
+                        discord.HTTPException,
+                    ):
+                        pass
 
 
 class Eventos(commands.Cog):
