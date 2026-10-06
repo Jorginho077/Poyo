@@ -12,16 +12,14 @@ EMOJI_INICIO = "<:axolote:1556443018557661234>"
 EMOJI_FINAL = "<a:emoji_481:1556442987691647068>"
 
 EVENTOS_BANNER_URL = (
-    'https://cdn.discordapp.com/attachments/1556065837830639676/1557126421896372254/Tumblr_l_67143811701311.gif?backend=b2&ex=6ac6aa7c&is=6ac558fc&hm=05eabefc1e0d8f17b1c9e9afedb11113d956579e45035bfd070c51cdd32150b6&'
+    "https://raw.githubusercontent.com/"
+    "Jorginho077/Poyo/main/assets/Tumblr-l-67143811701311.gif"
 )
 
 EVENTO_IMAGEM_URL = (
-    "https://cdn.discordapp.com/attachments/"
-    "1556264005700423690/1557151503104483400/"
-    "file_000000002e84820ea65c8bc4e5305070.png?backend=b2&"
-    "ex=6ac6c1d8&is=6ac57058&"
-    "hm=cb818814da786c803c5bd448b11fb8db"
-    "d5cd63abd88123a699ebfa07f8f82ca9&"
+    "https://raw.githubusercontent.com/"
+    "Jorginho077/Poyo/main/assets/"
+    "file_000000002e84820ea65c8bc4e5305070.png"
 )
 
 
