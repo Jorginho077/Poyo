@@ -9,58 +9,48 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-
 TOKEN = os.getenv("DISCORD_TOKEN")
 PREFIXO = ","
-
-TEMPO_DAS_RESPOSTAS = 25
 
 EMOJI_INICIO = "<:axolote:1556443018557661234>"
 EMOJI_FINAL = "<a:emoji_481:1556442987691647068>"
 
-BANNER_URL = (
+NOVO_BANNER = (
     "https://cdn.discordapp.com/attachments/"
-    "1556052693511053397/1556449326891401307/"
-    "GIF_image_3.gif?backend=b2&ex=6ac433e4&"
-    "is=6ac2e264&hm=7bd09ac806e541b3edadc60c2c796f17"
-    "dfcffe12b617209c6a735eb7e741ce9e&"
+    "1556065837830639676/1557126421896372254/"
+    "Tumblr_l_67143811701311.gif?backend=b2&"
+    "ex=6ac6aa7c&is=6ac558fc&"
+    "hm=05eabefc1e0d8f17b1c9e9afedb11113d956579e45035bfd070c51cdd32150b6&"
 )
 
 
 class Cartao(discord.ui.LayoutView):
-    """Container V2 com banner, texto e banner."""
+    """Container V2 com banner dentro, acima e abaixo do texto."""
 
     def __init__(self, *blocos: str) -> None:
         super().__init__(timeout=None)
 
-        blocos = list(blocos)
-
         if blocos:
+            blocos = list(blocos)
             blocos[0] = (
                 f"{EMOJI_INICIO}  "
                 f"{blocos[0]}  "
                 f"{EMOJI_FINAL}"
             )
 
-        componentes = [
-            discord.ui.MediaGallery(
-                discord.MediaGalleryItem(BANNER_URL)
-            )
-        ]
-
-        componentes.extend(
-            discord.ui.TextDisplay(bloco)
-            for bloco in blocos
-        )
-
-        componentes.append(
-            discord.ui.MediaGallery(
-                discord.MediaGalleryItem(BANNER_URL)
-            )
-        )
-
         self.add_item(
-            discord.ui.Container(*componentes)
+            discord.ui.Container(
+                discord.ui.MediaGallery(
+                    discord.MediaGalleryItem(NOVO_BANNER)
+                ),
+                *(
+                    discord.ui.TextDisplay(bloco)
+                    for bloco in blocos
+                ),
+                discord.ui.MediaGallery(
+                    discord.MediaGalleryItem(NOVO_BANNER)
+                ),
+            )
         )
 
 
@@ -69,7 +59,6 @@ class BotModeracao(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.members = True
-        intents.voice_states = True
 
         super().__init__(
             command_prefix=PREFIXO,
@@ -80,8 +69,7 @@ class BotModeracao(commands.Bot):
         )
 
     async def setup_hook(self) -> None:
-        """Carrega automaticamente todas as cogs da pasta cogs."""
-
+        """Carrega automaticamente todos os arquivos Python de cogs/."""
         import cogs
 
         modulos = sorted(
@@ -94,28 +82,18 @@ class BotModeracao(commands.Bot):
                 continue
 
             nome_da_cog = f"cogs.{modulo.name}"
-
             await self.load_extension(nome_da_cog)
-
-            print(
-                f"Cog carregada: {nome_da_cog}"
-            )
+            print(f"Cog carregada: {nome_da_cog}")
 
     async def on_ready(self) -> None:
         await self.change_presence(
             status=discord.Status.online,
-            activity=discord.Game(
-                name=f"{PREFIXO}comandos | moderação"
-            ),
+            activity=discord.Game(name=f"{PREFIXO}comandos | moderação"),
         )
 
-        print("=" * 50)
-        print(f"Conectado como: {self.user}")
-        print(f"ID: {self.user.id}")
-        print(f"Servidores: {len(self.guilds)}")
-        print(f"Prefixo: {PREFIXO}")
-        print("Todas as cogs foram carregadas.")
-        print("=" * 50)
+        print(f"Conectado como {self.user} | ID: {self.user.id}")
+        print(f"Servidores: {len(self.guilds)} | Prefixo: {PREFIXO}")
+        print("Sistema iniciado com Components V2.")
 
 
 bot = BotModeracao()
@@ -125,14 +103,9 @@ bot = BotModeracao()
 async def apagar_mensagem_do_comando(
     ctx: commands.Context,
 ) -> None:
-    """
-    Apaga a mensagem original de qualquer comando
-    reconhecido pelo Poyo.
-    """
-
+    """Apaga a mensagem original depois que o comando foi reconhecido."""
     try:
         await ctx.message.delete()
-
     except (
         discord.NotFound,
         discord.Forbidden,
@@ -147,95 +120,54 @@ async def apagar_mensagem_do_comando(
     extras={
         "categoria": "Informações",
         "uso": ",comandos",
-        "descricao": "Mostra todos os comandos disponíveis.",
+        "descricao": "Mostra todos os comandos disponíveis e explica cada função.",
     },
 )
-async def comandos(
-    ctx: commands.Context,
-) -> None:
+async def comandos(ctx: commands.Context) -> None:
+    """Exibe ajuda dinâmica usando Container e TextDisplay."""
     blocos = [
-        (
-            "## Comandos\n\n"
-            "Use um dos comandos abaixo."
-        )
+        "## Central de comandos\n\nConfira os comandos disponíveis neste servidor.",
     ]
 
-    categorias: dict[
-        str,
-        list[commands.Command],
-    ] = {}
+    categorias: dict[str, list[commands.Command]] = {}
 
     for comando in bot.commands:
-        if comando.hidden:
+        if comando.hidden or comando.name == "comandos":
             continue
 
-        if comando.name == "comandos":
-            continue
+        categoria = comando.extras.get("categoria", "Outros")
+        categorias.setdefault(categoria, []).append(comando)
 
-        categoria = comando.extras.get(
-            "categoria",
-            "Outros",
-        )
-
-        categorias.setdefault(
-            categoria,
-            [],
-        ).append(comando)
-
-    ordem = [
-        "Moderação",
-        "Utilidades",
-        "Informações",
-        "Diversão",
-        "Outros",
-    ]
-
-    categorias_organizadas = sorted(
+    ordem = ["Moderação", "Utilidades", "Informações", "Outros"]
+    organizadas = sorted(
         categorias.items(),
         key=lambda item: (
-            ordem.index(item[0])
-            if item[0] in ordem
-            else len(ordem),
+            ordem.index(item[0]) if item[0] in ordem else len(ordem),
             item[0],
         ),
     )
 
-    for categoria, lista in categorias_organizadas:
-        linhas = [
-            f"### {categoria}"
-        ]
+    for categoria, lista in organizadas:
+        linhas = [f"### {categoria}"]
 
-        for comando in sorted(
-            lista,
-            key=lambda item: item.name,
-        ):
+        for comando in sorted(lista, key=lambda item: item.name):
             uso = comando.extras.get(
                 "uso",
                 f"{PREFIXO}{comando.qualified_name}",
             )
-
             descricao = comando.extras.get(
                 "descricao",
-                comando.help or "Sem descrição.",
+                comando.help or "Sem descrição disponível.",
             )
+            linhas.append(f"**`{uso}`**\n{descricao}")
 
-            linhas.append(
-                f"**`{uso}`**\n"
-                f"{descricao}"
-            )
-
-        blocos.append(
-            "\n\n".join(linhas)
-        )
+        blocos.append("\n\n".join(linhas))
 
     blocos.append(
-        "-# Respostas somem em 25 segundos."
+        "-# As respostas de moderação somem em 25 segundos."
     )
 
-    await ctx.send(
-        view=Cartao(*blocos),
-        delete_after=TEMPO_DAS_RESPOSTAS,
-    )
+    await ctx.send(view=Cartao(*blocos))
 
 
 @bot.event
@@ -243,76 +175,40 @@ async def on_command_error(
     ctx: commands.Context,
     error: commands.CommandError,
 ) -> None:
-    """
-    Trata erros gerais dos comandos.
-
-    Membros calados são ignorados.
-    Usuários sem permissão são apagados
-    sem receber resposta.
-    """
-
-    if hasattr(
-        ctx.command,
-        "on_error",
-    ):
+    """Responde aos erros sem usar embeds e remove o aviso após 5 segundos."""
+    if hasattr(ctx.command, "on_error"):
         return
 
-    erro = getattr(
-        error,
-        "original",
-        error,
-    )
+    erro = getattr(error, "original", error)
 
-    if isinstance(
-        erro,
-        commands.CommandNotFound,
-    ):
+    if isinstance(erro, commands.CommandNotFound):
         return
 
-    # Membro calado: não responde e não executa ação.
+    # Membro calado: ignora o comando sem enviar container ou aviso.
     if ctx.guild is not None:
         moderacao = bot.get_cog("Moderacao")
 
         if moderacao is not None:
-            calados = getattr(
+            guild_calados = getattr(
                 moderacao,
                 "calados",
                 {},
-            )
+            ).get(ctx.guild.id, {})
 
-            guild_calados = calados.get(
-                ctx.guild.id,
-                {},
-            )
-
-            expiracao = guild_calados.get(
-                ctx.author.id,
-            )
+            expiracao = guild_calados.get(ctx.author.id)
 
             if expiracao is not None:
                 if time.time() < expiracao:
                     return
 
-                guild_calados.pop(
-                    ctx.author.id,
-                    None,
-                )
+                guild_calados.pop(ctx.author.id, None)
 
-    # CheckFailure inclui membros calados.
-    if isinstance(
-        erro,
-        commands.CheckFailure,
-    ):
-        return
-
-    # Usuário sem permissão: apaga e não responde.
-    if isinstance(
-        erro,
-        commands.MissingPermissions,
-    ):
+    if isinstance(erro, commands.NoPrivateMessage):
+        mensagem = "Esse comando só pode ser usado dentro de um servidor."
+    elif isinstance(erro, commands.MissingPermissions):
+        # Apaga silenciosamente o comando de quem não tem permissão.
         try:
             await ctx.message.delete()
-
         except (
             discord.NotFound,
             discord.Forbidden,
@@ -321,76 +217,42 @@ async def on_command_error(
             pass
 
         return
-
-    if isinstance(
-        erro,
-        commands.NoPrivateMessage,
-    ):
+    elif isinstance(erro, commands.CheckFailure):
+        # Inclui comandos de membros calados: não responde nem executa ação.
+        return
+    elif isinstance(erro, commands.BotMissingPermissions):
+        mensagem = "Eu não possuo as permissões necessárias para executar essa ação."
+    elif isinstance(erro, commands.MissingRequiredArgument):
         mensagem = (
-            "Use este comando dentro "
-            "de um servidor."
+            f"Está faltando o argumento `{erro.param.name}`.\n\n"
+            f"Use `{PREFIXO}comandos` para consultar o formato correto."
         )
-
-    elif isinstance(
-        erro,
-        commands.BotMissingPermissions,
-    ):
+    elif isinstance(erro, commands.BadArgument):
         mensagem = (
-            "Eu não tenho as permissões necessárias."
+            "Não consegui identificar algum argumento. Confira a menção, "
+            "o ID ou o tempo informado e tente novamente."
         )
-
-    elif isinstance(
-        erro,
-        commands.MissingRequiredArgument,
-    ):
-        mensagem = (
-            f"Está faltando "
-            f"`{erro.param.name}`.\n\n"
-            f"Use `{PREFIXO}comandos`."
-        )
-
-    elif isinstance(
-        erro,
-        commands.BadArgument,
-    ):
-        mensagem = (
-            "Confira a menção, o ID ou o tempo."
-        )
-
-    elif isinstance(
-        erro,
-        commands.CommandOnCooldown,
-    ):
-        mensagem = (
-            f"Aguarde "
-            f"{erro.retry_after:.1f} segundos."
-        )
-
+    elif isinstance(erro, commands.CommandOnCooldown):
+        mensagem = f"Aguarde {erro.retry_after:.1f} segundos antes de tentar novamente."
     else:
         print(
-            f"Erro no comando "
-            f"{getattr(ctx.command, 'qualified_name', 'desconhecido')}: "
-            f"{erro!r}"
+            f"Erro no comando {getattr(ctx.command, 'qualified_name', 'desconhecido')}: {erro!r}"
         )
-
-        mensagem = (
-            "Não consegui concluir essa ação."
-        )
+        mensagem = "Não consegui concluir esta ação agora. Verifique minhas permissões e tente novamente."
 
     await ctx.send(
         view=Cartao(
-            "Não foi possível concluir",
+            "## Não foi possível concluir",
             mensagem,
         ),
-        delete_after=TEMPO_DAS_RESPOSTAS,
+        delete_after=25,
     )
 
 
 if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError(
-            "A variável DISCORD_TOKEN "
-            "não foi encontrada."
+            "A variável DISCORD_TOKEN não foi encontrada na hospedagem."
         )
 
     bot.run(TOKEN)
