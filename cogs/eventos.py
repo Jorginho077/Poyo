@@ -63,9 +63,7 @@ class CartaoBase(discord.ui.LayoutView):
         self.add_item(
             discord.ui.Container(
                 discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(
-                        BANNER_URL
-                    )
+                    discord.MediaGalleryItem(BANNER_URL)
                 ),
                 discord.ui.TextDisplay(
                     (
@@ -76,9 +74,7 @@ class CartaoBase(discord.ui.LayoutView):
                     )
                 ),
                 discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(
-                        BANNER_URL
-                    )
+                    discord.MediaGalleryItem(BANNER_URL)
                 ),
             )
         )
@@ -189,9 +185,7 @@ class ConfiguracaoView(discord.ui.LayoutView):
         self.add_item(
             discord.ui.Container(
                 discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(
-                        BANNER_URL
-                    )
+                    discord.MediaGalleryItem(BANNER_URL)
                 ),
                 discord.ui.TextDisplay(
                     (
@@ -202,11 +196,11 @@ class ConfiguracaoView(discord.ui.LayoutView):
                         "para abrir as opções."
                     )
                 ),
-                botao,
+                discord.ui.ActionRow(
+                    botao,
+                ),
                 discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(
-                        BANNER_URL
-                    )
+                    discord.MediaGalleryItem(BANNER_URL)
                 ),
             )
         )
@@ -302,9 +296,7 @@ class MenuEvento(discord.ui.LayoutView):
         self.add_item(
             discord.ui.Container(
                 discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(
-                        BANNER_URL
-                    )
+                    discord.MediaGalleryItem(BANNER_URL)
                 ),
                 discord.ui.TextDisplay(
                     (
@@ -317,16 +309,18 @@ class MenuEvento(discord.ui.LayoutView):
                         f"Mensagem: {mensagem}"
                     )
                 ),
-                botoes["voltar"],
-                botoes["cargo"],
-                botoes["canal"],
-                botoes["numero"],
-                botoes["mensagem"],
-                botoes["enviar"],
+                discord.ui.ActionRow(
+                    botoes["voltar"],
+                    botoes["cargo"],
+                    botoes["canal"],
+                    botoes["numero"],
+                    botoes["mensagem"],
+                ),
+                discord.ui.ActionRow(
+                    botoes["enviar"],
+                ),
                 discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(
-                        BANNER_URL
-                    )
+                    discord.MediaGalleryItem(BANNER_URL)
                 ),
             )
         )
@@ -381,8 +375,7 @@ class MenuEvento(discord.ui.LayoutView):
             return (
                 mensagem.author.id
                 == self.config.autor_id
-                and mensagem.channel.id
-                == canal.id
+                and mensagem.channel.id == canal.id
                 and mensagem.guild is not None
                 and mensagem.guild.id
                 == self.config.guild_id
@@ -658,8 +651,9 @@ class EventoView(discord.ui.LayoutView):
         estado: EstadoEvento,
     ) -> None:
         super().__init__(timeout=None)
+
         self.estado = estado
-        self.mensagem = None
+        self.mensagem: Optional[discord.Message] = None
 
         botao = discord.ui.Button(
             label="Participar",
@@ -676,7 +670,9 @@ class EventoView(discord.ui.LayoutView):
                         EVENTO_IMAGEM_URL
                     )
                 ),
-                botao,
+                discord.ui.ActionRow(
+                    botao,
+                ),
             )
         )
 
@@ -687,20 +683,14 @@ class EventoView(discord.ui.LayoutView):
         estado = self.estado
 
         async with estado.trava:
-            if (
-                interaction.user.id
-                in estado.ganhadores
-            ):
+            if interaction.user.id in estado.ganhadores:
                 await interaction.response.send_message(
                     "Você já ganhou este evento.",
                     ephemeral=True,
                 )
                 return
 
-            if (
-                len(estado.ganhadores)
-                >= estado.limite
-            ):
+            if len(estado.ganhadores) >= estado.limite:
                 await interaction.response.send_message(
                     "O limite de ganhadores já foi atingido.",
                     ephemeral=True,
