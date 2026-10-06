@@ -117,6 +117,10 @@ class Moderacao(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.calados: dict[int, dict[int, float]] = {}
+        self.barreiras_calado: dict[
+            int,
+            dict[int, dict[int, Optional[discord.PermissionOverwrite]]],
+        ] = {}
         self.banimentos_temporarios: dict[int, dict[int, float]] = {}
         self.verificar_calados.start()
 
@@ -169,6 +173,7 @@ class Moderacao(commands.Cog):
                 membros.pop(membro_id, None)
 
                 if guild is not None:
+                    await self._remover_barreira_calado(guild, membro_id)
                     membro = guild.get_member(membro_id)
 
                     if membro is not None:
@@ -347,6 +352,101 @@ class Moderacao(commands.Cog):
             ):
                 return
 
+    async def _aplicar_barreira_calado(
+        self,
+        guild: discord.Guild,
+        membro: discord.Member,
+    ) -> None:
+        """Impede o envio em canais de texto enquanto o calado estiver ativo.
+
+        O listener continua apagando mensagens como segunda camada. A barreira
+        reduz a janela em que uma mensagem de spam poderia aparecer antes da
+        exclusão e preserva o overwrite anterior de cada canal.
+        """
+        bot_membro = guild.me
+        if bot_membro is None:
+            return
+
+        por_canal = self.barreiras_calado.setdefault(
+            guild.id,
+            {},
+        ).setdefault(membro.id, {})
+
+        canais = tuple(
+            canal
+            for canal in guild.channels
+            if isinstance(
+                canal,
+                (discord.TextChannel, discord.ForumChannel),
+            )
+        )
+
+        for canal in canais:
+            permissao_bot = canal.permissions_for(bot_membro)
+            if not permissao_bot.manage_channels:
+                continue
+
+            if canal.id not in por_canal:
+                tinha_overwrite = any(
+                    alvo.id == membro.id
+                    for alvo in canal.overwrites
+                )
+                por_canal[canal.id] = (
+                    canal.overwrites_for(membro)
+                    if tinha_overwrite
+                    else None
+                )
+
+            overwrite = canal.overwrites_for(membro)
+            overwrite.send_messages = False
+            overwrite.send_messages_in_threads = False
+
+            try:
+                await canal.set_permissions(
+                    membro,
+                    overwrite=overwrite,
+                    reason="Barreira temporária de membro calado.",
+                )
+            except (
+                discord.Forbidden,
+                discord.HTTPException,
+                discord.NotFound,
+            ):
+                continue
+
+    async def _remover_barreira_calado(
+        self,
+        guild: discord.Guild,
+        membro_id: int,
+    ) -> None:
+        """Restaura os overwrites que existiam antes do calado."""
+        por_guild = self.barreiras_calado.get(guild.id)
+        if not por_guild:
+            return
+
+        por_canal = por_guild.pop(membro_id, {})
+        for canal_id, overwrite_anterior in por_canal.items():
+            canal = guild.get_channel(canal_id)
+            membro = guild.get_member(membro_id)
+            if canal is None or membro is None:
+                continue
+
+            try:
+                await canal.set_permissions(
+                    membro,
+                    overwrite=overwrite_anterior,
+                    reason="Fim do calado; permissões restauradas.",
+                )
+            except (
+                discord.Forbidden,
+                discord.HTTPException,
+                discord.NotFound,
+            ):
+                continue
+
+        if not por_guild:
+            self.barreiras_calado.pop(guild.id, None)
+
     @commands.Cog.listener()
     async def on_voice_state_update(
         self,
@@ -365,6 +465,7 @@ class Moderacao(commands.Cog):
             guild_calados.pop(membro.id, None)
             if not guild_calados:
                 self.calados.pop(membro.guild.id, None)
+            await self._remover_barreira_calado(membro.guild, membro.id)
             return
 
         if depois.channel is None:
@@ -393,7 +494,10 @@ class Moderacao(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(manage_messages=True)
-    @commands.bot_has_permissions(manage_messages=True)
+    @commands.bot_has_permissions(
+        manage_messages=True,
+        manage_channels=True,
+    )
     async def calado(
         self,
         ctx: commands.Context,
@@ -426,6 +530,7 @@ class Moderacao(commands.Cog):
             return
 
         self.calados.setdefault(ctx.guild.id, {})[membro.id] = time.time() + segundos
+        await self._aplicar_barreira_calado(ctx.guild, membro)
 
         await avisar_punicao(
             membro,
@@ -480,7 +585,10 @@ class Moderacao(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(manage_messages=True)
-    @commands.bot_has_permissions(manage_messages=True)
+    @commands.bot_has_permissions(
+        manage_messages=True,
+        manage_channels=True,
+    )
     async def nchoraxx(self, ctx: commands.Context, membro: discord.Member) -> None:
         guild_calados = self.calados.get(ctx.guild.id, {})
 
@@ -489,6 +597,7 @@ class Moderacao(commands.Cog):
             return
 
         guild_calados.pop(membro.id, None)
+        await self._remover_barreira_calado(ctx.guild, membro.id)
         if not guild_calados:
             self.calados.pop(ctx.guild.id, None)
 
