@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import os
 import re
 import time
 from typing import Optional
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 
 DURACAO_RE = re.compile(
@@ -22,11 +23,12 @@ UNIDADES = {
 }
 
 TEMPO_DAS_RESPOSTAS = 25
+LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0") or "0")
 
 EMOJI_INICIO = "<:axolote:1556443018557661234>"
 EMOJI_FINAL = "<a:emoji_481:1556442987691647068>"
 
-BANNER_URL = (
+MOD_BANNER_URL = (
     "https://cdn.discordapp.com/attachments/"
     "1556052693511053397/1556449326891401307/"
     "GIF_image_3.gif?backend=b2&ex=6ac433e4&"
@@ -36,16 +38,12 @@ BANNER_URL = (
 
 
 def analisar_duracao(texto: str) -> Optional[int]:
-    resultado = DURACAO_RE.fullmatch(
-        texto.lower().strip()
-    )
-
-    if not resultado:
+    correspondencia = DURACAO_RE.fullmatch(texto.lower().strip())
+    if not correspondencia:
         return None
 
-    valor = int(resultado.group("valor"))
-    unidade = resultado.group("unidade").lower()
-
+    valor = int(correspondencia.group("valor"))
+    unidade = correspondencia.group("unidade").lower()
     return valor * UNIDADES[unidade]
 
 
@@ -59,43 +57,31 @@ def formatar_duracao(segundos: int) -> str:
         ("minuto", 60),
         ("segundo", 1),
     ):
-        quantidade, segundos = divmod(
-            segundos,
-            divisor,
-        )
-
+        quantidade, segundos = divmod(segundos, divisor)
         if quantidade:
             plural = "s" if quantidade != 1 else ""
-            partes.append(
-                f"{quantidade} {nome}{plural}"
-            )
+            partes.append(f"{quantidade} {nome}{plural}")
 
     return ", ".join(partes)
 
 
-class Cartao(discord.ui.LayoutView):
-    def __init__(
-        self,
-        titulo: str,
-        descricao: str,
-    ) -> None:
+class ModeracaoCartao(discord.ui.LayoutView):
+    """Container V2 com banner dentro, acima e abaixo do texto."""
+
+    def __init__(self, titulo: str, descricao: str) -> None:
         super().__init__(timeout=None)
 
         self.add_item(
             discord.ui.Container(
                 discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(BANNER_URL)
+                    discord.MediaGalleryItem(MOD_BANNER_URL)
                 ),
                 discord.ui.TextDisplay(
-                    (
-                        f"{EMOJI_INICIO}  "
-                        f"**{titulo}**  "
-                        f"{EMOJI_FINAL}\n\n"
-                        f"{descricao}"
-                    )
+                    f"{EMOJI_INICIO}  **{titulo}**  {EMOJI_FINAL}\n\n"
+                    f"{descricao}"
                 ),
                 discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(BANNER_URL)
+                    discord.MediaGalleryItem(MOD_BANNER_URL)
                 ),
             )
         )
@@ -107,7 +93,7 @@ async def responder(
     texto: str,
 ) -> discord.Message:
     return await ctx.send(
-        view=Cartao(titulo, texto),
+        view=ModeracaoCartao(titulo, texto),
         delete_after=TEMPO_DAS_RESPOSTAS,
     )
 
@@ -116,14 +102,9 @@ async def avisar_punicao(
     membro: discord.Member,
     texto: str,
 ) -> None:
-    """
-    Tenta enviar o aviso no privado.
-    Se a DM estiver fechada, a punição continua normalmente.
-    """
-
+    """Tenta avisar no privado sem impedir a punição."""
     try:
         await membro.send(texto)
-
     except (
         discord.Forbidden,
         discord.HTTPException,
@@ -133,116 +114,189 @@ async def avisar_punicao(
 
 
 class Moderacao(commands.Cog):
-    def __init__(
-        self,
-        bot: commands.Bot,
-    ) -> None:
+    """Comandos de moderação do servidor."""
+
+    def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        self.calados: dict[int, dict[int, float]] = {}
+        self.banimentos_temporarios: dict[int, dict[int, float]] = {}
+        self.verificar_calados.start()
 
-        self.calados: dict[
-            int,
-            dict[int, float],
-        ] = {}
+    def cog_unload(self) -> None:
+        self.verificar_calados.cancel()
 
-    def _calado_ate(
+    async def registrar_log(
         self,
-        guild_id: int,
-        membro_id: int,
-    ) -> Optional[float]:
-        return self.calados.get(
-            guild_id,
-            {},
-        ).get(membro_id)
-
-    def _limpar_calado_expirado(
-        self,
-        guild_id: int,
-        membro_id: int,
+        guild: discord.Guild,
+        acao: str,
+        detalhes: str,
     ) -> None:
-        membros = self.calados.get(
-            guild_id,
-            {},
-        )
+        """Registra uma ação no canal configurado, sem quebrar a moderação."""
+        if LOG_CHANNEL_ID <= 0:
+            return
 
-        membros.pop(
-            membro_id,
-            None,
-        )
+        canal = guild.get_channel(LOG_CHANNEL_ID)
 
-        if not membros:
-            self.calados.pop(
-                guild_id,
-                None,
+        if canal is None or not hasattr(canal, "send"):
+            return
+
+        try:
+            await canal.send(
+                (
+                    f"**{acao}**\n"
+                    f"{detalhes}\n"
+                    f"<t:{int(time.time())}:F>"
+                ),
+                allowed_mentions=discord.AllowedMentions.none(),
             )
+        except (
+            discord.Forbidden,
+            discord.HTTPException,
+            discord.NotFound,
+        ):
+            pass
 
-    async def cog_check(
-        self,
-        ctx: commands.Context,
-    ) -> bool:
-        """
-        Impede qualquer pessoa calada de usar
-        comandos, inclusive administradores.
-        """
+    @tasks.loop(seconds=5)
+    async def verificar_calados(self) -> None:
+        """Libera calados e banimentos temporários expirados."""
+        agora = time.time()
 
+        for guild_id, membros in list(self.calados.items()):
+            guild = self.bot.get_guild(guild_id)
+
+            for membro_id, expiracao in list(membros.items()):
+                if agora < expiracao:
+                    continue
+
+                membros.pop(membro_id, None)
+
+                if guild is not None:
+                    membro = guild.get_member(membro_id)
+
+                    if membro is not None:
+                        await avisar_punicao(
+                            membro,
+                            (
+                                f"Seu calado no servidor "
+                                f"**{guild.name}** terminou. "
+                                "Você pode falar novamente."
+                            ),
+                        )
+                        await self.registrar_log(
+                            guild,
+                            "CALADO ENCERRADO",
+                            (
+                                f"Membro: {membro} (`{membro.id}`)\n"
+                                "O tempo terminou automaticamente."
+                            ),
+                        )
+
+            if not membros:
+                self.calados.pop(guild_id, None)
+
+        for guild_id, banimentos in list(
+            self.banimentos_temporarios.items()
+        ):
+            guild = self.bot.get_guild(guild_id)
+
+            if guild is None:
+                continue
+
+            for membro_id, expiracao in list(banimentos.items()):
+                if agora < expiracao:
+                    continue
+
+                try:
+                    await guild.unban(
+                        discord.Object(id=membro_id),
+                        reason="Banimento temporário encerrado.",
+                    )
+                except discord.NotFound:
+                    banimentos.pop(membro_id, None)
+                    continue
+                except (
+                    discord.Forbidden,
+                    discord.HTTPException,
+                ):
+                    continue
+
+                banimentos.pop(membro_id, None)
+
+                try:
+                    usuario = self.bot.get_user(membro_id)
+
+                    if usuario is None:
+                        usuario = await self.bot.fetch_user(membro_id)
+
+                    await avisar_punicao(
+                        usuario,
+                        (
+                            f"Seu banimento temporário no servidor "
+                            f"**{guild.name}** terminou. "
+                            "Você pode voltar ao servidor."
+                        ),
+                    )
+                    await self.registrar_log(
+                        guild,
+                        "BANIMENTO TEMPORÁRIO ENCERRADO",
+                        (
+                            f"Membro: {usuario} (`{membro_id}`)\n"
+                            "O banimento terminou e o usuário foi desbanido."
+                        ),
+                    )
+                except (
+                    discord.NotFound,
+                    discord.Forbidden,
+                    discord.HTTPException,
+                ):
+                    pass
+
+            if not banimentos:
+                self.banimentos_temporarios.pop(guild_id, None)
+
+    @verificar_calados.before_loop
+    async def aguardar_bot(self) -> None:
+        await self.bot.wait_until_ready()
+
+    async def cog_check(self, ctx: commands.Context) -> bool:
         if ctx.guild is None:
             raise commands.NoPrivateMessage()
 
-        expiracao = self._calado_ate(
-            ctx.guild.id,
-            ctx.author.id,
-        )
+        guild_calados = self.calados.get(ctx.guild.id, {})
+        expiracao = guild_calados.get(ctx.author.id)
 
-        if expiracao is None:
-            return True
+        if expiracao is not None:
+            if time.time() < expiracao:
+                # O membro calado não pode executar comandos do Poyo.
+                raise commands.CheckFailure()
 
-        if time.time() < expiracao:
-            raise commands.CheckFailure()
-
-        self._limpar_calado_expirado(
-            ctx.guild.id,
-            ctx.author.id,
-        )
+            guild_calados.pop(ctx.author.id, None)
+            if not guild_calados:
+                self.calados.pop(ctx.guild.id, None)
 
         return True
 
     @commands.Cog.listener()
-    async def on_message(
-        self,
-        message: discord.Message,
-    ) -> None:
-        """
-        Apaga mensagens de membros calados.
-        """
-
-        if message.guild is None:
+    async def on_message(self, message: discord.Message) -> None:
+        """Apaga mensagens de membros calados até o tempo terminar."""
+        if message.guild is None or message.author.bot:
             return
 
-        if message.author.bot:
-            return
-
-        expiracao = self._calado_ate(
-            message.guild.id,
-            message.author.id,
-        )
+        guild_calados = self.calados.get(message.guild.id, {})
+        expiracao = guild_calados.get(message.author.id)
 
         if expiracao is None:
             return
 
         if time.time() >= expiracao:
-            self._limpar_calado_expirado(
-                message.guild.id,
-                message.author.id,
-            )
+            guild_calados.pop(message.author.id, None)
+            if not guild_calados:
+                self.calados.pop(message.guild.id, None)
             return
 
         try:
             await message.delete()
-
-        except (
-            discord.NotFound,
-            discord.Forbidden,
-            discord.HTTPException,
-        ):
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             pass
 
     @commands.Cog.listener()
@@ -252,24 +306,17 @@ class Moderacao(commands.Cog):
         antes: discord.VoiceState,
         depois: discord.VoiceState,
     ) -> None:
-        """
-        Remove o membro calado da call e impede
-        que ele entre novamente durante o período.
-        """
-
-        expiracao = self._calado_ate(
-            membro.guild.id,
-            membro.id,
-        )
+        """Desconecta membros calados que estejam ou tentem entrar em call."""
+        guild_calados = self.calados.get(membro.guild.id, {})
+        expiracao = guild_calados.get(membro.id)
 
         if expiracao is None:
             return
 
         if time.time() >= expiracao:
-            self._limpar_calado_expirado(
-                membro.guild.id,
-                membro.id,
-            )
+            guild_calados.pop(membro.id, None)
+            if not guild_calados:
+                self.calados.pop(membro.guild.id, None)
             return
 
         if depois.channel is None:
@@ -278,12 +325,8 @@ class Moderacao(commands.Cog):
         try:
             await membro.move_to(
                 None,
-                reason=(
-                    "Membro calado não pode "
-                    "permanecer em call."
-                ),
+                reason="Membro calado não pode permanecer em call.",
             )
-
         except (
             discord.NotFound,
             discord.Forbidden,
@@ -297,16 +340,12 @@ class Moderacao(commands.Cog):
         extras={
             "categoria": "Moderação",
             "uso": ",calado @membro 1h",
-            "descricao": "Apaga as mensagens durante o tempo informado.",
+            "descricao": "Impede mensagens durante o tempo informado.",
         },
     )
     @commands.guild_only()
-    @commands.has_permissions(
-        manage_messages=True,
-    )
-    @commands.bot_has_permissions(
-        manage_messages=True,
-    )
+    @commands.has_permissions(manage_messages=True)
+    @commands.bot_has_permissions(manage_messages=True)
     async def calado(
         self,
         ctx: commands.Context,
@@ -317,66 +356,34 @@ class Moderacao(commands.Cog):
     ) -> None:
         segundos = analisar_duracao(tempo)
 
-        if (
-            segundos is None
-            or segundos < 1
-            or segundos > 28 * 86400
-        ):
-            await responder(
-                ctx,
-                "Tempo inválido",
-                "Use `1m`, `1h` ou `28d`.",
-            )
+        if segundos is None or not 1 <= segundos <= 28 * 86400:
+            await responder(ctx, "Tempo inválido", "Use `1m`, `1h` ou `28d`.")
             return
 
         if membro == ctx.author:
-            await responder(
-                ctx,
-                "Ação negada",
-                "Você não pode se calar.",
-            )
+            await responder(ctx, "Ação negada", "Você não pode se calar.")
             return
 
         if membro == ctx.guild.owner:
-            await responder(
-                ctx,
-                "Ação negada",
-                "O dono não pode ser calado.",
-            )
+            await responder(ctx, "Ação negada", "O dono não pode ser calado.")
             return
 
         if membro.top_role >= ctx.author.top_role:
-            await responder(
-                ctx,
-                "Ação negada",
-                "O cargo dele é igual ou superior ao seu.",
-            )
+            await responder(ctx, "Ação negada", "Cargo acima do seu.")
             return
 
         bot_membro = ctx.guild.me
-
-        if (
-            bot_membro is None
-            or membro.top_role >= bot_membro.top_role
-        ):
-            await responder(
-                ctx,
-                "Ação negada",
-                "Meu cargo precisa estar acima do dele.",
-            )
+        if bot_membro is None or membro.top_role >= bot_membro.top_role:
+            await responder(ctx, "Ação negada", "Meu cargo precisa estar acima do dele.")
             return
 
-        self.calados.setdefault(
-            ctx.guild.id,
-            {},
-        )[membro.id] = time.time() + segundos
+        self.calados.setdefault(ctx.guild.id, {})[membro.id] = time.time() + segundos
 
         await avisar_punicao(
             membro,
             (
-                f"Você foi calado no servidor "
-                f"**{ctx.guild.name}** por "
-                f"**{formatar_duracao(segundos)}**."
+                f"Você foi calado no servidor **{ctx.guild.name}** "
+                f"por **{formatar_duracao(segundos)}**."
             ),
         )
 
@@ -386,20 +393,31 @@ class Moderacao(commands.Cog):
                     None,
                     reason="Membro calado removido da call.",
                 )
-
             except (
                 discord.NotFound,
                 discord.Forbidden,
                 discord.HTTPException,
             ):
-                pass
+                await responder(
+                    ctx,
+                    "Call não removida",
+                    "Dê ao Poyo `Mover membros` nesta call.",
+                )
+                return
 
         await responder(
             ctx,
             "Calado com sucesso",
+            f"{membro.mention} não pode falar por **{formatar_duracao(segundos)}**.",
+        )
+
+        await self.registrar_log(
+            ctx.guild,
+            "MEMBRO CALADO",
             (
-                f"{membro.mention} não pode falar por "
-                f"**{formatar_duracao(segundos)}**."
+                f"Moderador: {ctx.author} (`{ctx.author.id}`)\n"
+                f"Membro: {membro} (`{membro.id}`)\n"
+                f"Duração: {formatar_duracao(segundos)}"
             ),
         )
 
@@ -409,43 +427,40 @@ class Moderacao(commands.Cog):
         extras={
             "categoria": "Moderação",
             "uso": ",nchoraxx @membro",
-            "descricao": "Remove o calado de um membro.",
+            "descricao": "Libera um membro calado.",
         },
     )
     @commands.guild_only()
-    @commands.has_permissions(
-        manage_messages=True,
-    )
-    @commands.bot_has_permissions(
-        manage_messages=True,
-    )
-    async def nchoraxx(
-        self,
-        ctx: commands.Context,
-        membro: discord.Member,
-    ) -> None:
-        membros = self.calados.get(
-            ctx.guild.id,
-            {},
-        )
+    @commands.has_permissions(manage_messages=True)
+    @commands.bot_has_permissions(manage_messages=True)
+    async def nchoraxx(self, ctx: commands.Context, membro: discord.Member) -> None:
+        guild_calados = self.calados.get(ctx.guild.id, {})
 
-        if membro.id not in membros:
-            await responder(
-                ctx,
-                "Ação negada",
-                f"{membro.mention} não está calado.",
-            )
+        if membro.id not in guild_calados:
+            await responder(ctx, "Ação negada", f"{membro.mention} não está calado.")
             return
 
-        self._limpar_calado_expirado(
-            ctx.guild.id,
-            membro.id,
+        guild_calados.pop(membro.id, None)
+        if not guild_calados:
+            self.calados.pop(ctx.guild.id, None)
+
+        await avisar_punicao(
+            membro,
+            (
+                f"Seu calado no servidor **{ctx.guild.name}** "
+                "foi removido. Você pode falar novamente."
+            ),
         )
 
-        await responder(
-            ctx,
-            "Calado removido",
-            f"{membro.mention} pode falar novamente.",
+        await responder(ctx, "Calado removido", f"{membro.mention} pode falar novamente.")
+
+        await self.registrar_log(
+            ctx.guild,
+            "CALADO REMOVIDO",
+            (
+                f"Moderador: {ctx.author} (`{ctx.author.id}`)\n"
+                f"Membro: {membro} (`{membro.id}`)"
+            ),
         )
 
     @commands.command(
@@ -453,36 +468,48 @@ class Moderacao(commands.Cog):
         aliases=("banir",),
         extras={
             "categoria": "Moderação",
-            "uso": ",sai @membro",
-            "descricao": "Bane um membro do servidor.",
+            "uso": ",sai @membro [tempo]",
+            "descricao": "Bane permanentemente ou por tempo definido.",
         },
     )
     @commands.guild_only()
-    @commands.has_permissions(
-        ban_members=True,
-    )
-    @commands.bot_has_permissions(
-        ban_members=True,
-    )
+    @commands.has_permissions(ban_members=True)
+    @commands.bot_has_permissions(ban_members=True)
     async def sai(
         self,
         ctx: commands.Context,
         membro: discord.Member,
+        tempo: Optional[str] = None,
         *,
         motivo: str = "Nenhum motivo informado",
     ) -> None:
-        if not await self._pode_punir(
-            ctx,
-            membro,
-            "banido",
-        ):
+        if not await self._pode_punir(ctx, membro, "remover"):
             return
+
+        segundos = None
+
+        if tempo is not None:
+            segundos = analisar_duracao(tempo)
+
+            if segundos is None or segundos < 1:
+                await responder(
+                    ctx,
+                    "Tempo inválido",
+                    "Use `,sai @membro 7d` ou deixe sem tempo para ser permanente.",
+                )
+                return
+
+        texto_tempo = (
+            f" por **{formatar_duracao(segundos)}**"
+            if segundos is not None
+            else " permanentemente"
+        )
 
         await avisar_punicao(
             membro,
             (
-                f"Você foi banido do servidor "
-                f"**{ctx.guild.name}**."
+                f"Você foi banido do servidor **{ctx.guild.name}**"
+                f"{texto_tempo}."
             ),
         )
 
@@ -491,19 +518,35 @@ class Moderacao(commands.Cog):
                 reason=f"{ctx.author} — {motivo}",
                 delete_message_seconds=86400,
             )
-
         except discord.Forbidden:
-            await responder(
-                ctx,
-                "Ação negada",
-                "Não posso banir esse membro.",
-            )
+            await responder(ctx, "Ação negada", "Não posso remover esse membro.")
             return
+
+        if segundos is not None:
+            self.banimentos_temporarios.setdefault(
+                ctx.guild.id,
+                {},
+            )[membro.id] = time.time() + segundos
 
         await responder(
             ctx,
             "Membro banido",
-            f"**{membro}** foi banido.",
+            (
+                f"**{membro}** foi banido"
+                f"{texto_tempo}."
+            ),
+        )
+
+        await self.registrar_log(
+            ctx.guild,
+            "MEMBRO BANIDO",
+            (
+                f"Moderador: {ctx.author} (`{ctx.author.id}`)\n"
+                f"Membro: {membro} (`{membro.id}`)\n"
+                f"Tipo: {'temporário' if segundos is not None else 'permanente'}\n"
+                f"Duração: {formatar_duracao(segundos) if segundos is not None else 'permanente'}\n"
+                f"Motivo: {motivo}"
+            ),
         )
 
     @commands.command(
@@ -515,52 +558,31 @@ class Moderacao(commands.Cog):
         },
     )
     @commands.guild_only()
-    @commands.has_permissions(
-        ban_members=True,
-    )
-    @commands.bot_has_permissions(
-        ban_members=True,
-    )
-    async def rban(
-        self,
-        ctx: commands.Context,
-        usuario_id: int,
-    ) -> None:
+    @commands.has_permissions(ban_members=True)
+    @commands.bot_has_permissions(ban_members=True)
+    async def rban(self, ctx: commands.Context, usuario_id: int) -> None:
         try:
-            banimento = await ctx.guild.fetch_ban(
-                discord.Object(
-                    id=usuario_id,
-                )
-            )
-
+            banimento = await ctx.guild.fetch_ban(discord.Object(id=usuario_id))
             await ctx.guild.unban(
                 banimento.user,
-                reason=(
-                    f"Banimento removido por "
-                    f"{ctx.author}"
-                ),
+                reason=f"Banimento removido por {ctx.author}",
             )
-
         except discord.NotFound:
-            await responder(
-                ctx,
-                "Ação negada",
-                "Esse ID não está banido.",
-            )
+            await responder(ctx, "Ação negada", "Esse ID não está banido.")
             return
-
         except discord.Forbidden:
-            await responder(
-                ctx,
-                "Ação negada",
-                "Não posso remover esse banimento.",
-            )
+            await responder(ctx, "Ação negada", "Não posso remover esse banimento.")
             return
 
-        await responder(
-            ctx,
-            "Banimento removido",
-            f"**{banimento.user}** pode voltar.",
+        await responder(ctx, "Banimento removido", f"**{banimento.user}** pode voltar.")
+
+        await self.registrar_log(
+            ctx.guild,
+            "BANIMENTO REMOVIDO",
+            (
+                f"Moderador: {ctx.author} (`{ctx.author.id}`)\n"
+                f"Usuário: {banimento.user} (`{banimento.user.id}`)"
+            ),
         )
 
     @commands.command(
@@ -573,12 +595,8 @@ class Moderacao(commands.Cog):
         },
     )
     @commands.guild_only()
-    @commands.has_permissions(
-        kick_members=True,
-    )
-    @commands.bot_has_permissions(
-        kick_members=True,
-    )
+    @commands.has_permissions(kick_members=True)
+    @commands.bot_has_permissions(kick_members=True)
     async def expulsar(
         self,
         ctx: commands.Context,
@@ -586,38 +604,30 @@ class Moderacao(commands.Cog):
         *,
         motivo: str = "Nenhum motivo informado",
     ) -> None:
-        if not await self._pode_punir(
-            ctx,
-            membro,
-            "expulso",
-        ):
+        if not await self._pode_punir(ctx, membro, "expulsar"):
             return
 
         await avisar_punicao(
             membro,
-            (
-                f"Você foi expulso do servidor "
-                f"**{ctx.guild.name}**."
-            ),
+            f"Você foi expulso do servidor **{ctx.guild.name}**.",
         )
 
         try:
-            await membro.kick(
-                reason=f"{ctx.author} — {motivo}",
-            )
-
+            await membro.kick(reason=f"{ctx.author} — {motivo}")
         except discord.Forbidden:
-            await responder(
-                ctx,
-                "Ação negada",
-                "Não posso expulsar esse membro.",
-            )
+            await responder(ctx, "Ação negada", "Não posso expulsar esse membro.")
             return
 
-        await responder(
-            ctx,
-            "Membro expulso",
-            f"**{membro}** foi expulso.",
+        await responder(ctx, "Membro expulso", f"**{membro}** foi expulso.")
+
+        await self.registrar_log(
+            ctx.guild,
+            "MEMBRO EXPULSO",
+            (
+                f"Moderador: {ctx.author} (`{ctx.author.id}`)\n"
+                f"Membro: {membro} (`{membro.id}`)\n"
+                f"Motivo: {motivo}"
+            ),
         )
 
     async def _pode_punir(
@@ -627,32 +637,16 @@ class Moderacao(commands.Cog):
         acao: str,
     ) -> bool:
         if membro == ctx.guild.owner:
-            await responder(
-                ctx,
-                "Ação negada",
-                f"O dono não pode ser {acao}.",
-            )
+            await responder(ctx, "Ação negada", f"O dono não pode ser {acao}.")
             return False
 
         if membro.top_role >= ctx.author.top_role:
-            await responder(
-                ctx,
-                "Ação negada",
-                "O cargo dele é igual ou superior ao seu.",
-            )
+            await responder(ctx, "Ação negada", "Cargo acima do seu.")
             return False
 
         bot_membro = ctx.guild.me
-
-        if (
-            bot_membro is None
-            or membro.top_role >= bot_membro.top_role
-        ):
-            await responder(
-                ctx,
-                "Ação negada",
-                "Meu cargo precisa estar acima do dele.",
-            )
+        if bot_membro is None or membro.top_role >= bot_membro.top_role:
+            await responder(ctx, "Ação negada", "Meu cargo precisa estar acima do dele.")
             return False
 
         return True
@@ -666,20 +660,10 @@ class Moderacao(commands.Cog):
         },
     )
     @commands.guild_only()
-    @commands.has_permissions(
-        manage_channels=True,
-    )
-    @commands.bot_has_permissions(
-        manage_channels=True,
-    )
-    async def trancar(
-        self,
-        ctx: commands.Context,
-    ) -> None:
-        permissao = ctx.channel.overwrites_for(
-            ctx.guild.default_role,
-        )
-
+    @commands.has_permissions(manage_channels=True)
+    @commands.bot_has_permissions(manage_channels=True)
+    async def trancar(self, ctx: commands.Context) -> None:
+        permissao = ctx.channel.overwrites_for(ctx.guild.default_role)
         permissao.send_messages = False
 
         await ctx.channel.set_permissions(
@@ -688,10 +672,15 @@ class Moderacao(commands.Cog):
             reason=f"Canal trancado por {ctx.author}",
         )
 
-        await responder(
-            ctx,
-            "Canal trancado",
-            "Canal fechado.",
+        await responder(ctx, "Canal trancado", "Canal fechado.")
+
+        await self.registrar_log(
+            ctx.guild,
+            "CANAL TRANCADO",
+            (
+                f"Moderador: {ctx.author} (`{ctx.author.id}`)\n"
+                f"Canal: {ctx.channel.mention} (`{ctx.channel.id}`)"
+            ),
         )
 
     @commands.command(
@@ -703,20 +692,10 @@ class Moderacao(commands.Cog):
         },
     )
     @commands.guild_only()
-    @commands.has_permissions(
-        manage_channels=True,
-    )
-    @commands.bot_has_permissions(
-        manage_channels=True,
-    )
-    async def destrancar(
-        self,
-        ctx: commands.Context,
-    ) -> None:
-        permissao = ctx.channel.overwrites_for(
-            ctx.guild.default_role,
-        )
-
+    @commands.has_permissions(manage_channels=True)
+    @commands.bot_has_permissions(manage_channels=True)
+    async def destrancar(self, ctx: commands.Context) -> None:
+        permissao = ctx.channel.overwrites_for(ctx.guild.default_role)
         permissao.send_messages = None
 
         await ctx.channel.set_permissions(
@@ -725,10 +704,15 @@ class Moderacao(commands.Cog):
             reason=f"Canal destrancado por {ctx.author}",
         )
 
-        await responder(
-            ctx,
-            "Canal destrancado",
-            "Canal liberado.",
+        await responder(ctx, "Canal destrancado", "Canal liberado.")
+
+        await self.registrar_log(
+            ctx.guild,
+            "CANAL DESTRANCADO",
+            (
+                f"Moderador: {ctx.author} (`{ctx.author.id}`)\n"
+                f"Canal: {ctx.channel.mention} (`{ctx.channel.id}`)"
+            ),
         )
 
     @commands.command(
@@ -741,45 +725,30 @@ class Moderacao(commands.Cog):
         },
     )
     @commands.guild_only()
-    @commands.has_permissions(
-        manage_messages=True,
-    )
+    @commands.has_permissions(manage_messages=True)
     @commands.bot_has_permissions(
         manage_messages=True,
         read_message_history=True,
     )
-    async def limpar(
-        self,
-        ctx: commands.Context,
-        quantidade: int,
-    ) -> None:
-        if quantidade < 1 or quantidade > 100:
-            await responder(
-                ctx,
-                "Ação negada",
-                "Use um número entre 1 e 100.",
-            )
+    async def limpar(self, ctx: commands.Context, quantidade: int) -> None:
+        if not 1 <= quantidade <= 100:
+            await responder(ctx, "Ação negada", "Use um número entre 1 e 100.")
             return
 
-        apagadas = await ctx.channel.purge(
-            limit=quantidade + 1,
+        apagadas = await ctx.channel.purge(limit=quantidade + 1)
+        total = max(len(apagadas) - 1, 0)
+        await responder(ctx, "Limpeza concluída", f"{total} mensagens apagadas.")
+
+        await self.registrar_log(
+            ctx.guild,
+            "MENSAGENS APAGADAS",
+            (
+                f"Moderador: {ctx.author} (`{ctx.author.id}`)\n"
+                f"Canal: {ctx.channel.mention} (`{ctx.channel.id}`)\n"
+                f"Quantidade: {total}"
+            ),
         )
 
-        total = max(
-            len(apagadas) - 1,
-            0,
-        )
 
-        await responder(
-            ctx,
-            "Limpeza concluída",
-            f"{total} mensagens apagadas.",
-        )
-
-
-async def setup(
-    bot: commands.Bot,
-) -> None:
-    await bot.add_cog(
-        Moderacao(bot)
-    )
+async def setup(bot: commands.Bot) -> None:
+    await bot.add_cog(Moderacao(bot))
