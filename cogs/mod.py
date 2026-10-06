@@ -29,11 +29,7 @@ EMOJI_INICIO = "<:axolote:1556443018557661234>"
 EMOJI_FINAL = "<a:emoji_481:1556442987691647068>"
 
 MOD_BANNER_URL = (
-    "https://cdn.discordapp.com/attachments/"
-    "1556052693511053397/1556449326891401307/"
-    "GIF_image_3.gif?backend=b2&ex=6ac433e4&"
-    "is=6ac2e264&hm=7bd09ac806e541b3edadc60c2c796f17"
-    "dfcffe12b617209c6a735eb7e741ce9e&"
+    'https://cdn.discordapp.com/attachments/1556065837830639676/1557126421896372254/Tumblr_l_67143811701311.gif?backend=b2&ex=6ac6aa7c&is=6ac558fc&hm=05eabefc1e0d8f17b1c9e9afedb11113d956579e45035bfd070c51cdd32150b6&'
 )
 
 
