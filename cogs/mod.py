@@ -322,7 +322,8 @@ class Moderacao(commands.Cog):
     ) -> None:
         """Tenta apagar a mensagem, incluindo uma tentativa após rate limit."""
         try:
-            await mensagem.delete(reason="Mensagem enviada durante calado.")
+            # PartialMessage.delete não aceita o parâmetro `reason`.
+            await mensagem.delete()
         except discord.NotFound:
             # Ela já foi removida; o objetivo do mute foi cumprido.
             return
@@ -338,7 +339,7 @@ class Moderacao(commands.Cog):
 
             await asyncio.sleep(retry_after)
             try:
-                await mensagem.delete(reason="Mensagem enviada durante calado.")
+                await mensagem.delete()
             except (
                 discord.NotFound,
                 discord.Forbidden,
