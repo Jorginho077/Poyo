@@ -111,15 +111,9 @@ CAT_DEFAULTS = {
 DEFAULTS = {
     "painel": {
         "titulo": "Central de Atendimento",
-        "descricao": (
-            "Selecione uma opção no menu abaixo para abrir\n"
-            "um atendimento privado com a nossa equipe."
-        ),
-        "info": (
-            "-# Somente você e a equipe têm acesso ao canal\n"
-            "-# A transcrição é enviada na sua DM ao encerrar"
-        ),
-        "rodape": "Um ticket por pessoa",
+        "descricao": "escolha uma opção no menu abaixo ✨",
+        "info": "🔒 só você e a equipe veem · a transcrição vai pra sua DM",
+        "rodape": "um ticket por pessoa",
         # none = banenr padrao do bot · "" = sem banner · link = imagem propria
         "banner": os.getenv("TICKET_BANNER_URL", "").strip() or None,
         "gif_fim": None,           # none = gif padrao · "" = sem · link = imagem propria
@@ -535,6 +529,17 @@ async def save_image(guild_id, chave, attachment: discord.Attachment):
     return FILE_PREFIX + nome, None
 
 
+def _miudo(texto: str) -> str:
+    # deixa cada linha em letra pequena (-#), sem duplicar se ja estiver
+    linhas = []
+    for linha in str(texto).splitlines():
+        t = linha.strip()
+        if not t:
+            continue
+        linhas.append(t if t.startswith(("-#", "#")) else f"-# {t}")
+    return "\n".join(linhas)
+
+
 # painel em retangulos separados: gif · linha fininha · texto · linha fininha · menu · gif
 def build_panel_view(cfg):
     p = cfg["painel"]
@@ -550,20 +555,21 @@ def build_panel_view(cfg):
 
     cats = cfg["categorias"]
     texto = []
-    head = f"## {p['titulo']}" if p.get("titulo") else ""
+    # titulo pequeno (###) e o resto em letrinha miudinha (-#)
+    head = f"### {p['titulo']}" if p.get("titulo") else ""
     if p.get("descricao"):
-        head = (head + "\n" if head else "") + p["descricao"]
+        head = (head + "\n" if head else "") + _miudo(p["descricao"])
     if head:
         texto.append(discord.ui.TextDisplay(head))
 
-    linhas = [
-        f"{_ico(c)}**{c['label']}**" + (f"\n-# {c['hint']}" if c.get("hint") else "")
-        for c in cats.values()
-    ]
-    if linhas:
-        texto += [discord.ui.Separator(), discord.ui.TextDisplay("\n".join(linhas))]
+    # categorias numa linha so (as dicas ficam na descricao do menu)
+    notas = []
+    if cats:
+        notas.append("-# " + " · ".join(f"{c['emoji']} {c['label']}".strip() for c in cats.values()))
     if p.get("info"):
-        texto += [discord.ui.Separator(), discord.ui.TextDisplay(p["info"])]
+        notas.append(_miudo(p["info"]))
+    if notas:
+        texto += [discord.ui.Separator(), discord.ui.TextDisplay("\n".join(notas))]
     if texto:
         # sem barra branca na lateral: so aparece se o admin escolher uma cor
         view.add_item(discord.ui.Container(*texto, accent_colour=tom(2)))
