@@ -1133,15 +1133,15 @@ def _show(guild, key, cfg) -> str:
 
 HELP_1 = (
     "## ⚙️ Como configurar\n"
-    "**Pelos botões:** use `,ticketconfig` (sem nada depois) e clique.\n"
+    "**Pelos botões:** use `,ptconfig` (sem nada depois) e clique.\n"
     "**Por comando:** os comandos abaixo continuam funcionando.\n\n"
-    "**Mudar uma opção:** `,ticketconfig set <opção> <valor>`\n"
-    "Exemplo: `,ticketconfig set titulo 🎫 Fale com a gente`\n"
+    "**Mudar uma opção:** `,ptconfig set <opção> <valor>`\n"
+    "Exemplo: `,ptconfig set titulo 🎫 Fale com a gente`\n"
     "Pra pular linha use `\\n`. Pra limpar um campo use `nenhum`.\n\n"
     "**Opções de texto:** `titulo` `descricao` `info` `rodape` `botao` `boasvindas` "
     "`rodape_ticket` `nome_canal` `campo_assunto` `campo_detalhes`\n"
     "**Visual:** `modo` (`menu` é o padrão, ou `botoes`) · `banner` (imagem do topo) · `gif_fim` (imagem do final), cada um aceita link, `padrao`, `nenhum` ou um **arquivo anexado** na mensagem do comando\n"
-    "Exemplo com arquivo: anexe a imagem e mande `,ticketconfig set banner` (ou use o botão 📎 em `,ticketconfig`)\n"
+    "Exemplo com arquivo: anexe a imagem e mande `,ptconfig set banner` (ou use o botão 📎 em `,ptconfig`)\n"
     "**Cores:** `cor` (painel) e `cor_ticket`. Aceitam hex (`#5865F2`) ou nome "
     "(" + ", ".join(COLOR_NAMES) + "). Sem cor = tons de cinza.\n"
     "**Equipe:** `staff` (cargo) · `log` (canal) · `categoria` (categoria do Discord pros tickets)\n"
@@ -1152,15 +1152,15 @@ HELP_1 = (
 
 HELP_2 = (
     "## 🗂️ Categorias\n"
-    "`,ticketconfig cat add <chave> <emoji> <nome>`  cria (até " + str(MAX_CATEGORIAS) + "), use `-` pra sem emoji\n"
-    "`,ticketconfig cat edit <chave> <campo> <valor>`  muda um campo\n"
-    "`,ticketconfig cat remove <chave>`  apaga\n"
-    "`,ticketconfig cat mover <chave> <posição>`  reordena\n\n"
+    "`,ptconfig cat add <chave> <emoji> <nome>`  cria (até " + str(MAX_CATEGORIAS) + "), use `-` pra sem emoji\n"
+    "`,ptconfig cat edit <chave> <campo> <valor>`  muda um campo\n"
+    "`,ptconfig cat remove <chave>`  apaga\n"
+    "`,ptconfig cat mover <chave> <posição>`  reordena\n\n"
     "**Campos:** `emoji` `nome` `dica` `botao` (" + ", ".join(BUTTON_STYLES) + ") "
     "`cor` (barra do ticket) `cargo` (equipe só dessa categoria) "
     "`categoria` (categoria do Discord só dessa) `boasvindas` (mensagem própria)\n\n"
-    "**Outros:** `,ticketconfig atualizar` reedita os painéis · "
-    "`,ticketconfig reset tudo` volta tudo ao padrão (os painéis já postados continuam sendo atualizados)\n"
+    "**Outros:** `,ptconfig atualizar` reedita os painéis · "
+    "`,ptconfig reset tudo` volta tudo ao padrão (os painéis já postados continuam sendo atualizados)\n"
     "-# Mexeu em algo? Os painéis já postados se atualizam sozinhos."
 )
 
@@ -1445,7 +1445,7 @@ class ConfigView(discord.ui.LayoutView):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
             await interaction.response.send_message(
-                view=Card("Esse painel é de outra pessoa", "Use `,ticketconfig` pra abrir o seu."),
+                view=Card("Esse painel é de outra pessoa", "Use `,ptconfig` pra abrir o seu."),
                 ephemeral=True,
             )
             return False
@@ -1498,7 +1498,20 @@ class ConfigView(discord.ui.LayoutView):
         if self.notice:
             children.append(discord.ui.TextDisplay(f"-# {self.notice}"))
         self.clear_items()
-        self.add_item(discord.ui.Container(*children))
+        # cada secao vira um balao proprio (igual ao painel de atendimento)
+        # as linhas separadoras viram o espaco entre os baloes
+        grupos, atual = [], []
+        for item in children:
+            if isinstance(item, discord.ui.Separator):
+                if atual:
+                    grupos.append(atual)
+                atual = []
+            else:
+                atual.append(item)
+        if atual:
+            grupos.append(atual)
+        for grupo in grupos:
+            self.add_item(discord.ui.Container(*grupo))
 
     # ---- coisinhas pra montar os itens
 
@@ -1582,7 +1595,7 @@ class ConfigView(discord.ui.LayoutView):
 
     async def _refresh_all(self, interaction, item):
         await self.update(interaction, "🔄 Painéis reeditados", refresh=True,
-                          vazio=" · nenhum painel postado ainda (use `,painelticket`)")
+                          vazio=" · nenhum painel postado ainda (use `,pticket`)")
 
     # ---- tela inicial, cada parte tem titulo + explicacao + botoes
 
@@ -1885,18 +1898,17 @@ class Tickets(commands.Cog):
         await _say(ctx, title, text + extra)
 
     @commands.command(
-        name="painelticket",
-        aliases=("ticketpainel",),
+        name="pticket",
         extras={
             "categoria": "Utilidades",
-            "uso": ",painelticket",
+            "uso": ",pticket",
             "descricao": "Posta o painel de tickets no canal atual.",
         },
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     @commands.bot_has_permissions(manage_channels=True, send_messages=True)
-    async def painelticket(self, ctx):
+    async def pticket(self, ctx):
         await post_panel(ctx.channel)
         try:
             await ctx.message.delete()
@@ -1904,31 +1916,30 @@ class Tickets(commands.Cog):
             pass
 
     @commands.group(
-        name="ticketconfig",
-        aliases=("tkconfig", "configticket"),
+        name="ptconfig",
         invoke_without_command=True,
         extras={
             "categoria": "Utilidades",
-            "uso": ",ticketconfig",
+            "uso": ",ptconfig",
             "descricao": "Personaliza o sistema de tickets (textos, cores, categorias, equipe...).",
         },
     )
-    async def ticketconfig(self, ctx):
+    async def ptconfig(self, ctx):
         await ConfigView.open(ctx)
 
-    @ticketconfig.command(name="ajuda", aliases=("help",))
+    @ptconfig.command(name="ajuda", aliases=("help",))
     async def cfg_ajuda(self, ctx):
         for texto in (HELP_1, HELP_2):
             view = discord.ui.LayoutView(timeout=None)
             view.add_item(discord.ui.Container(discord.ui.TextDisplay(texto)))
             await ctx.send(view=view)
 
-    @ticketconfig.command(name="set")
+    @ptconfig.command(name="set")
     async def cfg_set(self, ctx, chave: str, *, valor: str = ""):
         chave = chave.lower()
         if chave not in SETTINGS:
             await _say(ctx, "Opção desconhecida",
-                       "Use `,ticketconfig ajuda` pra ver a lista.", ok=False)
+                       "Use `,ptconfig ajuda` pra ver a lista.", ok=False)
             return
         path, kind, limit, vazio, desc = SETTINGS[chave]
         # imagem por arquivo: anexa a imagem na mensagem do comando
@@ -1952,15 +1963,15 @@ class Tickets(commands.Cog):
         set_path(ctx.guild.id, path, value)
         await self._updated(ctx, f"`{chave}` atualizado", _show(ctx.guild, chave, get_cfg(ctx.guild.id)))
 
-    @ticketconfig.command(name="atualizar", aliases=("refresh",))
+    @ptconfig.command(name="atualizar", aliases=("refresh",))
     async def cfg_atualizar(self, ctx):
         await self._updated(ctx, "Painéis atualizados")
 
-    @ticketconfig.command(name="reset")
+    @ptconfig.command(name="reset")
     async def cfg_reset(self, ctx, confirmar: str = ""):
         if confirmar.lower() != "tudo":
             await _say(ctx, "Isso apaga toda a personalização",
-                       "Se tiver certeza, use `,ticketconfig reset tudo`.", ok=False)
+                       "Se tiver certeza, use `,ptconfig reset tudo`.", ok=False)
             return
         paineis = get_cfg(ctx.guild.id)["paineis"]
         _cfg_store["guilds"][str(ctx.guild.id)] = {"paineis": paineis}
@@ -1969,7 +1980,7 @@ class Tickets(commands.Cog):
 
     # ------------------------------------------------------------ categorias
 
-    @ticketconfig.group(name="cat", aliases=("categorias", "cats"), invoke_without_command=True)
+    @ptconfig.group(name="cat", aliases=("categorias", "cats"), invoke_without_command=True)
     async def cfg_cat(self, ctx):
         await ConfigView.open(ctx, ("cats",))
 
@@ -1995,14 +2006,14 @@ class Tickets(commands.Cog):
         cats[chave] = {**CAT_BLANK, "emoji": emoji, "label": nome}
         _save_cfg()
         await self._updated(ctx, f"Categoria {emoji} {nome} criada".replace("  ", " "),
-                            f"Edite com `,ticketconfig cat edit {chave} dica ...` e `... botao azul`.")
+                            f"Edite com `,ptconfig cat edit {chave} dica ...` e `... botao azul`.")
 
     @cfg_cat.command(name="edit", aliases=("editar", "set"))
     async def cat_edit(self, ctx, chave: str, campo: str, *, valor: str):
         chave, campo = chave.lower(), campo.lower()
         cats = _cats_over(ctx.guild.id)
         if chave not in cats:
-            await _say(ctx, "Categoria não encontrada", "Veja as chaves em `,ticketconfig`.", ok=False)
+            await _say(ctx, "Categoria não encontrada", "Veja as chaves em `,ptconfig`.", ok=False)
             return
         if campo not in CAT_FIELDS:
             await _say(ctx, "Campo desconhecido", "Campos: " + ", ".join(f"`{c}`" for c in CAT_FIELDS), ok=False)
