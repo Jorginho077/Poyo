@@ -396,31 +396,31 @@ class Avatar(commands.Cog):
         await ctx.send(view=SkinView(resultado))
 
     @commands.hybrid_command(
-        name="rskin",
+        name="avatar_roblox",
         description="Mostra o avatar de um usuário do Roblox.",
         extras={
             "categoria": "Utilidades",
-            "uso": ",Rskin @nome_do_roblox",
+            "uso": ",avatar_roblox nome",
             "descricao": "Mostra o avatar de um usuário do Roblox.",
         },
     )
     @commands.guild_only()
     @commands.bot_has_permissions(send_messages=True, read_message_history=True)
-    async def rskin(self, ctx: commands.Context, *, nome: str) -> None:
+    async def avatar_roblox(self, ctx: commands.Context, *, nome: str) -> None:
         await self._enviar_skin(ctx, nome, buscar_roblox)
 
     @commands.hybrid_command(
-        name="mskin",
+        name="avatar_minecraft",
         description="Mostra a skin de um usuário do Minecraft.",
         extras={
             "categoria": "Utilidades",
-            "uso": ",Mskin @nome_do_minecraft",
+            "uso": ",avatar_minecraft nome",
             "descricao": "Mostra a skin de um usuário do Minecraft.",
         },
     )
     @commands.guild_only()
     @commands.bot_has_permissions(send_messages=True, read_message_history=True)
-    async def mskin(self, ctx: commands.Context, *, nome: str) -> None:
+    async def avatar_minecraft(self, ctx: commands.Context, *, nome: str) -> None:
         await self._enviar_skin(ctx, nome, buscar_minecraft)
 
 
