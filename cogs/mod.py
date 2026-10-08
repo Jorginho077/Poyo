@@ -1,15 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import re
 import time
 from typing import Optional
+from urllib.request import Request, urlopen
 
 import discord
 from discord.ext import commands, tasks
 
-from ._media import baixar_arquivo
+try:
+    from ._media import baixar_arquivo
+except ModuleNotFoundError:
+    async def baixar_arquivo(url: str, nome: str) -> discord.File:
+        def baixar() -> bytes:
+            pedido = Request(url, headers={"User-Agent": "Poyo-Discord-Bot/1.0"})
+            with urlopen(pedido, timeout=20) as resposta:
+                return resposta.read()
+
+        dados = await asyncio.to_thread(baixar)
+        return discord.File(io.BytesIO(dados), filename=nome)
 
 
 DURACAO_RE = re.compile(
