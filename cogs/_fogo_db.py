@@ -77,6 +77,24 @@ def iniciar() -> None:
                 WHERE ativo = 1;
             """
         )
+        _migrar(con)
+
+
+# Colunas adicionadas depois da Etapa 1 (ciclo diário).
+_COLUNAS_NOVAS = {
+    "dia_aberto": "TEXT",  # data (AAAA-MM-DD) do dia que está valendo
+    "a_acendeu": "INTEGER NOT NULL DEFAULT 0",  # usuario_a acendeu hoje?
+    "b_acendeu": "INTEGER NOT NULL DEFAULT 0",  # usuario_b acendeu hoje?
+    "painel_id": "INTEGER",  # mensagem do painel do dia
+    "encerrado_em": "REAL",  # quando o fogo apagou
+}
+
+
+def _migrar(con: sqlite3.Connection) -> None:
+    existentes = {r["name"] for r in con.execute("PRAGMA table_info(fogos)")}
+    for nome, tipo in _COLUNAS_NOVAS.items():
+        if nome not in existentes:
+            con.execute(f"ALTER TABLE fogos ADD COLUMN {nome} {tipo}")
 
 
 def dupla(a: int, b: int) -> tuple[int, int]:
@@ -190,7 +208,7 @@ def recusar_convite(convite_id: int) -> str:
 
 
 def aceitar_convite(
-    convite_id: int, canal_id: int
+    convite_id: int, canal_id: int, hoje: str
 ) -> tuple[str, Optional[sqlite3.Row]]:
     """Aceita o convite e cria o Fogo, tudo de forma atômica.
 
@@ -232,10 +250,11 @@ def aceitar_convite(
         cur = con.execute(
             """
             INSERT INTO fogos
-                (guild_id, usuario_a, usuario_b, canal_id, criado_em)
-            VALUES (?, ?, ?, ?, ?)
+                (guild_id, usuario_a, usuario_b, canal_id, criado_em,
+                 dia_aberto)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (c["guild_id"], a, b, canal_id, time.time()),
+            (c["guild_id"], a, b, canal_id, time.time(), hoje),
         )
         fogo = con.execute(
             "SELECT * FROM fogos WHERE id = ?", (cur.lastrowid,)
@@ -270,3 +289,129 @@ def fogos_do_membro(guild_id: int, user_id: int) -> list[sqlite3.Row]:
             """,
             (guild_id, user_id, user_id),
         ).fetchall()
+
+
+# ------------------------------------------------------------ ciclo diário
+
+
+def obter_fogo(fogo_id: int) -> Optional[sqlite3.Row]:
+    with _conexao() as con:
+        return con.execute(
+            "SELECT * FROM fogos WHERE id = ?", (fogo_id,)
+        ).fetchone()
+
+
+def fogos_ativos() -> list[sqlite3.Row]:
+    with _conexao() as con:
+        return con.execute(
+            "SELECT * FROM fogos WHERE ativo = 1 ORDER BY id"
+        ).fetchall()
+
+
+def definir_painel(fogo_id: int, mensagem_id: int) -> None:
+    with _conexao() as con:
+        con.execute(
+            "UPDATE fogos SET painel_id = ? WHERE id = ?",
+            (mensagem_id, fogo_id),
+        )
+
+
+def dia_completo(fogo: sqlite3.Row) -> bool:
+    return bool(fogo["a_acendeu"]) and bool(fogo["b_acendeu"])
+
+
+def acender(
+    fogo_id: int, user_id: int, hoje: str
+) -> tuple[str, Optional[sqlite3.Row]]:
+    """Registra o clique em "Acender o Fogo".
+
+    Resultados: 'ok' (falta o outro), 'completo' (os dois acenderam, a
+    sequência subiu), 'ja_acendeu', 'nao_participa', 'dia_encerrado',
+    'inativo'.
+    """
+    with _conexao() as con:
+        con.execute("BEGIN IMMEDIATE")
+        f = con.execute(
+            "SELECT * FROM fogos WHERE id = ?", (fogo_id,)
+        ).fetchone()
+        if f is None or not f["ativo"]:
+            return "inativo", f
+        if user_id not in (f["usuario_a"], f["usuario_b"]):
+            return "nao_participa", f
+        if f["dia_aberto"] != hoje:
+            return "dia_encerrado", f
+
+        coluna = "a_acendeu" if user_id == f["usuario_a"] else "b_acendeu"
+        if f[coluna]:
+            return "ja_acendeu", f
+
+        con.execute(f"UPDATE fogos SET {coluna} = 1 WHERE id = ?", (fogo_id,))
+        f = con.execute(
+            "SELECT * FROM fogos WHERE id = ?", (fogo_id,)
+        ).fetchone()
+
+        if f["a_acendeu"] and f["b_acendeu"]:
+            nova = f["sequencia"] + 1
+            con.execute(
+                """
+                UPDATE fogos
+                SET sequencia = ?, recorde = MAX(recorde, ?),
+                    ultimo_acendimento = ?
+                WHERE id = ?
+                """,
+                (nova, nova, hoje, fogo_id),
+            )
+            f = con.execute(
+                "SELECT * FROM fogos WHERE id = ?", (fogo_id,)
+            ).fetchone()
+            return "completo", f
+        return "ok", f
+
+
+def virar_dia(
+    fogo_id: int, hoje: str
+) -> tuple[str, Optional[sqlite3.Row]]:
+    """Faz a virada do dia para um Fogo.
+
+    Resultados:
+    - 'nada'     o dia ainda é o mesmo;
+    - 'novo_dia' os dois tinham acendido: abre o dia de hoje (painel novo);
+    - 'apagou'   faltou alguém: o Fogo se apaga (a sequência fica gravada).
+
+    Se o bot ficou fora do ar e passaram dias sem painel, quem já tinha
+    completado o último dia aberto não é punido: o Fogo só é reaberto.
+    """
+    with _conexao() as con:
+        con.execute("BEGIN IMMEDIATE")
+        f = con.execute(
+            "SELECT * FROM fogos WHERE id = ?", (fogo_id,)
+        ).fetchone()
+        if f is None or not f["ativo"]:
+            return "nada", f
+
+        dia = f["dia_aberto"]
+        if dia is not None and dia >= hoje:
+            return "nada", f
+
+        # Fogo da Etapa 1 (sem dia aberto) ou dia completo: abre hoje.
+        if dia is None or (f["a_acendeu"] and f["b_acendeu"]):
+            con.execute(
+                """
+                UPDATE fogos
+                SET dia_aberto = ?, a_acendeu = 0, b_acendeu = 0,
+                    painel_id = NULL
+                WHERE id = ?
+                """,
+                (hoje, fogo_id),
+            )
+            return "novo_dia", con.execute(
+                "SELECT * FROM fogos WHERE id = ?", (fogo_id,)
+            ).fetchone()
+
+        con.execute(
+            "UPDATE fogos SET ativo = 0, encerrado_em = ? WHERE id = ?",
+            (time.time(), fogo_id),
+        )
+        return "apagou", con.execute(
+            "SELECT * FROM fogos WHERE id = ?", (fogo_id,)
+        ).fetchone()

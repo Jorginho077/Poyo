@@ -80,8 +80,8 @@ def cartao_fogo_criado(a: str, b: str) -> CartaoFogo:
             f"{a} + {b}\n"
             f"{EMOJI_FOGO} **Sequência:** {dias(0)}\n\n"
             "O Poyo acendeu a primeira faísca de vocês! "
-            "A sequência começa quando os dois acenderem o Fogo pela "
-            "primeira vez."
+            "Cliquem em **Acender o Fogo** na mensagem logo abaixo para "
+            "começar a sequência."
         ),
         cor=COR_FOGO,
     )
@@ -115,3 +115,87 @@ def cartao_ja_existe(a: str, b: str) -> CartaoFogo:
 
 def cartao_aviso(titulo: str, texto: str) -> CartaoFogo:
     return CartaoFogo(f"## {titulo}", texto, cor=COR_NEUTRA)
+
+
+# ------------------------------------------------- ciclo diário (Etapa 2)
+
+
+def _dupla_txt(f) -> str:
+    return f"<@{f['usuario_a']}> + <@{f['usuario_b']}>"
+
+
+def _linha_nome(f) -> str:
+    return f"\n{EMOJI_FOGO} **Fogo:** {f['nome']}" if f["nome"] else ""
+
+
+def frase_chama(sequencia: int) -> str:
+    """Frase do Poyo conforme a força da sequência."""
+    if sequencia <= 1:
+        return "A primeira chama pegou! Agora é só manter acesa."
+    if sequencia < 7:
+        return "A chama está crescendo!"
+    if sequencia < 30:
+        return "O fogo está firme e animado!"
+    return "O fogo está queimando forte!"
+
+
+def blocos_painel(f) -> list[str]:
+    """Textos do painel do dia (o botão é montado pelo cog)."""
+    a_ok, b_ok = bool(f["a_acendeu"]), bool(f["b_acendeu"])
+    status_a = "✅ acendeu" if a_ok else "⏳ ainda não acendeu"
+    status_b = "✅ acendeu" if b_ok else "⏳ ainda não acendeu"
+    seq = (
+        f"**Sequência:** {dias(f['sequencia'])}"
+        if f["sequencia"]
+        else "**Sequência:** ainda não começou"
+    )
+    return [
+        f"## {EMOJI_FOGO_FELIZ} Hora de acender o Fogo!",
+        (
+            f"{_dupla_txt(f)}{_linha_nome(f)}\n{seq}\n\n"
+            f"<@{f['usuario_a']}>: {status_a}\n"
+            f"<@{f['usuario_b']}>: {status_b}"
+        ),
+        "-# Os dois precisam acender até 23:59 de hoje. "
+        "Se um dos dois faltar, o Fogo apaga.",
+    ]
+
+
+def cartao_fogo_aceso(f) -> CartaoFogo:
+    return CartaoFogo(
+        f"## {EMOJI_FOGO_FELIZ} Fogo aceso!",
+        (
+            f"{_dupla_txt(f)}{_linha_nome(f)}\n"
+            f"**Sequência:** {dias(f['sequencia'])}\n\n"
+            f"{frase_chama(f['sequencia'])}"
+        ),
+        "-# Volte às 00:00 para reacender a chama.",
+        cor=COR_FOGO,
+    )
+
+
+def cartao_fogo_apagado(f) -> CartaoFogo:
+    if f["sequencia"] > 0:
+        fim = f"A sequência de {dias(f['sequencia'])} chegou ao fim."
+    else:
+        fim = "O fogo apagou antes mesmo de a sequência começar."
+    return CartaoFogo(
+        f"## {EMOJI_FOGO_TRISTE} O fogo apagou...",
+        (
+            f"{_dupla_txt(f)}{_linha_nome(f)}\n"
+            f"{fim}\n\n"
+            "O Poyo está com frio..."
+        ),
+        "-# Que tal chamar a pessoa de novo com `,fogo @membro`?",
+        cor=COR_FRIO,
+    )
+
+
+def cartao_painel_encerrado(f) -> CartaoFogo:
+    """O painel antigo, sem botão, depois que o tempo acabou."""
+    return CartaoFogo(
+        f"## {EMOJI_FOGO_TRISTE} Tempo esgotado",
+        f"{_dupla_txt(f)}{_linha_nome(f)}\n"
+        "Esse painel não aceita mais cliques.",
+        cor=COR_NEUTRA,
+    )

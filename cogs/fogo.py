@@ -1,6 +1,7 @@
 """Sistema Fogo do Poyo.
 
-ETAPA 1 (esta): convite, aceitar/recusar e criação do Fogo.
+Etapa 1: convite, aceitar/recusar e criação do Fogo.
+Etapa 2: ciclo diário (00:00), botão "Acender o Fogo", sequência e Fogo apagado.
 Veja FOGO_CHECKLIST.md na raiz do projeto para o andamento das demais etapas.
 """
 
@@ -16,6 +17,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from . import _fogo_db as db
+from . import _fogo_tempo as tempo
 from . import _fogo_visual as visual
 
 
@@ -78,8 +80,11 @@ class ConviteView(discord.ui.LayoutView):
         if not await self._so_convidado(interaction):
             return
 
-        resultado, _fogo = await asyncio.to_thread(
-            db.aceitar_convite, self.convite_id, interaction.channel_id
+        resultado, fogo = await asyncio.to_thread(
+            db.aceitar_convite,
+            self.convite_id,
+            interaction.channel_id,
+            tempo.hoje(),
         )
         de, para = f"<@{self.de_id}>", f"<@{self.para_id}>"
 
@@ -97,6 +102,11 @@ class ConviteView(discord.ui.LayoutView):
 
         await interaction.response.edit_message(view=novo)
         self.stop()
+
+        if resultado == "ok" and fogo is not None:
+            cog = interaction.client.get_cog("Fogo")
+            if cog is not None:
+                await cog.abrir_painel(fogo["id"])
 
     async def _recusar(self, interaction: discord.Interaction) -> None:
         if not await self._so_convidado(interaction):
@@ -121,19 +131,89 @@ class ConviteView(discord.ui.LayoutView):
         self.stop()
 
 
+# ------------------------------------------------------------------- painel
+
+
+class PainelView(visual.CartaoFogo):
+    """Painel do dia com o botão "Acender o Fogo".
+
+    O custom_id é fixo por Fogo, então o botão sobrevive a reinícios do bot
+    (a cog registra de novo os painéis abertos ao ligar).
+    """
+
+    def __init__(self, fogo: sqlite3.Row) -> None:
+        fogo_id = fogo["id"]
+
+        botao = discord.ui.Button(
+            style=discord.ButtonStyle.danger,
+            label="Acender o Fogo",
+            emoji=visual.EMOJI_FOGO,
+            custom_id=f"poyo:fogo:acender:{fogo_id}",
+        )
+
+        async def ao_clicar(interaction: discord.Interaction) -> None:
+            await acender(interaction, fogo_id)
+
+        botao.callback = ao_clicar
+        super().__init__(
+            *visual.blocos_painel(fogo),
+            cor=visual.COR_FOGO,
+            botoes=[botao],
+        )
+
+
+async def acender(interaction: discord.Interaction, fogo_id: int) -> None:
+    resultado, fogo = await asyncio.to_thread(
+        db.acender, fogo_id, interaction.user.id, tempo.hoje()
+    )
+
+    if resultado == "ok":
+        await interaction.response.edit_message(view=PainelView(fogo))
+    elif resultado == "completo":
+        await interaction.response.edit_message(
+            view=visual.cartao_fogo_aceso(fogo)
+        )
+    else:
+        avisos = {
+            "nao_participa": "Esse Fogo não é seu! Só a dupla pode acender.",
+            "ja_acendeu": "Você já acendeu hoje! Agora é esperar o outro.",
+            "dia_encerrado": "Esse painel é de um dia que já passou.",
+            "inativo": "Esse Fogo já se apagou...",
+        }
+        await interaction.response.send_message(
+            avisos.get(resultado, "Não consegui acender agora."),
+            ephemeral=True,
+        )
+
+
 # ---------------------------------------------------------------------- cog
 
 
 class Fogo(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        self._travas: dict[int, asyncio.Lock] = {}
 
     async def cog_load(self) -> None:
         await asyncio.to_thread(db.iniciar)
         self.manutencao_convites.start()
+        self.ciclo_diario.start()
 
     async def cog_unload(self) -> None:
         self.manutencao_convites.cancel()
+        self.ciclo_diario.cancel()
+
+    def _trava(self, fogo_id: int) -> asyncio.Lock:
+        return self._travas.setdefault(fogo_id, asyncio.Lock())
+
+    async def _canal(self, canal_id: int):
+        canal = self.bot.get_channel(canal_id)
+        if canal is None:
+            try:
+                canal = await self.bot.fetch_channel(canal_id)
+            except discord.HTTPException:
+                return None
+        return canal
 
     # ----------------------------------------------------------- utilidades
 
@@ -188,6 +268,92 @@ class Fogo(commands.Cog):
     @manutencao_convites.before_loop
     async def _antes_manutencao(self) -> None:
         await self.bot.wait_until_ready()
+
+    # ----------------------------------------------------- ciclo diário
+
+    async def abrir_painel(self, fogo_id: int) -> None:
+        """Manda o painel do dia (se o Fogo ainda não tiver um)."""
+        async with self._trava(fogo_id):
+            fogo = await asyncio.to_thread(db.obter_fogo, fogo_id)
+            if fogo is None or not fogo["ativo"] or fogo["painel_id"]:
+                return
+
+            canal = await self._canal(fogo["canal_id"])
+            if canal is None:
+                return
+
+            try:
+                mensagem = await canal.send(
+                    view=PainelView(fogo),
+                    allowed_mentions=discord.AllowedMentions(
+                        users=[
+                            discord.Object(fogo["usuario_a"]),
+                            discord.Object(fogo["usuario_b"]),
+                        ]
+                    ),
+                )
+            except (discord.Forbidden, discord.HTTPException) as erro:
+                print(f"Fogo {fogo_id}: não consegui enviar o painel: {erro!r}")
+                return
+
+            await asyncio.to_thread(db.definir_painel, fogo_id, mensagem.id)
+
+    async def _apagar(self, fogo: sqlite3.Row) -> None:
+        """Fogo apagou: encerra o painel antigo e avisa a dupla."""
+        canal = await self._canal(fogo["canal_id"])
+        if canal is None:
+            return
+
+        if fogo["painel_id"]:
+            try:
+                await canal.get_partial_message(fogo["painel_id"]).edit(
+                    view=visual.cartao_painel_encerrado(fogo)
+                )
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+        try:
+            await canal.send(
+                view=visual.cartao_fogo_apagado(fogo),
+                allowed_mentions=discord.AllowedMentions(
+                    users=[
+                        discord.Object(fogo["usuario_a"]),
+                        discord.Object(fogo["usuario_b"]),
+                    ]
+                ),
+            )
+        except (discord.Forbidden, discord.HTTPException) as erro:
+            print(f"Fogo {fogo['id']}: não consegui avisar o apagão: {erro!r}")
+
+    @tasks.loop(seconds=20)
+    async def ciclo_diario(self) -> None:
+        """Vira o dia às 00:00 (horário de Brasília), sem depender de o bot
+        estar ligado exatamente nessa hora: compara a data de cada Fogo."""
+        hoje = tempo.hoje()
+
+        for f in await asyncio.to_thread(db.fogos_ativos):
+            try:
+                resultado, fogo = await asyncio.to_thread(
+                    db.virar_dia, f["id"], hoje
+                )
+                if resultado == "novo_dia":
+                    await self.abrir_painel(f["id"])
+                elif resultado == "apagou":
+                    await self._apagar(fogo)
+                elif f["painel_id"] is None:
+                    # Painel que falhou ao enviar antes: tenta de novo.
+                    await self.abrir_painel(f["id"])
+            except Exception as erro:  # um Fogo com problema não trava os outros
+                print(f"Fogo {f['id']}: erro no ciclo diário: {erro!r}")
+
+    @ciclo_diario.before_loop
+    async def _antes_ciclo(self) -> None:
+        await self.bot.wait_until_ready()
+
+        # Reativa os botões dos painéis que ainda estão esperando cliques.
+        for f in await asyncio.to_thread(db.fogos_ativos):
+            if f["painel_id"] and not db.dia_completo(f):
+                self.bot.add_view(PainelView(f), message_id=f["painel_id"])
 
     # ------------------------------------------------------------- comandos
 
@@ -310,12 +476,13 @@ class Fogo(commands.Cog):
             parceiro = f["usuario_b"] if f["usuario_a"] == alvo.id else f["usuario_a"]
             nome = f"  ·  **{f['nome']}**" if f["nome"] else ""
             if f["sequencia"] == 0:
-                estado = "aguardando a primeira chama"
+                estado = "ainda não começou"
             else:
                 estado = visual.dias(f["sequencia"])
+            hoje_ok = "✅ aceso hoje" if db.dia_completo(f) else "⏳ falta acender hoje"
             linhas.append(
                 f"{visual.EMOJI_FOGO} {alvo.mention} + <@{parceiro}>{nome}\n"
-                f"-# Sequência: {estado}"
+                f"-# Sequência: {estado}  ·  {hoje_ok}"
             )
 
         if len(lista) > 15:
