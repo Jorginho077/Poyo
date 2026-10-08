@@ -349,7 +349,7 @@ async def comandos(
 ) -> None:
     blocos = [
         (
-            "## Central de comandos\n\n"
+            "Central de comandos\n\n"
             "Confira os comandos disponíveis neste servidor."
         ),
     ]
@@ -568,7 +568,7 @@ async def on_command_error(
     await ctx.send(
         view=Cartao(
             bot.asset_url("banner"),
-            "## Não foi possível concluir",
+            "Não foi possível concluir",
             mensagem,
         ),
         file=bot.asset_file("banner"),
