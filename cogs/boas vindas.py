@@ -10,10 +10,6 @@ import discord
 from discord.ext import commands
 
 
-BANNER_URL = (
-    "https://raw.githubusercontent.com/"
-    "Jorginho077/Poyo/main/assets/Tumblr-l-67143811701311.gif"
-)
 EMOJI_INICIO = "<:axolote:1556443018557661234>"
 EMOJI_FINAL = "<a:emoji_481:1556442987691647068>"
 DATABASE_PATH = Path(__file__).resolve().parent.parent / "poyo.sqlite3"
@@ -41,6 +37,19 @@ def substituir_marcadores(
     return texto.replace("{user}", membro.mention)
 
 
+def normalizar_url_visual(url: str) -> str:
+    """Converte links GitHub /blob/ para raw, aceito pelo Discord."""
+    url = url.strip()
+    prefixo = "https://github.com/"
+    if url.startswith(prefixo) and "/blob/" in url:
+        partes = url[len(prefixo):].split("/blob/", 1)
+        if len(partes) == 2:
+            repositorio, caminho = partes
+            caminho = caminho.split("?", 1)[0].split("#", 1)[0]
+            return f"https://raw.githubusercontent.com/{repositorio}/{caminho}"
+    return url
+
+
 class WelcomeCard(discord.ui.LayoutView):
     def __init__(self, config: ConfiguracaoJoin, membro: discord.Member) -> None:
         super().__init__(timeout=None)
@@ -48,9 +57,6 @@ class WelcomeCard(discord.ui.LayoutView):
         descricao = substituir_marcadores(config.descricao, membro)
 
         conteudo: list[discord.ui.Item] = [
-            discord.ui.MediaGallery(
-                discord.MediaGalleryItem(BANNER_URL)
-            ),
             discord.ui.TextDisplay(
                 f"{EMOJI_INICIO}  **{titulo}**  {EMOJI_FINAL}\n\n"
                 f"{descricao}"
@@ -60,15 +66,11 @@ class WelcomeCard(discord.ui.LayoutView):
         if config.gif_url:
             conteudo.append(
                 discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(config.gif_url)
+                    discord.MediaGalleryItem(
+                        normalizar_url_visual(config.gif_url)
+                    )
                 )
             )
-
-        conteudo.append(
-            discord.ui.MediaGallery(
-                discord.MediaGalleryItem(BANNER_URL)
-            )
-        )
 
         self.add_item(
             discord.ui.Container(*conteudo)
@@ -126,9 +128,6 @@ class JoinPanel(discord.ui.LayoutView):
 
         self.add_item(
             discord.ui.Container(
-                discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(BANNER_URL)
-                ),
                 discord.ui.TextDisplay(
                     f"{EMOJI_INICIO}  **Join System**  {EMOJI_FINAL}\n\n"
                     f"Canal: {canal}\n"
@@ -139,9 +138,6 @@ class JoinPanel(discord.ui.LayoutView):
                 ),
                 discord.ui.ActionRow(botao_canal, botao_mensagem),
                 discord.ui.ActionRow(botao_ativar, botao_testar),
-                discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(BANNER_URL)
-                ),
             )
         )
 
@@ -360,7 +356,9 @@ class MensagemJoinModal(discord.ui.Modal, title="Mensagem de boas-vindas"):
 
         self.painel.config.titulo = str(self.titulo.value)
         self.painel.config.descricao = str(self.descricao.value)
-        self.painel.config.gif_url = gif_url or None
+        self.painel.config.gif_url = (
+            normalizar_url_visual(gif_url) if gif_url else None
+        )
         await self.painel.cog.salvar(self.painel.config)
         await interaction.response.send_message(
             "Mensagem de boas-vindas salva.",
