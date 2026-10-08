@@ -7,6 +7,8 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
+from ._media import baixar_arquivo
+
 
 EMOJI_INICIO = "<:axolote:1556443018557661234>"
 EMOJI_FINAL = "<a:emoji_481:1556442987691647068>"
@@ -21,6 +23,8 @@ EVENTO_IMAGEM_URL = (
     "Jorginho077/Poyo/main/assets/"
     "file_000000002e84820ea65c8bc4e5305070.png"
 )
+EVENTOS_BANNER_ATTACHMENT = "attachment://poyo-evento-banner.gif"
+EVENTO_IMAGEM_ATTACHMENT = "attachment://poyo-evento.png"
 
 
 @dataclass
@@ -45,18 +49,23 @@ class Evento:
 
 
 class EventoCartao(discord.ui.LayoutView):
-    def __init__(self, titulo: str, texto: str) -> None:
+    def __init__(
+        self,
+        titulo: str,
+        texto: str,
+        banner_url: str = EVENTOS_BANNER_ATTACHMENT,
+    ) -> None:
         super().__init__(timeout=None)
         self.add_item(
             discord.ui.Container(
                 discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(EVENTOS_BANNER_URL)
+                    discord.MediaGalleryItem(banner_url)
                 ),
                 discord.ui.TextDisplay(
                     f"{EMOJI_INICIO}  **{titulo}**  {EMOJI_FINAL}\n\n{texto}"
                 ),
                 discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(EVENTOS_BANNER_URL)
+                    discord.MediaGalleryItem(banner_url)
                 ),
             )
         )
@@ -426,7 +435,17 @@ class Menu(discord.ui.LayoutView):
             cargo=self.config.cargo,
             limite=self.config.limite,
         )
-        view = EventoView(evento)
+        try:
+            imagem_evento = await baixar_arquivo(
+                EVENTO_IMAGEM_URL,
+                "poyo-evento.png",
+            )
+            imagem_url = EVENTO_IMAGEM_ATTACHMENT
+        except (OSError, TimeoutError, discord.HTTPException):
+            imagem_evento = None
+            imagem_url = EVENTO_IMAGEM_URL
+
+        view = EventoView(evento, imagem_url)
         texto_enviado = None
 
         try:
@@ -436,7 +455,10 @@ class Menu(discord.ui.LayoutView):
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
                 evento.mensagem_personalizada = texto_enviado
-            evento.mensagem = await self.config.canal.send(view=view)
+            evento.mensagem = await self.config.canal.send(
+                view=view,
+                file=imagem_evento,
+            )
             view.mensagem = evento.mensagem
         except (
             discord.Forbidden,
@@ -457,16 +479,28 @@ class Menu(discord.ui.LayoutView):
             )
             return
 
+        try:
+            banner_evento = await baixar_arquivo(
+                EVENTOS_BANNER_URL,
+                "poyo-evento-banner.gif",
+            )
+            banner_url = EVENTOS_BANNER_ATTACHMENT
+        except (OSError, TimeoutError, discord.HTTPException):
+            banner_evento = None
+            banner_url = EVENTOS_BANNER_URL
+
         await interaction.response.edit_message(
             view=EventoCartao(
                 "Evento enviado",
                 "O evento foi enviado no canal escolhido.",
-            )
+                banner_url,
+            ),
+            attachments=[banner_evento] if banner_evento else [],
         )
 
 
 class EventoView(discord.ui.LayoutView):
-    def __init__(self, evento: Evento) -> None:
+    def __init__(self, evento: Evento, imagem_url: str) -> None:
         super().__init__(timeout=None)
         self.evento = evento
         self.mensagem: Optional[discord.Message] = None
@@ -481,7 +515,7 @@ class EventoView(discord.ui.LayoutView):
         self.add_item(
             discord.ui.Container(
                 discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(EVENTO_IMAGEM_URL)
+                    discord.MediaGalleryItem(imagem_url)
                 ),
                 discord.ui.ActionRow(botao),
             )
