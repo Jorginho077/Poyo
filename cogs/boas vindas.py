@@ -10,8 +10,6 @@ import discord
 from discord.ext import commands
 
 
-EMOJI_INICIO = "<:axolote:1556443018557661234>"
-EMOJI_FINAL = "<a:emoji_481:1556442987691647068>"
 DATABASE_PATH = Path(__file__).resolve().parent.parent / "poyo.sqlite3"
 
 
@@ -58,8 +56,7 @@ class WelcomeCard(discord.ui.LayoutView):
 
         conteudo: list[discord.ui.Item] = [
             discord.ui.TextDisplay(
-                f"{EMOJI_INICIO}  **{titulo}**  {EMOJI_FINAL}\n\n"
-                f"{descricao}"
+                f"{titulo}\n\n{descricao}"
             ),
         ]
 
@@ -129,7 +126,7 @@ class JoinPanel(discord.ui.LayoutView):
         self.add_item(
             discord.ui.Container(
                 discord.ui.TextDisplay(
-                    f"{EMOJI_INICIO}  **Join System**  {EMOJI_FINAL}\n\n"
+                    f"## Join System\n\n"
                     f"Canal: {canal}\n"
                     f"Status: {status}\n"
                     f"Título: {config.titulo}\n"
