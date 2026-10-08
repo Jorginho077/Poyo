@@ -2,12 +2,14 @@
 
 Etapa 1: convite, aceitar/recusar e criação do Fogo.
 Etapa 2: ciclo diário (00:00), botão "Acender o Fogo", sequência e Fogo apagado.
+Etapa 3: nome do Fogo (liberado aos 10 dias, sugerido por um e aceito pelo par).
 Veja FOGO_CHECKLIST.md na raiz do projeto para o andamento das demais etapas.
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 import sqlite3
 import time
 from typing import Optional
@@ -17,6 +19,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from . import _fogo_db as db
+from . import _fogo_nome as nomes
 from . import _fogo_tempo as tempo
 from . import _fogo_visual as visual
 
@@ -170,8 +173,11 @@ async def acender(interaction: discord.Interaction, fogo_id: int) -> None:
     if resultado == "ok":
         await interaction.response.edit_message(view=PainelView(fogo))
     elif resultado == "completo":
+        botoes = []
+        if fogo["sequencia"] >= nomes.NOME_MIN_DIAS and not fogo["nome"]:
+            botoes.append(NomeBotao(fogo_id))
         await interaction.response.edit_message(
-            view=visual.cartao_fogo_aceso(fogo)
+            view=visual.cartao_fogo_aceso(fogo, botoes=botoes)
         )
     else:
         avisos = {
@@ -186,6 +192,223 @@ async def acender(interaction: discord.Interaction, fogo_id: int) -> None:
         )
 
 
+# -------------------------------------------------------------- nome do Fogo
+
+
+def _parceiro(fogo: sqlite3.Row, user_id: int) -> int:
+    return fogo["usuario_b"] if user_id == fogo["usuario_a"] else fogo["usuario_a"]
+
+
+class NomeModal(discord.ui.Modal, title="Nome do Fogo"):
+    nome = discord.ui.TextInput(
+        label="Como vai se chamar o Fogo de vocês?",
+        placeholder="Ex.: Chaminha",
+        min_length=nomes.NOME_MIN,
+        max_length=nomes.NOME_MAX,
+    )
+
+    def __init__(self, fogo_id: int) -> None:
+        super().__init__()
+        self.fogo_id = fogo_id
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        valido, resultado = nomes.validar_nome(self.nome.value)
+        if not valido:
+            await interaction.response.send_message(resultado, ephemeral=True)
+            return
+
+        status, fogo = await asyncio.to_thread(
+            db.propor_nome,
+            self.fogo_id,
+            interaction.user.id,
+            resultado,
+            time.time(),
+            nomes.NOME_MIN_DIAS,
+        )
+
+        if status != "ok":
+            avisos = {
+                "inativo": "Esse Fogo já se apagou...",
+                "nao_participa": "Esse Fogo não é seu!",
+                "bloqueado": "Esse Fogo ainda não chegou aos "
+                f"{nomes.NOME_MIN_DIAS} dias.",
+                "igual": "O Fogo já se chama assim!",
+            }
+            await interaction.response.send_message(
+                avisos.get(status, "Não consegui salvar o nome agora."),
+                ephemeral=True,
+            )
+            return
+
+        versao = fogo["proposta_n"]
+        parceiro = _parceiro(fogo, interaction.user.id)
+        await interaction.response.send_message(
+            view=visual.cartao_proposta_nome(
+                fogo,
+                interaction.user.id,
+                resultado,
+                botoes=[
+                    RespostaNomeBotao(fogo["id"], versao, "aceitar"),
+                    RespostaNomeBotao(fogo["id"], versao, "recusar"),
+                ],
+            ),
+            allowed_mentions=discord.AllowedMentions(
+                users=[discord.Object(parceiro)]
+            ),
+        )
+
+    async def on_error(
+        self, interaction: discord.Interaction, error: Exception
+    ) -> None:
+        print(f"Fogo: erro no modal de nome: {error!r}")
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "Não consegui salvar o nome agora. Tente de novo.",
+                ephemeral=True,
+            )
+
+
+class NomeBotao(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"poyo:fogo:nome:(?P<id>[0-9]+)",
+):
+    """Botão "Dar nome ao Fogo". Dinâmico: funciona mesmo depois de o bot
+    reiniciar, sem precisar registrar mensagem por mensagem."""
+
+    def __init__(self, fogo_id: int) -> None:
+        super().__init__(
+            discord.ui.Button(
+                style=discord.ButtonStyle.primary,
+                label="Dar nome ao Fogo",
+                emoji="🏷️",
+                custom_id=f"poyo:fogo:nome:{fogo_id}",
+            )
+        )
+        self.fogo_id = fogo_id
+
+    @classmethod
+    async def from_custom_id(
+        cls,
+        interaction: discord.Interaction,
+        item: discord.ui.Button,
+        match: re.Match[str],
+    ) -> "NomeBotao":
+        return cls(int(match["id"]))
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        fogo = await asyncio.to_thread(db.obter_fogo, self.fogo_id)
+
+        if fogo is None or not fogo["ativo"]:
+            aviso = "Esse Fogo já se apagou..."
+        elif interaction.user.id not in (fogo["usuario_a"], fogo["usuario_b"]):
+            aviso = "Só a dupla do Fogo pode escolher o nome."
+        elif fogo["sequencia"] < nomes.NOME_MIN_DIAS:
+            faltam = nomes.NOME_MIN_DIAS - fogo["sequencia"]
+            aviso = (
+                f"O nome libera com {nomes.NOME_MIN_DIAS} dias de Fogo. "
+                f"Faltam {visual.dias(faltam)}!"
+            )
+        else:
+            await interaction.response.send_modal(NomeModal(self.fogo_id))
+            return
+
+        await interaction.response.send_message(aviso, ephemeral=True)
+
+
+class RespostaNomeBotao(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=(
+        r"poyo:fogo:nomeresp:(?P<id>[0-9]+):(?P<versao>[0-9]+):"
+        r"(?P<acao>aceitar|recusar)"
+    ),
+):
+    """Botões Aceitar / Recusar da sugestão de nome."""
+
+    def __init__(self, fogo_id: int, versao: int, acao: str) -> None:
+        aceitar = acao == "aceitar"
+        super().__init__(
+            discord.ui.Button(
+                style=(
+                    discord.ButtonStyle.success
+                    if aceitar
+                    else discord.ButtonStyle.secondary
+                ),
+                label="Aceitar o nome" if aceitar else "Recusar",
+                emoji=visual.EMOJI_FOGO if aceitar else "🧊",
+                custom_id=f"poyo:fogo:nomeresp:{fogo_id}:{versao}:{acao}",
+            )
+        )
+        self.fogo_id = fogo_id
+        self.versao = versao
+        self.acao = acao
+
+    @classmethod
+    async def from_custom_id(
+        cls,
+        interaction: discord.Interaction,
+        item: discord.ui.Button,
+        match: re.Match[str],
+    ) -> "RespostaNomeBotao":
+        return cls(int(match["id"]), int(match["versao"]), match["acao"])
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        aceitar = self.acao == "aceitar"
+
+        # Antes de resolver, guarda o nome sugerido para a mensagem final.
+        antes = await asyncio.to_thread(db.obter_fogo, self.fogo_id)
+        nome_sugerido = antes["nome_proposto"] if antes else None
+
+        status, fogo = await asyncio.to_thread(
+            db.responder_nome,
+            self.fogo_id,
+            self.versao,
+            interaction.user.id,
+            aceitar,
+            time.time(),
+            nomes.PROPOSTA_VALIDADE_SEGUNDOS,
+        )
+
+        if status == "aceito":
+            await interaction.response.edit_message(
+                view=visual.cartao_fogo_batizado(fogo)
+            )
+        elif status == "recusado":
+            await interaction.response.edit_message(
+                view=visual.cartao_nome_recusado(
+                    fogo, nome_sugerido or "sugerido", interaction.user.id
+                )
+            )
+        elif status == "expirada":
+            await interaction.response.edit_message(
+                view=visual.cartao_proposta_encerrada(
+                    "Essa sugestão passou de 24 horas sem resposta."
+                )
+            )
+        elif status == "antiga":
+            await interaction.response.edit_message(
+                view=visual.cartao_proposta_encerrada(
+                    "Essa sugestão já foi respondida ou foi substituída "
+                    "por outra."
+                )
+            )
+        elif status == "inativo":
+            await interaction.response.edit_message(
+                view=visual.cartao_proposta_encerrada(
+                    "O Fogo se apagou antes de a sugestão ser respondida."
+                )
+            )
+        else:
+            avisos = {
+                "proprio": "Quem sugeriu o nome não pode aceitar. "
+                "Aguarde seu par responder!",
+                "nao_participa": "Só a dupla do Fogo pode responder.",
+            }
+            await interaction.response.send_message(
+                avisos.get(status, "Não consegui responder agora."),
+                ephemeral=True,
+            )
+
+
 # ---------------------------------------------------------------------- cog
 
 
@@ -196,10 +419,12 @@ class Fogo(commands.Cog):
 
     async def cog_load(self) -> None:
         await asyncio.to_thread(db.iniciar)
+        self.bot.add_dynamic_items(NomeBotao, RespostaNomeBotao)
         self.manutencao_convites.start()
         self.ciclo_diario.start()
 
     async def cog_unload(self) -> None:
+        self.bot.remove_dynamic_items(NomeBotao, RespostaNomeBotao)
         self.manutencao_convites.cancel()
         self.ciclo_diario.cancel()
 
@@ -436,6 +661,71 @@ class Fogo(commands.Cog):
 
         await asyncio.to_thread(
             db.definir_mensagem_convite, convite_id, mensagem.id
+        )
+
+    @commands.hybrid_command(
+        name="nomefogo",
+        description="Sugere um nome para o seu Fogo (liberado com 10 dias).",
+        extras={
+            "categoria": "Fogo",
+            "uso": ",nomefogo [@parceiro]",
+            "descricao": (
+                "Com 10 dias de Fogo vocês podem dar um nome à sequência. "
+                "Um sugere e o outro aceita."
+            ),
+        },
+    )
+    @app_commands.describe(
+        parceiro="Com quem é o Fogo (só precisa se você tiver vários)"
+    )
+    @commands.guild_only()
+    async def nomefogo(
+        self,
+        ctx: commands.Context,
+        parceiro: Optional[discord.Member] = None,
+    ) -> None:
+        lista = await asyncio.to_thread(
+            db.fogos_do_membro, ctx.guild.id, ctx.author.id
+        )
+        if parceiro is not None:
+            lista = [
+                f
+                for f in lista
+                if parceiro.id in (f["usuario_a"], f["usuario_b"])
+            ]
+
+        if not lista:
+            await self._aviso(
+                ctx,
+                "Nenhum Fogo encontrado",
+                "Você não tem um Fogo ativo"
+                + (f" com {parceiro.mention}" if parceiro else "")
+                + ". Chame alguém com `,fogo @membro`!",
+            )
+            return
+
+        if len(lista) > 1:
+            await self._aviso(
+                ctx,
+                "Você tem vários Fogos",
+                "Diga com quem é o Fogo: `,nomefogo @membro`.",
+            )
+            return
+
+        fogo = lista[0]
+        if fogo["sequencia"] < nomes.NOME_MIN_DIAS:
+            faltam = nomes.NOME_MIN_DIAS - fogo["sequencia"]
+            await self._aviso(
+                ctx,
+                "Ainda não liberou",
+                f"O nome do Fogo libera com {nomes.NOME_MIN_DIAS} dias de "
+                f"sequência. Faltam {visual.dias(faltam)}!",
+            )
+            return
+
+        await ctx.send(
+            view=visual.cartao_convite_nome(fogo, [NomeBotao(fogo["id"])]),
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
     @commands.hybrid_command(

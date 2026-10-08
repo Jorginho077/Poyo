@@ -19,6 +19,8 @@ EMOJI_FOGO_FELIZ = os.getenv("FOGO_EMOJI_FELIZ", "🔥")  # fogo feliz e animado
 EMOJI_FOGO_TRISTE = os.getenv("FOGO_EMOJI_TRISTE", "🥶")  # fogo com frio
 EMOJI_CONVITE = os.getenv("FOGO_EMOJI_CONVITE", "💌")
 
+NOME_MIN_DIAS = 10  # mantenha igual ao de _fogo_nome.py
+
 COR_FOGO = discord.Colour.from_rgb(255, 120, 30)  # laranja chama
 COR_FRIO = discord.Colour.from_rgb(120, 190, 255)  # azul gelo
 COR_NEUTRA = discord.Colour.from_rgb(110, 110, 120)
@@ -38,7 +40,7 @@ class CartaoFogo(discord.ui.LayoutView):
         self,
         *blocos: str,
         cor: discord.Colour = COR_FOGO,
-        botoes: Sequence[discord.ui.Button] = (),
+        botoes: Sequence[discord.ui.Item] = (),
         timeout: float | None = None,
     ) -> None:
         super().__init__(timeout=timeout)
@@ -161,17 +163,33 @@ def blocos_painel(f) -> list[str]:
     ]
 
 
-def cartao_fogo_aceso(f) -> CartaoFogo:
-    return CartaoFogo(
+def cartao_fogo_aceso(
+    f, botoes: Sequence[discord.ui.Item] = ()
+) -> CartaoFogo:
+    blocos = [
         f"## {EMOJI_FOGO_FELIZ} Fogo aceso!",
         (
             f"{_dupla_txt(f)}{_linha_nome(f)}\n"
             f"**Sequência:** {dias(f['sequencia'])}\n\n"
             f"{frase_chama(f['sequencia'])}"
         ),
-        "-# Volte às 00:00 para reacender a chama.",
-        cor=COR_FOGO,
-    )
+    ]
+
+    if botoes:  # o nome está liberado e o Fogo ainda não tem um
+        if f["sequencia"] == NOME_MIN_DIAS:
+            blocos.append(
+                f"### 🎉 {dias(NOME_MIN_DIAS)} de Fogo!\n"
+                "Vocês desbloquearam o **nome do Fogo**. "
+                "Escolham um nome para essa sequência!"
+            )
+        else:
+            blocos.append(
+                "O Fogo de vocês ainda não tem nome. "
+                "Que tal batizar essa chama?"
+            )
+    blocos.append("-# Volte às 00:00 para reacender a chama.")
+
+    return CartaoFogo(*blocos, cor=COR_FOGO, botoes=botoes)
 
 
 def cartao_fogo_apagado(f) -> CartaoFogo:
@@ -199,3 +217,66 @@ def cartao_painel_encerrado(f) -> CartaoFogo:
         "Esse painel não aceita mais cliques.",
         cor=COR_NEUTRA,
     )
+
+
+# ------------------------------------------------ nome do Fogo (Etapa 3)
+
+
+def cartao_convite_nome(f, botoes: Sequence[discord.ui.Item]) -> CartaoFogo:
+    atual = f"**{f['nome']}**" if f["nome"] else "ainda sem nome"
+    return CartaoFogo(
+        "## 🏷️ Nome do Fogo",
+        (
+            f"{_dupla_txt(f)}\n"
+            f"**Sequência:** {dias(f['sequencia'])}\n"
+            f"**Nome atual:** {atual}\n\n"
+            "Clique no botão para sugerir um nome. "
+            "Seu par precisa aceitar para ele valer."
+        ),
+        cor=COR_FOGO,
+        botoes=botoes,
+    )
+
+
+def cartao_proposta_nome(
+    f, proponente_id: int, nome: str, botoes: Sequence[discord.ui.Item]
+) -> CartaoFogo:
+    parceiro = (
+        f["usuario_b"] if proponente_id == f["usuario_a"] else f["usuario_a"]
+    )
+    return CartaoFogo(
+        "## 🏷️ Sugestão de nome",
+        (
+            f"<@{proponente_id}> sugeriu chamar o Fogo de vocês de "
+            f"**{nome}**.\n\n<@{parceiro}>, o que você acha?"
+        ),
+        "-# A sugestão vale por 24 horas.",
+        cor=COR_FOGO,
+        botoes=botoes,
+    )
+
+
+def cartao_fogo_batizado(f) -> CartaoFogo:
+    return CartaoFogo(
+        f"## {EMOJI_FOGO_FELIZ} Fogo batizado!",
+        (
+            f"{_dupla_txt(f)}\n"
+            f"{EMOJI_FOGO} **Fogo:** {f['nome']}\n"
+            f"**Sequência:** {dias(f['sequencia'])}"
+        ),
+        "-# A partir de agora o nome aparece em todas as mensagens do Fogo.",
+        cor=COR_FOGO,
+    )
+
+
+def cartao_nome_recusado(f, nome: str, quem_recusou: int) -> CartaoFogo:
+    return CartaoFogo(
+        "## 🧊 Nome recusado",
+        f"<@{quem_recusou}> não curtiu o nome **{nome}**. "
+        "Vocês podem sugerir outro com `,nomefogo`.",
+        cor=COR_FRIO,
+    )
+
+
+def cartao_proposta_encerrada(motivo: str) -> CartaoFogo:
+    return CartaoFogo("## ⏳ Sugestão encerrada", motivo, cor=COR_NEUTRA)

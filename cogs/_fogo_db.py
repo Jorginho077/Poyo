@@ -87,6 +87,11 @@ _COLUNAS_NOVAS = {
     "b_acendeu": "INTEGER NOT NULL DEFAULT 0",  # usuario_b acendeu hoje?
     "painel_id": "INTEGER",  # mensagem do painel do dia
     "encerrado_em": "REAL",  # quando o fogo apagou
+    # Nome do Fogo (Etapa 3): sugestão aguardando o par responder.
+    "nome_proposto": "TEXT",
+    "proposto_por": "INTEGER",
+    "proposta_em": "REAL",
+    "proposta_n": "INTEGER NOT NULL DEFAULT 0",  # versão da sugestão
 }
 
 
@@ -413,5 +418,104 @@ def virar_dia(
             (time.time(), fogo_id),
         )
         return "apagou", con.execute(
+            "SELECT * FROM fogos WHERE id = ?", (fogo_id,)
+        ).fetchone()
+
+
+# ------------------------------------------------------------ nome do Fogo
+
+
+def propor_nome(
+    fogo_id: int,
+    user_id: int,
+    nome: str,
+    agora: float,
+    dias_minimos: int,
+) -> tuple[str, Optional[sqlite3.Row]]:
+    """Guarda uma sugestão de nome (substitui a anterior, se houver).
+
+    Resultados: 'ok', 'inativo', 'nao_participa', 'bloqueado' (ainda sem os
+    dias necessários) e 'igual' (já é o nome atual).
+    """
+    with _conexao() as con:
+        con.execute("BEGIN IMMEDIATE")
+        f = con.execute(
+            "SELECT * FROM fogos WHERE id = ?", (fogo_id,)
+        ).fetchone()
+        if f is None or not f["ativo"]:
+            return "inativo", f
+        if user_id not in (f["usuario_a"], f["usuario_b"]):
+            return "nao_participa", f
+        if f["sequencia"] < dias_minimos:
+            return "bloqueado", f
+        if f["nome"] is not None and f["nome"].casefold() == nome.casefold():
+            return "igual", f
+
+        con.execute(
+            """
+            UPDATE fogos
+            SET nome_proposto = ?, proposto_por = ?, proposta_em = ?,
+                proposta_n = proposta_n + 1
+            WHERE id = ?
+            """,
+            (nome, user_id, agora, fogo_id),
+        )
+        return "ok", con.execute(
+            "SELECT * FROM fogos WHERE id = ?", (fogo_id,)
+        ).fetchone()
+
+
+def responder_nome(
+    fogo_id: int,
+    versao: int,
+    user_id: int,
+    aceitar: bool,
+    agora: float,
+    validade: float,
+) -> tuple[str, Optional[sqlite3.Row]]:
+    """O par aceita ou recusa a sugestão.
+
+    Resultados: 'aceito', 'recusado', 'inativo', 'nao_participa',
+    'proprio' (quem sugeriu não pode responder), 'antiga' (sugestão já
+    resolvida ou substituída) e 'expirada'.
+    """
+    with _conexao() as con:
+        con.execute("BEGIN IMMEDIATE")
+        f = con.execute(
+            "SELECT * FROM fogos WHERE id = ?", (fogo_id,)
+        ).fetchone()
+        if f is None or not f["ativo"]:
+            return "inativo", f
+        if user_id not in (f["usuario_a"], f["usuario_b"]):
+            return "nao_participa", f
+        if f["nome_proposto"] is None or f["proposta_n"] != versao:
+            return "antiga", f
+        if user_id == f["proposto_por"]:
+            return "proprio", f
+        if agora - (f["proposta_em"] or 0) > validade:
+            con.execute(
+                "UPDATE fogos SET nome_proposto = NULL, proposto_por = NULL, "
+                "proposta_em = NULL WHERE id = ?",
+                (fogo_id,),
+            )
+            return "expirada", f
+
+        if aceitar:
+            con.execute(
+                """
+                UPDATE fogos
+                SET nome = nome_proposto, nome_proposto = NULL,
+                    proposto_por = NULL, proposta_em = NULL
+                WHERE id = ?
+                """,
+                (fogo_id,),
+            )
+        else:
+            con.execute(
+                "UPDATE fogos SET nome_proposto = NULL, proposto_por = NULL, "
+                "proposta_em = NULL WHERE id = ?",
+                (fogo_id,),
+            )
+        return ("aceito" if aceitar else "recusado"), con.execute(
             "SELECT * FROM fogos WHERE id = ?", (fogo_id,)
         ).fetchone()
