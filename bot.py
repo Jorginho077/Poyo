@@ -31,7 +31,8 @@ GIFS = {
             "Jorginho077/Poyo/main/assets/"
             "Tumblr-l-67143811701311.gif"
         ),
-        "arquivo": "poyo_banner.gif",
+        # Nome novo para não reutilizar o GIF antigo.
+        "arquivo": "poyo_banner_v2.gif",
     },
 }
 
@@ -39,7 +40,11 @@ GIFS = {
 class Cartao(discord.ui.LayoutView):
     """Container V2 com banner acima e abaixo do texto."""
 
-    def __init__(self, *blocos: str) -> None:
+    def __init__(
+        self,
+        banner: str,
+        *blocos: str,
+    ) -> None:
         super().__init__(timeout=None)
 
         if blocos:
@@ -54,18 +59,14 @@ class Cartao(discord.ui.LayoutView):
         self.add_item(
             discord.ui.Container(
                 discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(
-                        "attachment://poyo_banner.gif"
-                    )
+                    discord.MediaGalleryItem(banner)
                 ),
                 *(
                     discord.ui.TextDisplay(bloco)
                     for bloco in blocos
                 ),
                 discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(
-                        "attachment://poyo_banner.gif"
-                    )
+                    discord.MediaGalleryItem(banner)
                 ),
             )
         )
@@ -85,7 +86,6 @@ class BotModeracao(commands.Bot):
             help_command=None,
         )
 
-        # Pasta central dos arquivos baixados.
         self.assets_dir = (
             Path(__file__).resolve().parent / "assets"
         )
@@ -95,7 +95,6 @@ class BotModeracao(commands.Bot):
             exist_ok=True,
         )
 
-        # Guarda os caminhos dos assets disponíveis.
         self.gifs: dict[str, Path] = {}
 
     # ========================================================
@@ -104,15 +103,13 @@ class BotModeracao(commands.Bot):
 
     async def baixar_gifs(self) -> None:
         """
-        Baixa todos os GIFs configurados em GIFS.
+        Baixa os GIFs configurados.
 
-        Se o arquivo já existir e não estiver vazio, ele é reutilizado.
-        Assim o bot não fica baixando o mesmo GIF toda vez que inicia.
+        O download é feito novamente para garantir que o bot
+        não fique preso usando uma cópia antiga/ruim.
         """
 
-        timeout = aiohttp.ClientTimeout(
-            total=30
-        )
+        timeout = aiohttp.ClientTimeout(total=30)
 
         headers = {
             "User-Agent": "PoyoBot/1.0"
@@ -128,27 +125,19 @@ class BotModeracao(commands.Bot):
                 nome_arquivo = dados["arquivo"]
 
                 caminho = self.assets_dir / nome_arquivo
-
-                # Arquivo já existe e possui conteúdo.
-                if caminho.exists() and caminho.stat().st_size > 0:
-                    self.gifs[nome] = caminho
-
-                    print(
-                        f"Asset reutilizado: "
-                        f"{nome_arquivo}"
-                    )
-
-                    continue
+                temporario = (
+                    self.assets_dir
+                    / f".{nome_arquivo}.tmp"
+                )
 
                 try:
                     print(
-                        f"Baixando asset: "
+                        f"Baixando GIF atualizado: "
                         f"{nome_arquivo}"
                     )
 
                     async with session.get(url) as resposta:
                         resposta.raise_for_status()
-
                         conteudo = await resposta.read()
 
                     if not conteudo:
@@ -156,13 +145,26 @@ class BotModeracao(commands.Bot):
                             "O servidor retornou um arquivo vazio."
                         )
 
-                    caminho.write_bytes(conteudo)
+                    if not (
+                        conteudo.startswith(b"GIF87a")
+                        or conteudo.startswith(b"GIF89a")
+                    ):
+                        raise RuntimeError(
+                            "O arquivo baixado não é um GIF válido."
+                        )
+
+                    # Primeiro grava em temporário.
+                    temporario.write_bytes(conteudo)
+
+                    # Só substitui o arquivo depois do download completo.
+                    temporario.replace(caminho)
 
                     self.gifs[nome] = caminho
 
                     print(
-                        f"Asset baixado: "
-                        f"{nome_arquivo}"
+                        f"GIF atualizado com sucesso: "
+                        f"{nome_arquivo} "
+                        f"({len(conteudo):,} bytes)"
                     )
 
                 except (
@@ -172,8 +174,13 @@ class BotModeracao(commands.Bot):
                     RuntimeError,
                 ) as erro:
 
-                    # Se houver um arquivo antigo disponível,
-                    # ainda podemos utilizá-lo.
+                    try:
+                        if temporario.exists():
+                            temporario.unlink()
+                    except OSError:
+                        pass
+
+                    # Se já existir uma cópia válida, usa ela.
                     if (
                         caminho.exists()
                         and caminho.stat().st_size > 0
@@ -181,16 +188,17 @@ class BotModeracao(commands.Bot):
                         self.gifs[nome] = caminho
 
                         print(
-                            f"Falha ao atualizar "
-                            f"{nome_arquivo}, "
-                            f"usando arquivo existente: "
-                            f"{erro}"
+                            f"Não foi possível atualizar "
+                            f"{nome_arquivo}: {erro}"
+                        )
+                        print(
+                            "Usando a cópia local existente."
                         )
 
                     else:
                         raise RuntimeError(
-                            f"Não foi possível baixar "
-                            f"o asset '{nome_arquivo}'."
+                            f"Não foi possível carregar "
+                            f"o GIF '{nome_arquivo}'."
                         ) from erro
 
     # ========================================================
@@ -198,10 +206,6 @@ class BotModeracao(commands.Bot):
     # ========================================================
 
     def asset_path(self, nome: str) -> Path:
-        """
-        Retorna o caminho local de um asset.
-        """
-
         caminho = self.gifs.get(nome)
 
         if caminho is None:
@@ -212,13 +216,6 @@ class BotModeracao(commands.Bot):
         return caminho
 
     def asset_file(self, nome: str) -> discord.File:
-        """
-        Cria um novo discord.File para envio.
-
-        Um discord.File não deve ser reutilizado em várias mensagens,
-        por isso criamos uma nova instância a cada envio.
-        """
-
         caminho = self.asset_path(nome)
 
         dados = GIFS.get(nome)
@@ -235,7 +232,7 @@ class BotModeracao(commands.Bot):
 
     def asset_url(self, nome: str) -> str:
         """
-        Retorna a referência attachment:// usada pelos Components V2.
+        Retorna a referência attachment:// usada pelo Components V2.
         """
 
         dados = GIFS.get(nome)
@@ -245,7 +242,6 @@ class BotModeracao(commands.Bot):
                 f"Asset desconhecido: {nome}"
             )
 
-        # Garante que o arquivo realmente foi carregado.
         self.asset_path(nome)
 
         return f"attachment://{dados['arquivo']}"
@@ -255,10 +251,6 @@ class BotModeracao(commands.Bot):
     # ========================================================
 
     async def setup_hook(self) -> None:
-        """
-        Baixa os assets primeiro e depois carrega todos os cogs.
-        """
-
         print("Preparando assets...")
 
         await self.baixar_gifs()
@@ -325,8 +317,6 @@ bot = BotModeracao()
 async def apagar_mensagem_do_comando(
     ctx: commands.Context,
 ) -> None:
-    """Apaga a mensagem original depois que o comando foi reconhecido."""
-
     try:
         await ctx.message.delete()
 
@@ -357,8 +347,6 @@ async def apagar_mensagem_do_comando(
 async def comandos(
     ctx: commands.Context,
 ) -> None:
-    """Exibe ajuda dinâmica usando Container e TextDisplay."""
-
     blocos = [
         (
             "## Central de comandos\n\n"
@@ -437,7 +425,10 @@ async def comandos(
     )
 
     await ctx.send(
-        view=Cartao(*blocos),
+        view=Cartao(
+            bot.asset_url("banner"),
+            *blocos,
+        ),
         file=bot.asset_file("banner"),
     )
 
@@ -451,9 +442,6 @@ async def on_command_error(
     ctx: commands.Context,
     error: commands.CommandError,
 ) -> None:
-    """
-    Responde aos erros sem embeds e remove o aviso após 25 segundos.
-    """
 
     if hasattr(ctx.command, "on_error"):
         return
@@ -470,11 +458,8 @@ async def on_command_error(
     ):
         return
 
-    # Membro calado: ignora o comando.
     if ctx.guild is not None:
-        moderacao = bot.get_cog(
-            "Moderacao"
-        )
+        moderacao = bot.get_cog("Moderacao")
 
         if moderacao is not None:
             guild_calados = getattr(
@@ -512,18 +497,14 @@ async def on_command_error(
         erro,
         commands.MissingPermissions,
     ):
-        # Apaga silenciosamente o comando
-        # de quem não possui permissão.
         try:
             await ctx.message.delete()
-
         except (
             discord.NotFound,
             discord.Forbidden,
             discord.HTTPException,
         ):
             pass
-
         return
 
     elif isinstance(
@@ -586,6 +567,7 @@ async def on_command_error(
 
     await ctx.send(
         view=Cartao(
+            bot.asset_url("banner"),
             "## Não foi possível concluir",
             mensagem,
         ),
