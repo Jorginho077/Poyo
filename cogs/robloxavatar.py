@@ -96,6 +96,11 @@ async def buscar_avatar_roblox(user_id: int) -> Optional[str]:
     return str(imagem) if imagem else None
 
 
+def texto_curtidas(total: int) -> str:
+    palavra = "Curtida" if total == 1 else "Curtidas"
+    return f"{total} {palavra}"
+
+
 class CartaoConfiguracao(discord.ui.LayoutView):
     def __init__(self, config: ConfiguracaoAvatar, autor_id: int) -> None:
         super().__init__(timeout=None)
@@ -281,12 +286,16 @@ class AvatarView(discord.ui.LayoutView):
             discord.ui.Container(
                 discord.ui.ActionRow(perfil),
                 discord.ui.TextDisplay(
-                    f"## {usuario['display_name']}\n"
-                    f"`@{usuario['name']} - {len(self.curtidas)}`"
+                    f"## [{usuario['display_name']}]"
+                    f"(https://www.roblox.com/users/{usuario['id']}/profile)\n"
+                    f"`@{usuario['name']}` - "
+                    f"{texto_curtidas(len(self.curtidas))}"
                 ),
+                discord.ui.Separator(),
                 discord.ui.MediaGallery(
                     discord.MediaGalleryItem(imagem_url)
                 ),
+                discord.ui.Separator(),
                 discord.ui.ActionRow(coracao),
             )
         )
@@ -337,13 +346,17 @@ class AvatarViewAtualizado(discord.ui.LayoutView):
             discord.ui.Container(
                 discord.ui.ActionRow(perfil),
                 discord.ui.TextDisplay(
-                    f"## {origem.usuario['display_name']}\n"
-                    f"`@{origem.usuario['name']} - "
-                    f"{len(origem.curtidas)}`"
+                    f"## [{origem.usuario['display_name']}]"
+                    f"(https://www.roblox.com/users/"
+                    f"{origem.usuario['id']}/profile)\n"
+                    f"`@{origem.usuario['name']}` - "
+                    f"{texto_curtidas(len(origem.curtidas))}"
                 ),
+                discord.ui.Separator(),
                 discord.ui.MediaGallery(
                     discord.MediaGalleryItem(origem.imagem_url)
                 ),
+                discord.ui.Separator(),
                 discord.ui.ActionRow(coracao),
             )
         )
