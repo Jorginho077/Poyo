@@ -598,8 +598,9 @@ class EventoView(discord.ui.LayoutView):
 
 
 class Eventos(commands.Cog):
-    @commands.command(
+    @commands.hybrid_command(
         name="poyoevent",
+        description="Abre o painel para configurar um evento de cargo.",
         extras={
             "categoria": "Eventos",
             "uso": ",poyoevent",
