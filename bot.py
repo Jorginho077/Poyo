@@ -6,6 +6,8 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
+from cogs._media import baixar_arquivo
+
 
 load_dotenv()
 
@@ -16,19 +18,18 @@ EMOJI_INICIO = "<:axolote:1556443018557661234>"
 EMOJI_FINAL = "<a:emoji_481:1556442987691647068>"
 
 NOVO_BANNER = (
-    "https://cdn.discordapp.com/attachments/"
-    "1556065837830639676/1557126421896372254/"
-    "Tumblr_l_67143811701311.gif?backend=b2&"
-    "ex=6ac6aa7c&is=6ac558fc&"
-    "hm=05eabefc1e0d8f17b1c9e9afedb11113d956579e45035bfd070c51cdd32150b6&"
+    "https://raw.githubusercontent.com/"
+    "Jorginho077/Poyo/main/assets/Tumblr-l-67143811701311.gif"
 )
+NOVO_BANNER_ATTACHMENT = "attachment://poyo-bot-banner.gif"
 
 
 class Cartao(discord.ui.LayoutView):
     """Container V2 com banner dentro, acima e abaixo do texto."""
 
-    def __init__(self, *blocos: str) -> None:
+    def __init__(self, *blocos: str, usar_anexo: bool = True) -> None:
         super().__init__(timeout=None)
+        banner_url = NOVO_BANNER_ATTACHMENT if usar_anexo else NOVO_BANNER
 
         if blocos:
             blocos = list(blocos)
@@ -41,17 +42,37 @@ class Cartao(discord.ui.LayoutView):
         self.add_item(
             discord.ui.Container(
                 discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(NOVO_BANNER)
+                    discord.MediaGalleryItem(banner_url)
                 ),
                 *(
                     discord.ui.TextDisplay(bloco)
                     for bloco in blocos
                 ),
                 discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(NOVO_BANNER)
+                    discord.MediaGalleryItem(banner_url)
                 ),
             )
         )
+
+
+async def enviar_cartao(
+    ctx: commands.Context,
+    *blocos: str,
+    delete_after: float | None = None,
+) -> discord.Message:
+    try:
+        arquivo = await baixar_arquivo(
+            NOVO_BANNER,
+            "poyo-bot-banner.gif",
+        )
+    except (OSError, TimeoutError, discord.HTTPException):
+        arquivo = None
+
+    return await ctx.send(
+        view=Cartao(*blocos, usar_anexo=arquivo is not None),
+        file=arquivo,
+        delete_after=delete_after,
+    )
 
 
 class BotModeracao(commands.Bot):
@@ -171,7 +192,7 @@ async def comandos(ctx: commands.Context) -> None:
         "-# As respostas de moderação somem em 25 segundos."
     )
 
-    await ctx.send(view=Cartao(*blocos))
+    await enviar_cartao(ctx, *blocos)
 
 
 @bot.event
@@ -244,11 +265,10 @@ async def on_command_error(
         )
         mensagem = "Não consegui concluir esta ação agora. Verifique minhas permissões e tente novamente."
 
-    await ctx.send(
-        view=Cartao(
+    await enviar_cartao(
+        ctx,
             "## Não foi possível concluir",
             mensagem,
-        ),
         delete_after=25,
     )
 
