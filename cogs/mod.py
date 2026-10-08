@@ -540,10 +540,6 @@ class Moderacao(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(manage_messages=True)
-    @commands.bot_has_permissions(
-        manage_messages=True,
-        manage_channels=True,
-    )
     async def calado(
         self,
         ctx: commands.Context,
@@ -599,42 +595,22 @@ class Moderacao(commands.Cog):
             )
             return
 
+        bot_membro = ctx.guild.me
+
+        if bot_membro is None or not ctx.channel.permissions_for(bot_membro).manage_messages:
+            await responder(
+                ctx,
+                "Permissão necessária",
+                "Preciso de `Gerenciar mensagens` neste canal.",
+            )
+            return
+
         self.calados.setdefault(ctx.guild.id, {})[membro.id] = (
             time.time() + segundos
         )
 
-        await self._aplicar_barreira_calado(
-            ctx.guild,
-            membro,
-        )
-
-        await avisar_punicao(
-            membro,
-            (
-                f"Você foi calado no servidor "
-                f"**{ctx.guild.name}** por "
-                f"**{formatar_duracao(segundos)}**."
-            ),
-        )
-
-        if membro.voice is not None:
-            try:
-                await membro.move_to(
-                    None,
-                    reason="Membro calado removido da call.",
-                )
-            except (
-                discord.NotFound,
-                discord.Forbidden,
-                discord.HTTPException,
-            ):
-                await responder(
-                    ctx,
-                    "Call não removida",
-                    "Dê ao Poyo `Mover membros` nesta call.",
-                )
-                return
-
+        # Responde primeiro. Alterar permissões de vários canais pode levar
+        # vários segundos e não deve bloquear a resposta do comando.
         await responder(
             ctx,
             "Calado com sucesso",
@@ -643,6 +619,33 @@ class Moderacao(commands.Cog):
                 f"**{formatar_duracao(segundos)}**."
             ),
         )
+
+        asyncio.create_task(
+            self._aplicar_barreira_calado(
+                ctx.guild,
+                membro,
+            )
+        )
+
+        # DM e desconexão da call ficam depois da resposta principal.
+        asyncio.create_task(
+            avisar_punicao(
+                membro,
+                (
+                    f"Você foi calado no servidor "
+                    f"**{ctx.guild.name}** por "
+                    f"**{formatar_duracao(segundos)}**."
+                ),
+            )
+        )
+
+        if membro.voice is not None and bot_membro.guild_permissions.move_members:
+            asyncio.create_task(
+                membro.move_to(
+                    None,
+                    reason="Membro calado removido da call.",
+                )
+            )
 
         await self.registrar_log(
             ctx.guild,
