@@ -9,6 +9,8 @@ from typing import Optional
 import discord
 from discord.ext import commands, tasks
 
+from ._media import baixar_arquivo
+
 
 DURACAO_RE = re.compile(
     r"^(?P<valor>[1-9]\d*)(?P<unidade>s|m|h|d|w)$",
@@ -33,6 +35,7 @@ MOD_BANNER_URL = (
     "https://raw.githubusercontent.com/"
     "Jorginho077/Poyo/main/assets/Tumblr-l-67143811701311.gif"
 )
+MOD_BANNER_ATTACHMENT = "attachment://poyo-mod-banner.gif"
 
 
 def analisar_duracao(texto: str) -> Optional[int]:
@@ -66,20 +69,25 @@ def formatar_duracao(segundos: int) -> str:
 class ModeracaoCartao(discord.ui.LayoutView):
     """Container V2 com banner dentro, acima e abaixo do texto."""
 
-    def __init__(self, titulo: str, descricao: str) -> None:
+    def __init__(
+        self,
+        titulo: str,
+        descricao: str,
+        banner_url: str = MOD_BANNER_ATTACHMENT,
+    ) -> None:
         super().__init__(timeout=None)
 
         self.add_item(
             discord.ui.Container(
                 discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(MOD_BANNER_URL)
+                    discord.MediaGalleryItem(banner_url)
                 ),
                 discord.ui.TextDisplay(
                     f"{EMOJI_INICIO}  **{titulo}**  {EMOJI_FINAL}\n\n"
                     f"{descricao}"
                 ),
                 discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(MOD_BANNER_URL)
+                    discord.MediaGalleryItem(banner_url)
                 ),
             )
         )
@@ -90,8 +98,21 @@ async def responder(
     titulo: str,
     texto: str,
 ) -> discord.Message:
+    try:
+        arquivo = await baixar_arquivo(
+            MOD_BANNER_URL,
+            "poyo-mod-banner.gif",
+        )
+    except (OSError, TimeoutError, discord.HTTPException):
+        arquivo = None
+
     return await ctx.send(
-        view=ModeracaoCartao(titulo, texto),
+        view=ModeracaoCartao(
+            titulo,
+            texto,
+            MOD_BANNER_ATTACHMENT if arquivo is not None else MOD_BANNER_URL,
+        ),
+        file=arquivo,
         delete_after=TEMPO_DAS_RESPOSTAS,
     )
 
