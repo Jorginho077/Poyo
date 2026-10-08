@@ -367,17 +367,12 @@ class Avatar(commands.Cog):
             view=PainelSkin(config, ctx.author.id)
         )
 
-    @commands.command(
-        name="skin",
-        extras={
-            "categoria": "Utilidades",
-            "uso": ",skin nome_do_roblox_ou_minecraft",
-            "descricao": "Mostra a skin de um usuário do Roblox ou Minecraft.",
-        },
-    )
-    @commands.guild_only()
-    @commands.bot_has_permissions(send_messages=True, read_message_history=True)
-    async def skin(self, ctx: commands.Context, *, nome: str) -> None:
+    async def _enviar_skin(
+        self,
+        ctx: commands.Context,
+        nome: str,
+        buscar: callable,
+    ) -> None:
         config = self.configuracoes.get(ctx.guild.id)
         if config is None or not config.ativo or config.canal_id is None:
             return
@@ -389,15 +384,41 @@ class Avatar(commands.Cog):
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             pass
 
-        resultado = await buscar_skin(nome)
+        resultado = await buscar(nome.strip().lstrip("@"))
         if resultado is None:
             await ctx.send(
-                "Não encontrei esse usuário no Roblox ou no Minecraft.",
+                "Não encontrei esse usuário nessa plataforma.",
                 delete_after=10,
             )
             return
 
         await ctx.send(view=SkinView(resultado))
+
+    @commands.command(
+        name="rskin",
+        extras={
+            "categoria": "Utilidades",
+            "uso": ",Rskin @nome_do_roblox",
+            "descricao": "Mostra o avatar de um usuário do Roblox.",
+        },
+    )
+    @commands.guild_only()
+    @commands.bot_has_permissions(send_messages=True, read_message_history=True)
+    async def rskin(self, ctx: commands.Context, *, nome: str) -> None:
+        await self._enviar_skin(ctx, nome, buscar_roblox)
+
+    @commands.command(
+        name="mskin",
+        extras={
+            "categoria": "Utilidades",
+            "uso": ",Mskin @nome_do_minecraft",
+            "descricao": "Mostra a skin de um usuário do Minecraft.",
+        },
+    )
+    @commands.guild_only()
+    @commands.bot_has_permissions(send_messages=True, read_message_history=True)
+    async def mskin(self, ctx: commands.Context, *, nome: str) -> None:
+        await self._enviar_skin(ctx, nome, buscar_minecraft)
 
 
 async def setup(bot: commands.Bot) -> None:
