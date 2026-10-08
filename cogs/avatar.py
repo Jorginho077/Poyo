@@ -29,6 +29,7 @@ BANNER_URL = (
     "https://raw.githubusercontent.com/"
     "Jorginho077/Poyo/main/assets/Tumblr-l-67143811701311.gif"
 )
+PAINEL_BANNER_ATTACHMENT = "attachment://poyo-skinview-banner.gif"
 ROBLOX_LOGO_ID = 1509476102890979409
 MINECRAFT_LOGO_ID = 1509476073904148582
 
@@ -151,7 +152,12 @@ def texto_curtidas(total: int) -> str:
 
 
 class PainelSkin(discord.ui.LayoutView):
-    def __init__(self, config: ConfiguracaoSkin, autor_id: int) -> None:
+    def __init__(
+        self,
+        config: ConfiguracaoSkin,
+        autor_id: int,
+        banner_url: str = PAINEL_BANNER_ATTACHMENT,
+    ) -> None:
         super().__init__(timeout=None)
         self.config = config
         self.autor_id = autor_id
@@ -178,7 +184,7 @@ class PainelSkin(discord.ui.LayoutView):
 
         self.add_item(
             discord.ui.Container(
-                discord.ui.MediaGallery(discord.MediaGalleryItem(BANNER_URL)),
+                discord.ui.MediaGallery(discord.MediaGalleryItem(banner_url)),
                 discord.ui.TextDisplay(
                     "## Skin View\n\n"
                     f"Canal: {canal}\n"
@@ -186,7 +192,7 @@ class PainelSkin(discord.ui.LayoutView):
                     "Escolha o canal e clique em **Ativar**."
                 ),
                 discord.ui.ActionRow(selecionar, ativar),
-                discord.ui.MediaGallery(discord.MediaGalleryItem(BANNER_URL)),
+                discord.ui.MediaGallery(discord.MediaGalleryItem(banner_url)),
             )
         )
 
@@ -378,8 +384,19 @@ class Avatar(commands.Cog):
         config = self.configuracoes.setdefault(
             ctx.guild.id, ConfiguracaoSkin()
         )
+        try:
+            arquivo = await baixar_arquivo(
+                BANNER_URL,
+                "poyo-skinview-banner.gif",
+            )
+            banner_url = PAINEL_BANNER_ATTACHMENT
+        except (OSError, TimeoutError, discord.HTTPException):
+            arquivo = None
+            banner_url = BANNER_URL
+
         config.painel = await ctx.send(
-            view=PainelSkin(config, ctx.author.id)
+            view=PainelSkin(config, ctx.author.id, banner_url),
+            file=arquivo,
         )
 
     async def _enviar_skin(
