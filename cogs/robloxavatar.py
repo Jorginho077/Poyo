@@ -284,12 +284,15 @@ class AvatarView(discord.ui.LayoutView):
 
         self.add_item(
             discord.ui.Container(
-                discord.ui.ActionRow(perfil),
-                discord.ui.TextDisplay(
-                    f"## [{usuario['display_name']}]"
-                    f"(https://www.roblox.com/users/{usuario['id']}/profile)\n"
-                    f"`@{usuario['name']}` - "
-                    f"{texto_curtidas(len(self.curtidas))}"
+                discord.ui.Section(
+                    discord.ui.TextDisplay(
+                        f"## [{usuario['display_name']}]"
+                        f"(https://www.roblox.com/users/"
+                        f"{usuario['id']}/profile)\n"
+                        f"`@{usuario['name']}` - "
+                        f"{texto_curtidas(len(self.curtidas))}"
+                    ),
+                    accessory=perfil,
                 ),
                 discord.ui.Separator(),
                 discord.ui.MediaGallery(
@@ -344,13 +347,15 @@ class AvatarViewAtualizado(discord.ui.LayoutView):
 
         self.add_item(
             discord.ui.Container(
-                discord.ui.ActionRow(perfil),
-                discord.ui.TextDisplay(
-                    f"## [{origem.usuario['display_name']}]"
-                    f"(https://www.roblox.com/users/"
-                    f"{origem.usuario['id']}/profile)\n"
-                    f"`@{origem.usuario['name']}` - "
-                    f"{texto_curtidas(len(origem.curtidas))}"
+                discord.ui.Section(
+                    discord.ui.TextDisplay(
+                        f"## [{origem.usuario['display_name']}]"
+                        f"(https://www.roblox.com/users/"
+                        f"{origem.usuario['id']}/profile)\n"
+                        f"`@{origem.usuario['name']}` - "
+                        f"{texto_curtidas(len(origem.curtidas))}"
+                    ),
+                    accessory=perfil,
                 ),
                 discord.ui.Separator(),
                 discord.ui.MediaGallery(
