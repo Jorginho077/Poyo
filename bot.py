@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import pkgutil
 import time
@@ -10,14 +11,21 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
-
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
+
+# Prefixo antigo: só usado para converter os "uso" das cogs para "/".
 PREFIXO = ","
 
 EMOJI_INICIO = "<:axolote:1556443018557661234>"
 EMOJI_FINAL = "<a:emoji_481:1556442987691647068>"
+
+# Faz TODOS os @commands.command / @commands.group das cogs
+# virarem comandos híbridos (prefixo + slash) automaticamente,
+# sem precisar mexer nas cogs. Precisa vir antes de carregar as cogs.
+commands.command = commands.hybrid_command
+commands.group = commands.hybrid_group
 
 
 # ============================================================
@@ -79,7 +87,8 @@ class BotModeracao(commands.Bot):
         intents.members = True
 
         super().__init__(
-            command_prefix=PREFIXO,
+            # Sem prefixo de texto: só slash (ou menção ao bot).
+            command_prefix=commands.when_mentioned,
             intents=intents,
             case_insensitive=True,
             strip_after_prefix=True,
@@ -247,6 +256,56 @@ class BotModeracao(commands.Bot):
         return f"attachment://{dados['arquivo']}"
 
     # ========================================================
+    # SYNC DOS SLASH (global, só quando algo mudou)
+    # ========================================================
+
+    def _assinatura_slash(self) -> str:
+        """Hash dos slash atuais, para saber se algo mudou."""
+
+        partes = []
+
+        for cmd in self.tree.get_commands():
+            try:
+                dados = cmd.to_dict(self.tree)
+            except TypeError:
+                dados = cmd.to_dict()
+
+            partes.append(repr(sorted(dados.items())))
+
+        texto = "|".join(sorted(partes))
+
+        return hashlib.sha256(texto.encode()).hexdigest()
+
+    async def sincronizar_slash(self) -> None:
+        """
+        Sincroniza de forma global e apenas se os comandos
+        mudaram desde o último sync. Assim o bot não fica
+        sincronizando a cada inicialização.
+        """
+
+        arquivo = self.assets_dir / ".slash_hash"
+        atual = self._assinatura_slash()
+
+        anterior = ""
+        if arquivo.exists():
+            anterior = arquivo.read_text().strip()
+
+        if atual == anterior:
+            print("Slash sem alterações, sync ignorado.")
+            return
+
+        try:
+            sincronizados = await self.tree.sync()
+
+        except discord.HTTPException as erro:
+            print(f"Falha ao sincronizar slash: {erro!r}")
+            return
+
+        arquivo.write_text(atual)
+
+        print(f"Slash sincronizados: {len(sincronizados)}")
+
+    # ========================================================
     # CARREGAMENTO DOS COGS
     # ========================================================
 
@@ -282,11 +341,13 @@ class BotModeracao(commands.Bot):
                 f"{nome_da_cog}"
             )
 
+        await self.sincronizar_slash()
+
     async def on_ready(self) -> None:
         await self.change_presence(
             status=discord.Status.online,
             activity=discord.Game(
-                name=f"{PREFIXO}comandos | moderação"
+                name="/comandos | moderação"
             ),
         )
 
@@ -298,7 +359,7 @@ class BotModeracao(commands.Bot):
         print(
             f"Servidores: "
             f"{len(self.guilds)} | "
-            f"Prefixo: {PREFIXO}"
+            f"Modo: slash"
         )
 
         print(
@@ -317,6 +378,10 @@ bot = BotModeracao()
 async def apagar_mensagem_do_comando(
     ctx: commands.Context,
 ) -> None:
+    # Slash não tem mensagem para apagar.
+    if ctx.interaction is not None:
+        return
+
     try:
         await ctx.message.delete()
 
@@ -328,16 +393,35 @@ async def apagar_mensagem_do_comando(
         pass
 
 
+async def negar_em_silencio(
+    ctx: commands.Context,
+) -> None:
+    """
+    No slash é obrigatório responder a interação,
+    senão aparece "o aplicativo não respondeu".
+    """
+
+    if (
+        ctx.interaction is not None
+        and not ctx.interaction.response.is_done()
+    ):
+        await ctx.send(
+            "Você não pode usar este comando.",
+            ephemeral=True,
+        )
+
+
 # ============================================================
 # COMANDO DE AJUDA
 # ============================================================
 
-@bot.command(
+@bot.hybrid_command(
     name="comandos",
     aliases=("ajuda", "help"),
+    description="Mostra todos os comandos disponíveis.",
     extras={
         "categoria": "Informações",
-        "uso": ",comandos",
+        "uso": "/comandos",
         "descricao": (
             "Mostra todos os comandos disponíveis "
             "e explica cada função."
@@ -399,10 +483,16 @@ async def comandos(
             lista,
             key=lambda item: item.name,
         ):
-            uso = comando.extras.get(
-                "uso",
-                f"{PREFIXO}{comando.qualified_name}",
+            uso = str(
+                comando.extras.get(
+                    "uso",
+                    f"/{comando.qualified_name}",
+                )
             )
+
+            # Converte usos antigos (",ban @user") para "/ban @user".
+            if uso.startswith(PREFIXO):
+                uso = "/" + uso[len(PREFIXO):]
 
             descricao = comando.extras.get(
                 "descricao",
@@ -430,6 +520,7 @@ async def comandos(
             *blocos,
         ),
         file=bot.asset_file("banner"),
+        delete_after=25,
     )
 
 
@@ -477,6 +568,7 @@ async def on_command_error(
 
             if expiracao is not None:
                 if time.time() < expiracao:
+                    await negar_em_silencio(ctx)
                     return
 
                 guild_calados.pop(
@@ -497,20 +589,17 @@ async def on_command_error(
         erro,
         commands.MissingPermissions,
     ):
-        try:
-            await ctx.message.delete()
-        except (
-            discord.NotFound,
-            discord.Forbidden,
-            discord.HTTPException,
-        ):
-            pass
+        await negar_em_silencio(ctx)
         return
 
     elif isinstance(
         erro,
         commands.CheckFailure,
+    ) and not isinstance(
+        erro,
+        commands.BotMissingPermissions,
     ):
+        await negar_em_silencio(ctx)
         return
 
     elif isinstance(
@@ -528,8 +617,8 @@ async def on_command_error(
     ):
         mensagem = (
             f"Está faltando o argumento "
-            f"`{erro.param.name}`.\n\n"
-            f"Use `{PREFIXO}comandos` para "
+            f"{erro.param.name}.\n\n"
+            f"Use /comandos para "
             "consultar o formato correto."
         )
 
