@@ -1,0 +1,117 @@
+"""Visual do sistema Fogo: emojis, textos e cartões (Components V2).
+
+Para trocar os emojis por emojis customizados do servidor, basta editar as
+constantes abaixo (ou definir as variáveis de ambiente correspondentes), por
+exemplo: FOGO_EMOJI_FELIZ="<a:fogo_feliz:123456789012345678>"
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Sequence
+
+import discord
+
+# ---------------------------------------------------------------- emojis
+
+EMOJI_FOGO = os.getenv("FOGO_EMOJI", "🔥")
+EMOJI_FOGO_FELIZ = os.getenv("FOGO_EMOJI_FELIZ", "🔥")  # fogo feliz e animado
+EMOJI_FOGO_TRISTE = os.getenv("FOGO_EMOJI_TRISTE", "🥶")  # fogo com frio
+EMOJI_CONVITE = os.getenv("FOGO_EMOJI_CONVITE", "💌")
+
+COR_FOGO = discord.Colour.from_rgb(255, 120, 30)  # laranja chama
+COR_FRIO = discord.Colour.from_rgb(120, 190, 255)  # azul gelo
+COR_NEUTRA = discord.Colour.from_rgb(110, 110, 120)
+
+
+def dias(n: int) -> str:
+    return f"{n} dia" if n == 1 else f"{n} dias"
+
+
+# ---------------------------------------------------------------- cartão
+
+
+class CartaoFogo(discord.ui.LayoutView):
+    """Container com blocos de texto separados e, opcionalmente, botões."""
+
+    def __init__(
+        self,
+        *blocos: str,
+        cor: discord.Colour = COR_FOGO,
+        botoes: Sequence[discord.ui.Button] = (),
+        timeout: float | None = None,
+    ) -> None:
+        super().__init__(timeout=timeout)
+
+        itens: list[discord.ui.Item] = []
+        for indice, bloco in enumerate(blocos):
+            if indice:
+                itens.append(discord.ui.Separator())
+            itens.append(discord.ui.TextDisplay(bloco))
+
+        if botoes:
+            itens.append(discord.ui.Separator())
+            itens.append(discord.ui.ActionRow(*botoes))
+
+        self.add_item(discord.ui.Container(*itens, accent_colour=cor))
+
+
+# ----------------------------------------------------------------- textos
+
+
+def texto_convite(de: str, para: str) -> list[str]:
+    return [
+        f"## {EMOJI_CONVITE} Convite de Fogo",
+        (
+            f"{de} quer acender um **Fogo** com {para}!\n\n"
+            "Todo dia, às **00:00**, os dois precisam reacender a chama "
+            "juntos. Quanto mais dias seguidos, mais forte o Fogo queima... "
+            "mas se um dos dois esquecer, ele apaga."
+        ),
+        f"{para}, você topa? {EMOJI_FOGO_FELIZ}\n"
+        "-# O convite expira em 24 horas.",
+    ]
+
+
+def cartao_fogo_criado(a: str, b: str) -> CartaoFogo:
+    return CartaoFogo(
+        f"## {EMOJI_FOGO_FELIZ} Fogo criado!",
+        (
+            f"{a} + {b}\n"
+            f"{EMOJI_FOGO} **Sequência:** {dias(0)}\n\n"
+            "O Poyo acendeu a primeira faísca de vocês! "
+            "A sequência começa quando os dois acenderem o Fogo pela "
+            "primeira vez."
+        ),
+        cor=COR_FOGO,
+    )
+
+
+def cartao_convite_recusado(de: str, para: str) -> CartaoFogo:
+    return CartaoFogo(
+        "## 🧊 Convite recusado",
+        f"{para} recusou o convite de {de}. "
+        "O Fogo não foi aceso desta vez.",
+        cor=COR_FRIO,
+    )
+
+
+def cartao_convite_expirado(de: str, para: str) -> CartaoFogo:
+    return CartaoFogo(
+        "## ⏳ Convite expirado",
+        f"O convite de {de} para {para} não foi respondido a tempo.",
+        cor=COR_NEUTRA,
+    )
+
+
+def cartao_ja_existe(a: str, b: str) -> CartaoFogo:
+    return CartaoFogo(
+        f"## {EMOJI_FOGO} Vocês já têm um Fogo",
+        f"{a} + {b} já estão com um Fogo ativo por aqui. "
+        "Cuidem bem dessa chama!",
+        cor=COR_FOGO,
+    )
+
+
+def cartao_aviso(titulo: str, texto: str) -> CartaoFogo:
+    return CartaoFogo(f"## {titulo}", texto, cor=COR_NEUTRA)
