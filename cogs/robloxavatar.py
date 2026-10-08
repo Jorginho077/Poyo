@@ -258,19 +258,31 @@ class AvatarView(discord.ui.LayoutView):
     def __init__(self, usuario: dict, imagem_url: str) -> None:
         super().__init__(timeout=None)
         self.usuario = usuario
+        self.imagem_url = imagem_url
+        self.curtidas: set[int] = set()
+        self.lock = asyncio.Lock()
 
         coracao = discord.ui.Button(
             emoji="🤍",
             style=discord.ButtonStyle.secondary,
             custom_id=f"robloxavatar:curtir:{usuario['id']}",
         )
+        perfil = discord.ui.Button(
+            emoji=discord.PartialEmoji(
+                name="RobloxLogo",
+                id=1509476102890979409,
+            ),
+            style=discord.ButtonStyle.link,
+            url=f"https://www.roblox.com/users/{usuario['id']}/profile",
+        )
         coracao.callback = self.curtir
 
         self.add_item(
             discord.ui.Container(
+                discord.ui.ActionRow(perfil),
                 discord.ui.TextDisplay(
                     f"## {usuario['display_name']}\n"
-                    f"`@{usuario['name']}`"
+                    f"`@{usuario['name']} - {len(self.curtidas)}`"
                 ),
                 discord.ui.MediaGallery(
                     discord.MediaGalleryItem(imagem_url)
@@ -280,10 +292,77 @@ class AvatarView(discord.ui.LayoutView):
         )
 
     async def curtir(self, interaction: discord.Interaction) -> None:
-        await interaction.response.send_message(
-            "você curtiu o avatar",
-            ephemeral=True,
+        async with self.lock:
+            if interaction.user.id in self.curtidas:
+                await interaction.response.defer()
+                return
+
+            self.curtidas.add(interaction.user.id)
+            await interaction.response.defer()
+
+            try:
+                await interaction.message.edit(
+                    view=AvatarViewAtualizado(self)
+                )
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return
+
+
+class AvatarViewAtualizado(discord.ui.LayoutView):
+    """Reconstrói o cartão preservando a contagem e os usuários que curtiram."""
+
+    def __init__(self, origem: AvatarView) -> None:
+        super().__init__(timeout=None)
+        self.origem = origem
+
+        coracao = discord.ui.Button(
+            emoji="🤍",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"robloxavatar:curtir:{origem.usuario['id']}",
         )
+        perfil = discord.ui.Button(
+            emoji=discord.PartialEmoji(
+                name="RobloxLogo",
+                id=1509476102890979409,
+            ),
+            style=discord.ButtonStyle.link,
+            url=(
+                "https://www.roblox.com/users/"
+                f"{origem.usuario['id']}/profile"
+            ),
+        )
+        coracao.callback = self.curtir
+
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.ActionRow(perfil),
+                discord.ui.TextDisplay(
+                    f"## {origem.usuario['display_name']}\n"
+                    f"`@{origem.usuario['name']} - "
+                    f"{len(origem.curtidas)}`"
+                ),
+                discord.ui.MediaGallery(
+                    discord.MediaGalleryItem(origem.imagem_url)
+                ),
+                discord.ui.ActionRow(coracao),
+            )
+        )
+
+    async def curtir(self, interaction: discord.Interaction) -> None:
+        async with self.origem.lock:
+            if interaction.user.id in self.origem.curtidas:
+                await interaction.response.defer()
+                return
+
+            self.origem.curtidas.add(interaction.user.id)
+            await interaction.response.defer()
+
+            try:
+                await interaction.message.edit(
+                    view=AvatarViewAtualizado(self.origem)
+                )
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return
 
 
 class RobloxAvatar(commands.Cog):
