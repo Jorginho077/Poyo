@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Optional
 from urllib.error import HTTPError, URLError
@@ -10,25 +9,16 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import discord
-from discord import app_commands
 from discord.ext import commands
+
 
 BANNER_URL = (
     "https://raw.githubusercontent.com/"
     "Jorginho077/Poyo/main/assets/Tumblr-l-67143811701311.gif"
 )
-
 ROBLOX_LOGO_ID = 1509476102890979409
 MINECRAFT_LOGO_ID = 1509476073904148582
 
-ERROS_REDE = (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError)
-
-BuscaSkin = Callable[[str], Awaitable[Optional[dict]]]
-
-
-# ============================================================
-# CONFIGURAÇÃO
-# ============================================================
 
 @dataclass
 class ConfiguracaoSkin:
@@ -36,10 +26,6 @@ class ConfiguracaoSkin:
     ativo: bool = False
     painel: Optional[discord.Message] = None
 
-
-# ============================================================
-# REQUISIÇÕES / BUSCAS
-# ============================================================
 
 async def requisicao_json(
     metodo: str,
@@ -60,7 +46,6 @@ async def requisicao_json(
             headers=cabecalhos,
             method=metodo,
         )
-
         with urlopen(pedido, timeout=15) as resposta:
             return json.loads(resposta.read().decode("utf-8"))
 
@@ -74,33 +59,29 @@ async def buscar_roblox(nome: str) -> Optional[dict]:
             "https://users.roblox.com/v1/usernames/users",
             {"usernames": [nome], "excludeBannedUsers": False},
         )
-    except ERROS_REDE:
+    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError):
         return None
 
     usuarios = resultado.get("data", [])
-
     if not usuarios:
         return None
 
     usuario = usuarios[0]
     user_id = int(usuario["id"])
-
     try:
         miniatura = await requisicao_json(
             "GET",
             "https://thumbnails.roblox.com/v1/users/avatar"
             f"?userIds={user_id}&size=720x720&format=Png&isCircular=false",
         )
-    except ERROS_REDE:
+    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError):
         return None
 
     dados_miniatura = miniatura.get("data", [])
-
     if not dados_miniatura or not dados_miniatura[0].get("imageUrl"):
         return None
 
     nome_usuario = str(usuario.get("name", nome))
-
     return {
         "plataforma": "Roblox",
         "nome": nome_usuario,
@@ -117,18 +98,16 @@ async def buscar_minecraft(nome: str) -> Optional[dict]:
             "GET",
             f"https://api.mojang.com/users/profiles/minecraft/{quote(nome)}",
         )
-    except ERROS_REDE:
+    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError):
         return None
 
     uuid = perfil.get("id")
     nome_real = perfil.get("name")
-
     if not uuid or not nome_real:
         return None
 
     # mc-heads fornece uma renderização pública do corpo da skin.
     imagem = f"https://mc-heads.net/body/{quote(nome_real)}/right"
-
     return {
         "plataforma": "Minecraft",
         "nome": str(nome_real),
@@ -151,25 +130,16 @@ async def buscar_skin(entrada: str) -> Optional[dict]:
 
     # Sem prefixo, tenta Roblox primeiro e Minecraft em seguida.
     resultado = await buscar_roblox(valor)
-
-    if resultado is not None:
-        return resultado
-
-    return await buscar_minecraft(valor)
+    return resultado if resultado is not None else await buscar_minecraft(valor)
 
 
 def texto_curtidas(total: int) -> str:
     return f"{total} {'Curtida' if total == 1 else 'Curtidas'}"
 
 
-# ============================================================
-# PAINEL DE CONFIGURAÇÃO
-# ============================================================
-
 class PainelSkin(discord.ui.LayoutView):
     def __init__(self, config: ConfiguracaoSkin, autor_id: int) -> None:
         super().__init__(timeout=None)
-
         self.config = config
         self.autor_id = autor_id
 
@@ -178,7 +148,6 @@ class PainelSkin(discord.ui.LayoutView):
             if config.canal_id is not None
             else "não definido"
         )
-
         estado = "ativado" if config.ativo else "desativado"
 
         selecionar = discord.ui.Button(
@@ -186,13 +155,11 @@ class PainelSkin(discord.ui.LayoutView):
             style=discord.ButtonStyle.primary,
             custom_id=f"skinview:canal:{autor_id}",
         )
-
         ativar = discord.ui.Button(
             label="Ativar",
             style=discord.ButtonStyle.success,
             custom_id=f"skinview:ativar:{autor_id}",
         )
-
         selecionar.callback = self.selecionar_canal
         ativar.callback = self.ativar
 
@@ -213,12 +180,10 @@ class PainelSkin(discord.ui.LayoutView):
     async def autorizado(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.autor_id:
             return True
-
         await interaction.response.send_message(
             "Somente quem abriu este painel pode configurá-lo.",
             ephemeral=True,
         )
-
         return False
 
     async def selecionar_canal(self, interaction: discord.Interaction) -> None:
@@ -229,7 +194,6 @@ class PainelSkin(discord.ui.LayoutView):
             "Mencione o canal em que as skins serão enviadas.",
             ephemeral=True,
         )
-
         if interaction.guild is None or interaction.channel is None:
             return
 
@@ -264,7 +228,6 @@ class PainelSkin(discord.ui.LayoutView):
             return
 
         canal = mensagem.channel_mentions[0]
-
         if not isinstance(canal, discord.TextChannel):
             await interaction.followup.send(
                 "Escolha um canal de texto.", ephemeral=True
@@ -272,12 +235,9 @@ class PainelSkin(discord.ui.LayoutView):
             return
 
         bot_membro = interaction.guild.me
-
         if bot_membro is None:
             return
-
         permissoes = canal.permissions_for(bot_membro)
-
         if not permissoes.view_channel or not permissoes.send_messages:
             await interaction.followup.send(
                 "Não consigo ver ou enviar mensagens nesse canal.",
@@ -287,17 +247,14 @@ class PainelSkin(discord.ui.LayoutView):
 
         self.config.canal_id = canal.id
         self.config.ativo = False
-
         await interaction.followup.send(
             f"Canal definido: {canal.mention}", ephemeral=True
         )
-
         await self.atualizar()
 
     async def ativar(self, interaction: discord.Interaction) -> None:
         if not await self.autorizado(interaction):
             return
-
         if self.config.canal_id is None:
             await interaction.response.send_message(
                 "Escolha um canal antes de ativar.", ephemeral=True
@@ -305,18 +262,15 @@ class PainelSkin(discord.ui.LayoutView):
             return
 
         self.config.ativo = True
-
         await interaction.response.send_message(
             f"Skin View ativado em <#{self.config.canal_id}>.",
             ephemeral=True,
         )
-
         await self.atualizar()
 
     async def atualizar(self) -> None:
         if self.config.painel is None:
             return
-
         try:
             await self.config.painel.edit(
                 view=PainelSkin(self.config, self.autor_id)
@@ -325,46 +279,30 @@ class PainelSkin(discord.ui.LayoutView):
             pass
 
 
-# ============================================================
-# CARTÃO DA SKIN
-# ============================================================
-
 class SkinView(discord.ui.LayoutView):
     def __init__(self, skin: dict) -> None:
         super().__init__(timeout=None)
-
         self.skin = skin
         self.curtidas: set[int] = set()
         self.lock = asyncio.Lock()
-
         self.montar()
 
     def montar(self) -> None:
         self.clear_items()
-
         logo = discord.PartialEmoji(
-            name=(
-                "RobloxLogo"
-                if self.skin["plataforma"] == "Roblox"
-                else "minecraftlogopng2"
-            ),
+            name=("RobloxLogo" if self.skin["plataforma"] == "Roblox" else "minecraftlogopng2"),
             id=self.skin["logo_id"],
         )
-
         perfil = discord.ui.Button(
             emoji=logo,
             style=discord.ButtonStyle.link,
             url=self.skin["perfil"],
         )
-
         coracao = discord.ui.Button(
             emoji="🤍",
             style=discord.ButtonStyle.secondary,
-            custom_id=(
-                f"skinview:curtir:{self.skin['plataforma']}:{self.skin['nome']}"
-            ),
+            custom_id=f"skinview:curtir:{self.skin['plataforma']}:{self.skin['nome']}",
         )
-
         coracao.callback = self.curtir
 
         self.add_item(
@@ -391,35 +329,26 @@ class SkinView(discord.ui.LayoutView):
             if interaction.user.id in self.curtidas:
                 await interaction.response.defer()
                 return
-
             self.curtidas.add(interaction.user.id)
             self.montar()
-
+            await interaction.response.defer()
             try:
-                await interaction.response.edit_message(view=self)
+                await interaction.message.edit(view=self)
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 return
 
-
-# ============================================================
-# COG
-# ============================================================
 
 class Avatar(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.configuracoes: dict[int, ConfiguracaoSkin] = {}
 
-    # --------------------------------------------------------
-    # /skinviewpainel
-    # --------------------------------------------------------
-
     @commands.hybrid_command(
         name="skinviewpainel",
-        description="Abre o painel para configurar o canal de skins.",
+        description="Configura o canal de consulta de skins.",
         extras={
             "categoria": "Utilidades",
-            "uso": "/skinviewpainel",
+            "uso": ",skinviewpainel",
             "descricao": "Configura o canal para consultar skins.",
         },
     )
@@ -427,49 +356,36 @@ class Avatar(commands.Cog):
     @commands.has_permissions(manage_guild=True)
     @commands.bot_has_permissions(send_messages=True, read_message_history=True)
     async def skinviewpainel(self, ctx: commands.Context) -> None:
+        try:
+            await ctx.message.delete()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
         config = self.configuracoes.setdefault(
             ctx.guild.id, ConfiguracaoSkin()
         )
-
-        # O painel vai como mensagem normal do canal (e não como resposta
-        # da interação) para continuar editável depois dos 15 minutos.
-        config.painel = await ctx.channel.send(
+        config.painel = await ctx.send(
             view=PainelSkin(config, ctx.author.id)
         )
-
-        await ctx.send("Painel enviado.", ephemeral=True)
-
-    # --------------------------------------------------------
-    # BUSCA DE SKIN (usada por /rskin e /mskin)
-    # --------------------------------------------------------
 
     async def _enviar_skin(
         self,
         ctx: commands.Context,
         nome: str,
-        buscar: BuscaSkin,
+        buscar: callable,
     ) -> None:
         config = self.configuracoes.get(ctx.guild.id)
-
         if config is None or not config.ativo or config.canal_id is None:
-            await ctx.send(
-                "O Skin View ainda não foi ativado neste servidor.",
-                ephemeral=True,
-            )
             return
-
         if ctx.channel.id != config.canal_id:
-            await ctx.send(
-                f"Use este comando em <#{config.canal_id}>.",
-                ephemeral=True,
-            )
             return
 
-        # A busca nas APIs pode passar de 3 segundos.
-        await ctx.defer()
+        try:
+            await ctx.message.delete()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
 
         resultado = await buscar(nome.strip().lstrip("@"))
-
         if resultado is None:
             await ctx.send(
                 "Não encontrei esse usuário nessa plataforma.",
@@ -479,41 +395,31 @@ class Avatar(commands.Cog):
 
         await ctx.send(view=SkinView(resultado))
 
-    # --------------------------------------------------------
-    # /rskin
-    # --------------------------------------------------------
-
     @commands.hybrid_command(
         name="rskin",
         description="Mostra o avatar de um usuário do Roblox.",
         extras={
             "categoria": "Utilidades",
-            "uso": "/rskin nome",
+            "uso": ",Rskin @nome_do_roblox",
             "descricao": "Mostra o avatar de um usuário do Roblox.",
         },
     )
     @commands.guild_only()
     @commands.bot_has_permissions(send_messages=True, read_message_history=True)
-    @app_commands.describe(nome="Nome do usuário no Roblox")
     async def rskin(self, ctx: commands.Context, *, nome: str) -> None:
         await self._enviar_skin(ctx, nome, buscar_roblox)
-
-    # --------------------------------------------------------
-    # /mskin
-    # --------------------------------------------------------
 
     @commands.hybrid_command(
         name="mskin",
         description="Mostra a skin de um usuário do Minecraft.",
         extras={
             "categoria": "Utilidades",
-            "uso": "/mskin nome",
+            "uso": ",Mskin @nome_do_minecraft",
             "descricao": "Mostra a skin de um usuário do Minecraft.",
         },
     )
     @commands.guild_only()
     @commands.bot_has_permissions(send_messages=True, read_message_history=True)
-    @app_commands.describe(nome="Nome do usuário no Minecraft")
     async def mskin(self, ctx: commands.Context, *, nome: str) -> None:
         await self._enviar_skin(ctx, nome, buscar_minecraft)
 
