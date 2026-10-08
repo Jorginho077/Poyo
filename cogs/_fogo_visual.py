@@ -3,6 +3,11 @@
 Para trocar os emojis por emojis customizados do servidor, basta editar as
 constantes abaixo (ou definir as variáveis de ambiente correspondentes), por
 exemplo: FOGO_EMOJI_FELIZ="<a:fogo_feliz:123456789012345678>"
+
+Etapa 5: a cog cogs/fogo_emojis.py preenche sozinha, ao ligar o bot, o Poyo
+feliz / com frio (emojis do aplicativo, enviados a partir de assets/) e os
+emojis do servidor (poyo_coracao, poyo_piscadinha, poyo_sono). Qualquer valor
+definido no .env ou aqui tem prioridade sobre o automático.
 """
 
 from __future__ import annotations
@@ -18,6 +23,13 @@ EMOJI_FOGO = os.getenv("FOGO_EMOJI", "🔥")
 EMOJI_FOGO_FELIZ = os.getenv("FOGO_EMOJI_FELIZ", "🔥")  # fogo feliz e animado
 EMOJI_FOGO_TRISTE = os.getenv("FOGO_EMOJI_TRISTE", "🥶")  # fogo com frio
 EMOJI_CONVITE = os.getenv("FOGO_EMOJI_CONVITE", "💌")
+EMOJI_CORACAO = os.getenv("FOGO_EMOJI_CORACAO", "💖")  # criado / batizado
+EMOJI_ESPERA = os.getenv("FOGO_EMOJI_ESPERA", "⏳")  # "ainda não acendeu"
+
+# Imagem do Poyo ao lado do texto dos cartões (URL). Preenchida pela cog
+# fogo_emojis; sem ela, os cartões saem só com texto.
+IMG_FELIZ: str | None = os.getenv("FOGO_IMG_FELIZ") or None
+IMG_TRISTE: str | None = os.getenv("FOGO_IMG_TRISTE") or None
 
 NOME_MIN_DIAS = 10  # mantenha igual ao de _fogo_nome.py
 
@@ -42,12 +54,29 @@ class CartaoFogo(discord.ui.LayoutView):
         cor: discord.Colour = COR_FOGO,
         botoes: Sequence[discord.ui.Item] = (),
         timeout: float | None = None,
+        imagem: str | None = None,
     ) -> None:
         super().__init__(timeout=timeout)
 
         itens: list[discord.ui.Item] = []
-        for indice, bloco in enumerate(blocos):
-            if indice:
+        restantes = list(blocos)
+
+        # Com imagem, o título e o texto principal ganham o Poyo ao lado.
+        if imagem and len(restantes) >= 2:
+            itens.append(
+                discord.ui.Section(
+                    restantes[0],
+                    restantes[1],
+                    accessory=discord.ui.Thumbnail(imagem),
+                )
+            )
+            restantes = restantes[2:]
+            primeiro = False
+        else:
+            primeiro = True
+
+        for indice, bloco in enumerate(restantes):
+            if indice or not primeiro:
                 itens.append(discord.ui.Separator())
             itens.append(discord.ui.TextDisplay(bloco))
 
@@ -77,15 +106,17 @@ def texto_convite(de: str, para: str) -> list[str]:
 
 def cartao_fogo_criado(a: str, b: str) -> CartaoFogo:
     return CartaoFogo(
-        f"## {EMOJI_FOGO_FELIZ} Fogo criado!",
+        f"## {EMOJI_CORACAO} Fogo criado!",
         (
             f"{a} + {b}\n"
             f"{EMOJI_FOGO} **Sequência:** {dias(0)}\n\n"
             "O Poyo acendeu a primeira faísca de vocês! "
-            "Cliquem em **Acender o Fogo** na mensagem logo abaixo para "
-            "começar a sequência."
+            "Olhem a **DM** de cada um: o painel com o botão "
+            "**Acender o Fogo** já chegou lá. Quando os dois clicarem, "
+            "a sequência começa."
         ),
         cor=COR_FOGO,
+        imagem=IMG_FELIZ,
     )
 
 
@@ -144,8 +175,9 @@ def frase_chama(sequencia: int) -> str:
 def blocos_painel(f) -> list[str]:
     """Textos do painel do dia (o botão é montado pelo cog)."""
     a_ok, b_ok = bool(f["a_acendeu"]), bool(f["b_acendeu"])
-    status_a = "✅ acendeu" if a_ok else "⏳ ainda não acendeu"
-    status_b = "✅ acendeu" if b_ok else "⏳ ainda não acendeu"
+    pendente = f"{EMOJI_ESPERA} ainda não acendeu"
+    status_a = "✅ acendeu" if a_ok else pendente
+    status_b = "✅ acendeu" if b_ok else pendente
     seq = (
         f"**Sequência:** {dias(f['sequencia'])}"
         if f["sequencia"]
@@ -164,7 +196,9 @@ def blocos_painel(f) -> list[str]:
 
 
 def cartao_fogo_aceso(
-    f, botoes: Sequence[discord.ui.Item] = ()
+    f,
+    botoes: Sequence[discord.ui.Item] = (),
+    rodape: str | None = None,
 ) -> CartaoFogo:
     blocos = [
         f"## {EMOJI_FOGO_FELIZ} Fogo aceso!",
@@ -187,12 +221,15 @@ def cartao_fogo_aceso(
                 "O Fogo de vocês ainda não tem nome. "
                 "Que tal batizar essa chama?"
             )
-    blocos.append("-# Volte às 00:00 para reacender a chama.")
+    fim = "-# Volte às 00:00 para reacender a chama."
+    blocos.append(f"{fim}\n{rodape}" if rodape else fim)
 
-    return CartaoFogo(*blocos, cor=COR_FOGO, botoes=botoes)
+    return CartaoFogo(
+        *blocos, cor=COR_FOGO, botoes=botoes, imagem=IMG_FELIZ
+    )
 
 
-def cartao_fogo_apagado(f) -> CartaoFogo:
+def cartao_fogo_apagado(f, rodape: str | None = None) -> CartaoFogo:
     if f["sequencia"] > 0:
         fim = f"A sequência de {dias(f['sequencia'])} chegou ao fim."
     else:
@@ -204,8 +241,12 @@ def cartao_fogo_apagado(f) -> CartaoFogo:
             f"{fim}\n\n"
             "O Poyo está com frio..."
         ),
-        "-# Que tal chamar a pessoa de novo com `,fogo @membro`?",
+        (
+            "-# Que tal chamar a pessoa de novo com `,fogo @membro`?"
+            + (f"\n{rodape}" if rodape else "")
+        ),
         cor=COR_FRIO,
+        imagem=IMG_TRISTE,
     )
 
 
@@ -258,7 +299,7 @@ def cartao_proposta_nome(
 
 def cartao_fogo_batizado(f) -> CartaoFogo:
     return CartaoFogo(
-        f"## {EMOJI_FOGO_FELIZ} Fogo batizado!",
+        f"## {EMOJI_CORACAO} Fogo batizado!",
         (
             f"{_dupla_txt(f)}\n"
             f"{EMOJI_FOGO} **Fogo:** {f['nome']}\n"
@@ -266,6 +307,7 @@ def cartao_fogo_batizado(f) -> CartaoFogo:
         ),
         "-# A partir de agora o nome aparece em todas as mensagens do Fogo.",
         cor=COR_FOGO,
+        imagem=IMG_FELIZ,
     )
 
 

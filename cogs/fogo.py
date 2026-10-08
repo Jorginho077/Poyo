@@ -3,6 +3,12 @@
 Etapa 1: convite, aceitar/recusar e criação do Fogo.
 Etapa 2: ciclo diário (00:00), botão "Acender o Fogo", sequência e Fogo apagado.
 Etapa 3: nome do Fogo (liberado aos 10 dias, sugerido por um e aceito pelo par).
+Etapa 4: Lendários do Fogo (cogs/fogo_lendarios.py); aqui só há o aviso do 500º dia.
+Etapa 5: o Poyo (feliz / com frio) aparece ao lado do texto dos cartões; veja
+cogs/fogo_emojis.py e cogs/_fogo_visual.py.
+Etapa 4.1: os avisos diários (painel, Fogo aceso, Fogo apagado) vão para a DM de
+cada pessoa da dupla, e não mais para o canal. Se a DM estiver fechada, aquela
+pessoa recebe o painel no canal do Fogo (marcando só ela).
 Veja FOGO_CHECKLIST.md na raiz do projeto para o andamento das demais etapas.
 """
 
@@ -19,6 +25,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from . import _fogo_db as db
+from . import _fogo_lendarios as lendarios
 from . import _fogo_nome as nomes
 from . import _fogo_tempo as tempo
 from . import _fogo_visual as visual
@@ -136,32 +143,90 @@ class ConviteView(discord.ui.LayoutView):
 
 # ------------------------------------------------------------------- painel
 
+AVISO_DM_FECHADA = (
+    "-# 💌 Sua DM está fechada, então o painel veio para o canal. "
+    "Abra suas DMs com o Poyo para receber o aviso por lá!"
+)
 
-class PainelView(visual.CartaoFogo):
-    """Painel do dia com o botão "Acender o Fogo".
 
-    O custom_id é fixo por Fogo, então o botão sobrevive a reinícios do bot
-    (a cog registra de novo os painéis abertos ao ligar).
+def _rodape(client: discord.Client, fogo: sqlite3.Row, modo: str) -> Optional[str]:
+    """Linha pequena no fim do painel. `modo`: 'dm', 'canal' ou 'legado'."""
+    if modo == "canal":
+        return AVISO_DM_FECHADA
+    if modo == "dm":
+        # Na DM não há contexto: diz de qual servidor é o Fogo.
+        guild = client.get_guild(fogo["guild_id"])
+        if guild is not None:
+            return f"-# 📍 Servidor: **{discord.utils.escape_markdown(guild.name)}**"
+    return None
+
+
+def _botoes_nome(fogo: sqlite3.Row) -> list[discord.ui.Item]:
+    if fogo["sequencia"] >= nomes.NOME_MIN_DIAS and not fogo["nome"]:
+        return [NomeBotao(fogo["id"])]
+    return []
+
+
+def _view_do_dia(
+    client: discord.Client, fogo: sqlite3.Row, modo: str
+) -> discord.ui.LayoutView:
+    """Painel (falta alguém acender) ou card de Fogo aceso (os dois já acenderam)."""
+    if db.dia_completo(fogo):
+        return visual.cartao_fogo_aceso(
+            fogo,
+            botoes=_botoes_nome(fogo),
+            rodape=_rodape(client, fogo, modo) if modo == "dm" else None,
+        )
+    return PainelView(fogo, _rodape(client, fogo, modo))
+
+
+class AcenderBotao(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"poyo:fogo:acender:(?P<id>[0-9]+)",
+):
+    """Botão "Acender o Fogo".
+
+    Dinâmico: o mesmo botão vale em qualquer mensagem (a DM de cada um, o
+    canal, painéis antigos) e sobrevive a reinícios do bot, sem precisar
+    registrar mensagem por mensagem.
     """
 
-    def __init__(self, fogo: sqlite3.Row) -> None:
-        fogo_id = fogo["id"]
-
-        botao = discord.ui.Button(
-            style=discord.ButtonStyle.danger,
-            label="Acender o Fogo",
-            emoji=visual.EMOJI_FOGO,
-            custom_id=f"poyo:fogo:acender:{fogo_id}",
-        )
-
-        async def ao_clicar(interaction: discord.Interaction) -> None:
-            await acender(interaction, fogo_id)
-
-        botao.callback = ao_clicar
+    def __init__(self, fogo_id: int) -> None:
         super().__init__(
-            *visual.blocos_painel(fogo),
+            discord.ui.Button(
+                style=discord.ButtonStyle.danger,
+                label="Acender o Fogo",
+                emoji=visual.EMOJI_FOGO,
+                custom_id=f"poyo:fogo:acender:{fogo_id}",
+            )
+        )
+        self.fogo_id = fogo_id
+
+    @classmethod
+    async def from_custom_id(
+        cls,
+        interaction: discord.Interaction,
+        item: discord.ui.Button,
+        match: re.Match[str],
+    ) -> "AcenderBotao":
+        return cls(int(match["id"]))
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await acender(interaction, self.fogo_id)
+
+
+class PainelView(visual.CartaoFogo):
+    """Painel do dia com o botão "Acender o Fogo"."""
+
+    def __init__(self, fogo: sqlite3.Row, rodape: Optional[str] = None) -> None:
+        blocos = list(visual.blocos_painel(fogo))
+        if rodape:
+            blocos.append(rodape)
+        super().__init__(
+            *blocos,
             cor=visual.COR_FOGO,
-            botoes=[botao],
+            botoes=[AcenderBotao(fogo["id"])],
+            imagem=visual.IMG_FELIZ,
         )
 
 
@@ -170,15 +235,36 @@ async def acender(interaction: discord.Interaction, fogo_id: int) -> None:
         db.acender, fogo_id, interaction.user.id, tempo.hoje()
     )
 
-    if resultado == "ok":
-        await interaction.response.edit_message(view=PainelView(fogo))
-    elif resultado == "completo":
-        botoes = []
-        if fogo["sequencia"] >= nomes.NOME_MIN_DIAS and not fogo["nome"]:
-            botoes.append(NomeBotao(fogo_id))
+    if resultado in ("ok", "completo"):
+        # Descobre onde este painel mora (DM, canal de reserva ou painel
+        # antigo de antes da Etapa 4.1) para escolher o rodapé certo.
+        modo = "legado"
+        mensagem_id = interaction.message.id if interaction.message else None
+        for p in await asyncio.to_thread(db.paineis_do_fogo, fogo_id):
+            if p["mensagem_id"] == mensagem_id:
+                modo = "dm" if p["dm"] else "canal"
+                break
+
         await interaction.response.edit_message(
-            view=visual.cartao_fogo_aceso(fogo, botoes=botoes)
+            view=_view_do_dia(interaction.client, fogo, modo)
         )
+
+        cog = interaction.client.get_cog("Fogo")
+        if cog is not None:
+            try:  # o painel do par acompanha
+                await cog.atualizar_paineis(fogo, excluir=mensagem_id)
+            except Exception as erro:
+                print(f"Fogo {fogo_id}: erro ao atualizar o painel do par: {erro!r}")
+
+        # Etapa 4: o banco já decidiu a vaga de Lendário dentro do clique;
+        # a cog dos Lendários só avisa no canal e grava a bio.
+        if resultado == "completo" and fogo["sequencia"] >= lendarios.LENDARIO_DIAS:
+            cog = interaction.client.get_cog("FogoLendarios")
+            if cog is not None:
+                try:
+                    await cog.anunciar(fogo_id)
+                except Exception as erro:  # nunca atrapalha o clique
+                    print(f"Fogo {fogo_id}: erro ao anunciar marco: {erro!r}")
     else:
         avisos = {
             "nao_participa": "Esse Fogo não é seu! Só a dupla pode acender.",
@@ -242,19 +328,43 @@ class NomeModal(discord.ui.Modal, title="Nome do Fogo"):
 
         versao = fogo["proposta_n"]
         parceiro = _parceiro(fogo, interaction.user.id)
-        await interaction.response.send_message(
-            view=visual.cartao_proposta_nome(
-                fogo,
-                interaction.user.id,
-                resultado,
-                botoes=[
-                    RespostaNomeBotao(fogo["id"], versao, "aceitar"),
-                    RespostaNomeBotao(fogo["id"], versao, "recusar"),
-                ],
-            ),
-            allowed_mentions=discord.AllowedMentions(
-                users=[discord.Object(parceiro)]
-            ),
+        cartao = visual.cartao_proposta_nome(
+            fogo,
+            interaction.user.id,
+            resultado,
+            botoes=[
+                RespostaNomeBotao(fogo["id"], versao, "aceitar"),
+                RespostaNomeBotao(fogo["id"], versao, "recusar"),
+            ],
+        )
+        mencoes = discord.AllowedMentions(users=[discord.Object(parceiro)])
+
+        if interaction.guild is not None:
+            await interaction.response.send_message(
+                view=cartao, allowed_mentions=mencoes
+            )
+            return
+
+        # Aberto pela DM: o par não consegue clicar na DM de quem sugeriu,
+        # então a sugestão é postada no canal do Fogo.
+        await interaction.response.defer(ephemeral=True)
+        cog = interaction.client.get_cog("Fogo")
+        canal = await cog._canal(fogo["canal_id"]) if cog else None
+        try:
+            if canal is None:
+                raise discord.HTTPException(None, "canal indisponível")
+            await canal.send(view=cartao, allowed_mentions=mencoes)
+        except (discord.Forbidden, discord.HTTPException):
+            await interaction.followup.send(
+                "Não consegui postar a sugestão no canal do Fogo. "
+                "Tente com `,nomefogo` direto no servidor.",
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            f"Sugestão enviada em {canal.mention}! "
+            f"Agora é só esperar <@{parceiro}> aceitar. 🔥",
+            ephemeral=True,
         )
 
     async def on_error(
@@ -372,6 +482,12 @@ class RespostaNomeBotao(
             await interaction.response.edit_message(
                 view=visual.cartao_fogo_batizado(fogo)
             )
+            cog = interaction.client.get_cog("Fogo")
+            if cog is not None:  # o nome novo aparece nos painéis de hoje
+                try:
+                    await cog.atualizar_paineis(fogo)
+                except Exception as erro:
+                    print(f"Fogo {fogo['id']}: erro ao atualizar painéis: {erro!r}")
         elif status == "recusado":
             await interaction.response.edit_message(
                 view=visual.cartao_nome_recusado(
@@ -419,12 +535,12 @@ class Fogo(commands.Cog):
 
     async def cog_load(self) -> None:
         await asyncio.to_thread(db.iniciar)
-        self.bot.add_dynamic_items(NomeBotao, RespostaNomeBotao)
+        self.bot.add_dynamic_items(AcenderBotao, NomeBotao, RespostaNomeBotao)
         self.manutencao_convites.start()
         self.ciclo_diario.start()
 
     async def cog_unload(self) -> None:
-        self.bot.remove_dynamic_items(NomeBotao, RespostaNomeBotao)
+        self.bot.remove_dynamic_items(AcenderBotao, NomeBotao, RespostaNomeBotao)
         self.manutencao_convites.cancel()
         self.ciclo_diario.cancel()
 
@@ -496,59 +612,149 @@ class Fogo(commands.Cog):
 
     # ----------------------------------------------------- ciclo diário
 
+    def _mensagem(self, painel: sqlite3.Row) -> discord.PartialMessage:
+        """Mensagem de um painel guardado (DM ou canal)."""
+        canal = self.bot.get_partial_messageable(
+            painel["canal_id"],
+            type=discord.ChannelType.private if painel["dm"] else None,
+        )
+        return canal.get_partial_message(painel["mensagem_id"])
+
+    async def _usuario(self, user_id: int) -> discord.User:
+        return self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
+
+    async def _enviar_painel(self, fogo: sqlite3.Row, user_id: int) -> bool:
+        """Entrega o painel de UMA pessoa: na DM, ou no canal se a DM estiver
+        fechada. Devolve True se a mensagem foi entregue e registrada."""
+        mensagem = None
+        dm = True
+        try:
+            usuario = await self._usuario(user_id)
+            mensagem = await usuario.send(view=_view_do_dia(self.bot, fogo, "dm"))
+        except (discord.Forbidden, discord.NotFound):
+            dm = False  # DM fechada (ou conta sumiu): usa o canal
+        except discord.HTTPException as erro:
+            print(f"Fogo {fogo['id']}: erro ao enviar DM para {user_id}: {erro!r}")
+            return False  # falha passageira: o ciclo tenta de novo
+
+        if mensagem is None:
+            canal = await self._canal(fogo["canal_id"])
+            if canal is None:
+                return False
+            try:
+                mensagem = await canal.send(
+                    view=_view_do_dia(self.bot, fogo, "canal"),
+                    allowed_mentions=discord.AllowedMentions(
+                        users=[discord.Object(user_id)]
+                    ),
+                )
+            except (discord.Forbidden, discord.HTTPException) as erro:
+                print(f"Fogo {fogo['id']}: não consegui enviar o painel: {erro!r}")
+                return False
+
+        await asyncio.to_thread(
+            db.registrar_painel,
+            fogo["id"],
+            user_id,
+            mensagem.channel.id,
+            mensagem.id,
+            dm,
+        )
+        return True
+
     async def abrir_painel(self, fogo_id: int) -> None:
-        """Manda o painel do dia (se o Fogo ainda não tiver um)."""
+        """Manda o painel do dia para cada pessoa da dupla (DM, ou canal se a
+        DM estiver fechada). Quem já recebeu não recebe de novo."""
         async with self._trava(fogo_id):
             fogo = await asyncio.to_thread(db.obter_fogo, fogo_id)
             if fogo is None or not fogo["ativo"] or fogo["painel_id"]:
                 return
 
-            canal = await self._canal(fogo["canal_id"])
-            if canal is None:
-                return
+            ja_tem = {
+                p["usuario_id"]
+                for p in await asyncio.to_thread(db.paineis_do_fogo, fogo_id)
+            }
+            for user_id in (fogo["usuario_a"], fogo["usuario_b"]):
+                if user_id in ja_tem:
+                    continue
+                # Relê a cada envio: o primeiro pode ter acendido nesse meio tempo.
+                atual = await asyncio.to_thread(db.obter_fogo, fogo_id)
+                if atual is None or not atual["ativo"]:
+                    return
+                await self._enviar_painel(atual, user_id)
 
-            try:
-                mensagem = await canal.send(
-                    view=PainelView(fogo),
-                    allowed_mentions=discord.AllowedMentions(
-                        users=[
-                            discord.Object(fogo["usuario_a"]),
-                            discord.Object(fogo["usuario_b"]),
-                        ]
-                    ),
+            paineis = await asyncio.to_thread(db.paineis_do_fogo, fogo_id)
+            if len(paineis) >= 2:
+                # Marca o dia como "painéis entregues" (senão o ciclo repete).
+                await asyncio.to_thread(
+                    db.definir_painel, fogo_id, paineis[0]["mensagem_id"]
                 )
-            except (discord.Forbidden, discord.HTTPException) as erro:
-                print(f"Fogo {fogo_id}: não consegui enviar o painel: {erro!r}")
-                return
 
-            await asyncio.to_thread(db.definir_painel, fogo_id, mensagem.id)
+    async def atualizar_paineis(
+        self, fogo: sqlite3.Row, excluir: Optional[int] = None
+    ) -> None:
+        """Deixa o painel de cada um igual ao estado atual (quem acendeu, nome).
+        `excluir` é a mensagem que acabou de ser editada pelo próprio clique."""
+        for p in await asyncio.to_thread(db.paineis_do_fogo, fogo["id"]):
+            if p["mensagem_id"] == excluir:
+                continue
+            modo = "dm" if p["dm"] else "canal"
+            try:
+                await self._mensagem(p).edit(
+                    view=_view_do_dia(self.bot, fogo, modo)
+                )
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
 
     async def _apagar(self, fogo: sqlite3.Row) -> None:
-        """Fogo apagou: encerra o painel antigo e avisa a dupla."""
-        canal = await self._canal(fogo["canal_id"])
-        if canal is None:
-            return
-
-        if fogo["painel_id"]:
+        """Fogo apagou: encerra os painéis antigos e avisa cada um da dupla
+        na DM (no canal, só para quem estiver com a DM fechada)."""
+        paineis = await asyncio.to_thread(db.paineis_do_fogo, fogo["id"])
+        for p in paineis:
             try:
-                await canal.get_partial_message(fogo["painel_id"]).edit(
+                await self._mensagem(p).edit(
                     view=visual.cartao_painel_encerrado(fogo)
                 )
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 pass
 
-        try:
-            await canal.send(
-                view=visual.cartao_fogo_apagado(fogo),
-                allowed_mentions=discord.AllowedMentions(
-                    users=[
-                        discord.Object(fogo["usuario_a"]),
-                        discord.Object(fogo["usuario_b"]),
-                    ]
-                ),
-            )
-        except (discord.Forbidden, discord.HTTPException) as erro:
-            print(f"Fogo {fogo['id']}: não consegui avisar o apagão: {erro!r}")
+        # Painel de antes da Etapa 4.1: era uma mensagem só, no canal.
+        if not paineis and fogo["painel_id"]:
+            canal = await self._canal(fogo["canal_id"])
+            if canal is not None:
+                try:
+                    await canal.get_partial_message(fogo["painel_id"]).edit(
+                        view=visual.cartao_painel_encerrado(fogo)
+                    )
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    pass
+
+        sem_dm: list[int] = []
+        for user_id in (fogo["usuario_a"], fogo["usuario_b"]):
+            try:
+                usuario = await self._usuario(user_id)
+                await usuario.send(
+                    view=visual.cartao_fogo_apagado(
+                        fogo, rodape=_rodape(self.bot, fogo, "dm")
+                    )
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                sem_dm.append(user_id)
+
+        if sem_dm:
+            canal = await self._canal(fogo["canal_id"])
+            if canal is not None:
+                try:
+                    await canal.send(
+                        view=visual.cartao_fogo_apagado(fogo),
+                        allowed_mentions=discord.AllowedMentions(
+                            users=[discord.Object(u) for u in sem_dm]
+                        ),
+                    )
+                except (discord.Forbidden, discord.HTTPException) as erro:
+                    print(f"Fogo {fogo['id']}: não consegui avisar o apagão: {erro!r}")
+
+        await asyncio.to_thread(db.limpar_paineis, fogo["id"])
 
     @tasks.loop(seconds=20)
     async def ciclo_diario(self) -> None:
@@ -573,12 +779,9 @@ class Fogo(commands.Cog):
 
     @ciclo_diario.before_loop
     async def _antes_ciclo(self) -> None:
+        # Os botões dos painéis são dinâmicos (AcenderBotao): não precisam
+        # ser reativados mensagem por mensagem depois de um reinício.
         await self.bot.wait_until_ready()
-
-        # Reativa os botões dos painéis que ainda estão esperando cliques.
-        for f in await asyncio.to_thread(db.fogos_ativos):
-            if f["painel_id"] and not db.dia_completo(f):
-                self.bot.add_view(PainelView(f), message_id=f["painel_id"])
 
     # ------------------------------------------------------------- comandos
 

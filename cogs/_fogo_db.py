@@ -15,6 +15,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
 
+from ._fogo_lendarios import LENDARIO_DIAS, LENDARIO_VAGAS
+
 DB_PATH = Path(
     os.getenv(
         "FOGO_DB_FILE",
@@ -75,6 +77,46 @@ def iniciar() -> None:
             CREATE UNIQUE INDEX IF NOT EXISTS idx_fogo_dupla_ativa
                 ON fogos (guild_id, usuario_a, usuario_b)
                 WHERE ativo = 1;
+
+            -- Etapa 4: todo Fogo que chega a LENDARIO_DIAS ganha uma linha
+            -- aqui. `posicao` (1 ou 2) é a vaga de Lendário; NULL = sem vaga.
+            CREATE TABLE IF NOT EXISTS fogo_marcos (
+                fogo_id     INTEGER PRIMARY KEY,
+                guild_id    INTEGER NOT NULL,
+                canal_id    INTEGER NOT NULL,
+                usuario_a   INTEGER NOT NULL,
+                usuario_b   INTEGER NOT NULL,
+                nome        TEXT,
+                dias        INTEGER NOT NULL,
+                alcancado_em REAL   NOT NULL,
+                posicao     INTEGER,
+                nome_a      TEXT,
+                nome_b      TEXT,
+                anunciado   INTEGER NOT NULL DEFAULT 0,
+                tentativas  INTEGER NOT NULL DEFAULT 0,
+                bio_ok      INTEGER NOT NULL DEFAULT 0
+            );
+
+            -- Cada vaga só pode ter UMA dupla, garantido pelo banco.
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_marco_posicao
+                ON fogo_marcos (posicao)
+                WHERE posicao IS NOT NULL;
+
+            -- Etapa 4.1: um painel por pessoa. Fica na DM de cada uma; se a
+            -- DM estiver fechada, cai no canal do Fogo (`dm` = 0).
+            CREATE TABLE IF NOT EXISTS fogo_paineis (
+                fogo_id     INTEGER NOT NULL,
+                usuario_id  INTEGER NOT NULL,
+                canal_id    INTEGER NOT NULL,
+                mensagem_id INTEGER NOT NULL,
+                dm          INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (fogo_id, usuario_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS fogo_config (
+                chave TEXT PRIMARY KEY,
+                valor TEXT NOT NULL
+            );
             """
         )
         _migrar(con)
@@ -321,6 +363,30 @@ def definir_painel(fogo_id: int, mensagem_id: int) -> None:
         )
 
 
+def registrar_painel(
+    fogo_id: int, usuario_id: int, canal_id: int, mensagem_id: int, dm: bool
+) -> None:
+    with _conexao() as con:
+        con.execute(
+            "INSERT OR REPLACE INTO fogo_paineis "
+            "(fogo_id, usuario_id, canal_id, mensagem_id, dm) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (fogo_id, usuario_id, canal_id, mensagem_id, int(dm)),
+        )
+
+
+def paineis_do_fogo(fogo_id: int) -> list[sqlite3.Row]:
+    with _conexao() as con:
+        return con.execute(
+            "SELECT * FROM fogo_paineis WHERE fogo_id = ?", (fogo_id,)
+        ).fetchall()
+
+
+def limpar_paineis(fogo_id: int) -> None:
+    with _conexao() as con:
+        con.execute("DELETE FROM fogo_paineis WHERE fogo_id = ?", (fogo_id,))
+
+
 def dia_completo(fogo: sqlite3.Row) -> bool:
     return bool(fogo["a_acendeu"]) and bool(fogo["b_acendeu"])
 
@@ -369,6 +435,9 @@ def acender(
             f = con.execute(
                 "SELECT * FROM fogos WHERE id = ?", (fogo_id,)
             ).fetchone()
+            # Etapa 4: na mesma transação, para duas duplas nunca
+            # "empatarem" na mesma vaga de Lendário.
+            _registrar_marco(con, f)
             return "completo", f
         return "ok", f
 
@@ -408,6 +477,10 @@ def virar_dia(
                 WHERE id = ?
                 """,
                 (hoje, fogo_id),
+            )
+            # Painéis do dia anterior não valem mais.
+            con.execute(
+                "DELETE FROM fogo_paineis WHERE fogo_id = ?", (fogo_id,)
             )
             return "novo_dia", con.execute(
                 "SELECT * FROM fogos WHERE id = ?", (fogo_id,)
@@ -519,3 +592,162 @@ def responder_nome(
         return ("aceito" if aceitar else "recusado"), con.execute(
             "SELECT * FROM fogos WHERE id = ?", (fogo_id,)
         ).fetchone()
+
+
+# ------------------------------------------------- Lendários (Etapa 4)
+
+
+def _registrar_marco(con: sqlite3.Connection, f: sqlite3.Row) -> None:
+    """Se o Fogo chegou a LENDARIO_DIAS, registra o marco e dá a vaga.
+
+    Roda dentro da transação de `acender` (que já é BEGIN IMMEDIATE), então
+    quem completa primeiro leva a vaga, sem corrida. Cada Fogo só gera um
+    marco, e uma mesma dupla nunca ocupa as duas vagas.
+    """
+    if f["sequencia"] < LENDARIO_DIAS:
+        return
+    if con.execute(
+        "SELECT 1 FROM fogo_marcos WHERE fogo_id = ?", (f["id"],)
+    ).fetchone():
+        return
+
+    ocupadas = {
+        r["posicao"]
+        for r in con.execute(
+            "SELECT posicao FROM fogo_marcos WHERE posicao IS NOT NULL"
+        )
+    }
+    dupla_ja_lendaria = con.execute(
+        "SELECT 1 FROM fogo_marcos WHERE posicao IS NOT NULL "
+        "AND usuario_a = ? AND usuario_b = ?",
+        (f["usuario_a"], f["usuario_b"]),
+    ).fetchone()
+
+    posicao = None
+    if dupla_ja_lendaria is None:
+        for candidata in range(1, LENDARIO_VAGAS + 1):
+            if candidata not in ocupadas:
+                posicao = candidata
+                break
+
+    con.execute(
+        """
+        INSERT INTO fogo_marcos
+            (fogo_id, guild_id, canal_id, usuario_a, usuario_b, nome,
+             dias, alcancado_em, posicao)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            f["id"],
+            f["guild_id"],
+            f["canal_id"],
+            f["usuario_a"],
+            f["usuario_b"],
+            f["nome"],
+            LENDARIO_DIAS,
+            time.time(),
+            posicao,
+        ),
+    )
+
+
+def obter_marco(fogo_id: int) -> Optional[sqlite3.Row]:
+    with _conexao() as con:
+        return con.execute(
+            "SELECT * FROM fogo_marcos WHERE fogo_id = ?", (fogo_id,)
+        ).fetchone()
+
+
+def dupla_e_lendaria(usuario_a: int, usuario_b: int) -> bool:
+    x, y = dupla(usuario_a, usuario_b)
+    with _conexao() as con:
+        return (
+            con.execute(
+                "SELECT 1 FROM fogo_marcos WHERE posicao IS NOT NULL "
+                "AND usuario_a = ? AND usuario_b = ?",
+                (x, y),
+            ).fetchone()
+            is not None
+        )
+
+
+def lendarios() -> list[sqlite3.Row]:
+    """Os Lendários do Fogo, na ordem das vagas."""
+    with _conexao() as con:
+        return con.execute(
+            "SELECT * FROM fogo_marcos WHERE posicao IS NOT NULL "
+            "ORDER BY posicao"
+        ).fetchall()
+
+
+def marcos_sem_anuncio() -> list[sqlite3.Row]:
+    with _conexao() as con:
+        return con.execute(
+            "SELECT * FROM fogo_marcos WHERE anunciado = 0 "
+            "ORDER BY alcancado_em"
+        ).fetchall()
+
+
+def marcos_sem_bio() -> list[sqlite3.Row]:
+    """Lendários que ainda não foram gravados na bio do Poyo."""
+    with _conexao() as con:
+        return con.execute(
+            "SELECT * FROM fogo_marcos WHERE posicao IS NOT NULL "
+            "AND bio_ok = 0 ORDER BY posicao"
+        ).fetchall()
+
+
+def gravar_nomes_marco(fogo_id: int, nome_a: str, nome_b: str) -> None:
+    """Guarda os @usernames da época, para a bio não depender de busca."""
+    with _conexao() as con:
+        con.execute(
+            "UPDATE fogo_marcos SET nome_a = ?, nome_b = ? WHERE fogo_id = ?",
+            (nome_a, nome_b, fogo_id),
+        )
+
+
+def marcar_anunciado(fogo_id: int) -> None:
+    with _conexao() as con:
+        con.execute(
+            "UPDATE fogo_marcos SET anunciado = 1 WHERE fogo_id = ?",
+            (fogo_id,),
+        )
+
+
+def falha_anuncio(fogo_id: int, maximo: int) -> int:
+    """Conta uma falha ao avisar no canal; passando do máximo, desiste."""
+    with _conexao() as con:
+        con.execute(
+            "UPDATE fogo_marcos SET tentativas = tentativas + 1, "
+            "anunciado = CASE WHEN tentativas + 1 >= ? THEN 1 ELSE anunciado END "
+            "WHERE fogo_id = ?",
+            (maximo, fogo_id),
+        )
+        r = con.execute(
+            "SELECT tentativas FROM fogo_marcos WHERE fogo_id = ?", (fogo_id,)
+        ).fetchone()
+        return int(r["tentativas"]) if r else 0
+
+
+def marcar_bio_ok() -> None:
+    with _conexao() as con:
+        con.execute(
+            "UPDATE fogo_marcos SET bio_ok = 1 WHERE posicao IS NOT NULL"
+        )
+
+
+def config_obter(chave: str) -> Optional[str]:
+    with _conexao() as con:
+        r = con.execute(
+            "SELECT valor FROM fogo_config WHERE chave = ?", (chave,)
+        ).fetchone()
+        return r["valor"] if r else None
+
+
+def config_gravar(chave: str, valor: str) -> None:
+    with _conexao() as con:
+        con.execute(
+            "INSERT INTO fogo_config (chave, valor) VALUES (?, ?) "
+            "ON CONFLICT(chave) DO UPDATE SET valor = excluded.valor",
+            (chave, valor),
+        )
