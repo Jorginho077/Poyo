@@ -1,12 +1,28 @@
 import os
 import pkgutil
 import time
+import asyncio
+import io
+from urllib.request import Request, urlopen
 
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
-from cogs._media import baixar_arquivo
+try:
+    from cogs._media import baixar_arquivo
+except ModuleNotFoundError:
+    async def baixar_arquivo(url: str, nome: str) -> discord.File:
+        def baixar() -> bytes:
+            pedido = Request(
+                url,
+                headers={"User-Agent": "Poyo-Discord-Bot/1.0"},
+            )
+            with urlopen(pedido, timeout=20) as resposta:
+                return resposta.read()
+
+        dados = await asyncio.to_thread(baixar)
+        return discord.File(io.BytesIO(dados), filename=nome)
 
 
 load_dotenv()
