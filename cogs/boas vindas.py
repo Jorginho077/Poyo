@@ -9,6 +9,8 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
+from ._media import baixar_arquivo
+
 
 DATABASE_PATH = Path(__file__).resolve().parent.parent / "poyo.sqlite3"
 
@@ -49,7 +51,12 @@ def normalizar_url_visual(url: str) -> str:
 
 
 class WelcomeCard(discord.ui.LayoutView):
-    def __init__(self, config: ConfiguracaoJoin, membro: discord.Member) -> None:
+    def __init__(
+        self,
+        config: ConfiguracaoJoin,
+        membro: discord.Member,
+        gif_anexo: bool = False,
+    ) -> None:
         super().__init__(timeout=None)
         titulo = substituir_marcadores(config.titulo, membro)
         descricao = substituir_marcadores(config.descricao, membro)
@@ -64,7 +71,9 @@ class WelcomeCard(discord.ui.LayoutView):
             conteudo.append(
                 discord.ui.MediaGallery(
                     discord.MediaGalleryItem(
-                        normalizar_url_visual(config.gif_url)
+                        "attachment://poyo-welcome.gif"
+                        if gif_anexo
+                        else normalizar_url_visual(config.gif_url)
                     )
                 )
             )
@@ -269,9 +278,15 @@ class JoinPanel(discord.ui.LayoutView):
             )
             return
 
+        arquivo, gif_anexo = await preparar_gif(self.config)
         try:
             await canal.send(
-                view=WelcomeCard(self.config, interaction.user),
+                view=WelcomeCard(
+                    self.config,
+                    interaction.user,
+                    gif_anexo=gif_anexo,
+                ),
+                file=arquivo,
                 allowed_mentions=discord.AllowedMentions(
                     users=True,
                     roles=True,
@@ -362,6 +377,23 @@ class MensagemJoinModal(discord.ui.Modal, title="Mensagem de boas-vindas"):
             ephemeral=True,
         )
         await self.painel.atualizar()
+
+
+async def preparar_gif(
+    config: ConfiguracaoJoin,
+) -> tuple[Optional[discord.File], bool]:
+    if not config.gif_url:
+        return None, False
+
+    try:
+        arquivo = await baixar_arquivo(
+            normalizar_url_visual(config.gif_url),
+            "poyo-welcome.gif",
+        )
+    except (OSError, TimeoutError, discord.HTTPException):
+        return None, False
+
+    return arquivo, True
 
 
 class JoinSystem(commands.Cog):
@@ -528,9 +560,11 @@ class JoinSystem(commands.Cog):
         if not isinstance(canal, discord.TextChannel):
             return
 
+        arquivo, gif_anexo = await preparar_gif(config)
         try:
             await canal.send(
-                view=WelcomeCard(config, membro),
+                view=WelcomeCard(config, membro, gif_anexo=gif_anexo),
+                file=arquivo,
                 allowed_mentions=discord.AllowedMentions(
                     users=True,
                     roles=True,
