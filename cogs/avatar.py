@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 from dataclasses import dataclass
 from typing import Optional
@@ -10,6 +11,18 @@ from urllib.request import Request, urlopen
 
 import discord
 from discord.ext import commands
+
+try:
+    from ._media import baixar_arquivo
+except ModuleNotFoundError:
+    async def baixar_arquivo(url: str, nome: str) -> discord.File:
+        def baixar() -> bytes:
+            pedido = Request(url, headers={"User-Agent": "Poyo-Discord-Bot/1.0"})
+            with urlopen(pedido, timeout=20) as resposta:
+                return resposta.read()
+
+        dados = await asyncio.to_thread(baixar)
+        return discord.File(io.BytesIO(dados), filename=nome)
 
 
 BANNER_URL = (
@@ -280,9 +293,10 @@ class PainelSkin(discord.ui.LayoutView):
 
 
 class SkinView(discord.ui.LayoutView):
-    def __init__(self, skin: dict) -> None:
+    def __init__(self, skin: dict, imagem_url: Optional[str] = None) -> None:
         super().__init__(timeout=None)
         self.skin = skin
+        self.imagem_url = imagem_url or skin["imagem"]
         self.curtidas: set[int] = set()
         self.lock = asyncio.Lock()
         self.montar()
@@ -317,7 +331,7 @@ class SkinView(discord.ui.LayoutView):
                 ),
                 discord.ui.Separator(),
                 discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(self.skin["imagem"])
+                    discord.MediaGalleryItem(self.imagem_url)
                 ),
                 discord.ui.Separator(),
                 discord.ui.ActionRow(coracao),
@@ -393,7 +407,20 @@ class Avatar(commands.Cog):
             )
             return
 
-        await ctx.send(view=SkinView(resultado))
+        try:
+            arquivo = await baixar_arquivo(
+                resultado["imagem"],
+                "poyo-avatar.png",
+            )
+            imagem_url = "attachment://poyo-avatar.png"
+        except (OSError, TimeoutError, discord.HTTPException):
+            arquivo = None
+            imagem_url = resultado["imagem"]
+
+        await ctx.send(
+            view=SkinView(resultado, imagem_url),
+            file=arquivo,
+        )
 
     @commands.hybrid_command(
         name="avatar_roblox",
