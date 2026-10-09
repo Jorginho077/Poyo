@@ -143,7 +143,15 @@ bot = BotModeracao()
 async def apagar_mensagem_do_comando(
     ctx: commands.Context,
 ) -> None:
-    """Apaga a mensagem original depois que o comando foi reconhecido."""
+    """Prepara slash commands e apaga mensagens apenas quando elas existem."""
+    if ctx.interaction is not None:
+        if not ctx.interaction.response.is_done():
+            await ctx.defer()
+        return
+
+    if ctx.message is None:
+        return
+
     try:
         await ctx.message.delete()
     except (
@@ -248,14 +256,15 @@ async def on_command_error(
         mensagem = "Esse comando só pode ser usado dentro de um servidor."
     elif isinstance(erro, commands.MissingPermissions):
         # Apaga silenciosamente o comando de quem não tem permissão.
-        try:
-            await ctx.message.delete()
-        except (
-            discord.NotFound,
-            discord.Forbidden,
-            discord.HTTPException,
-        ):
-            pass
+        if ctx.message is not None:
+            try:
+                await ctx.message.delete()
+            except (
+                discord.NotFound,
+                discord.Forbidden,
+                discord.HTTPException,
+            ):
+                pass
 
         return
     elif isinstance(erro, commands.CheckFailure):
