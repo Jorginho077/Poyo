@@ -120,15 +120,12 @@ async def buscar_minecraft(nome: str) -> Optional[dict]:
     if not uuid or not nome_real:
         return None
 
-    # O render FULL mantém a skin real em corpo inteiro, com a pose
-    # isométrica do visualizador do NameMC, camadas externas e modelo slim ou
-    # classic conforme o perfil do jogador.
-    imagem = (
-        f"https://mc-api.io/render/FULL/{quote(nome_real)}/JAVA?size=832"
-    )
+    # Usa diretamente a imagem corporal gerada pelo nome, sem reconstruir,
+    # recortar ou reposicionar a skin no bot.
+    imagem = f"https://mc-heads.net/body/{quote(nome_real)}/right"
     imagem_fallback = (
-        f"https://crafatar.com/renders/body/{uuid}"
-        "?overlay&scale=4"
+        f"https://mc-api.io/render/FULL/{quote(nome_real)}"
+        "/JAVA?size=832"
     )
     return {
         "plataforma": "Minecraft",
