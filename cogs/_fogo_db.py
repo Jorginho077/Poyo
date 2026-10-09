@@ -736,6 +736,40 @@ def marcar_bio_ok() -> None:
         )
 
 
+def remover_fogo(fogo_id: int) -> Optional[sqlite3.Row]:
+    """Encerra um Fogo ativo à força (remoção por administrador).
+
+    Devolve o Fogo como estava, ou None se já não estava ativo. A dupla
+    pode abrir um Fogo novo depois. Os Lendários já registrados não mudam.
+    """
+    with _conexao() as con:
+        con.execute("BEGIN IMMEDIATE")
+        f = con.execute(
+            "SELECT * FROM fogos WHERE id = ?", (fogo_id,)
+        ).fetchone()
+        if f is None or not f["ativo"]:
+            return None
+        con.execute(
+            "UPDATE fogos SET ativo = 0, encerrado_em = ? WHERE id = ?",
+            (time.time(), fogo_id),
+        )
+        return f
+
+
+def realinhar_dia(antigo: str, novo: str) -> int:
+    """Depois de mudar o horário da virada: o dia que estava valendo
+    continua valendo (senão o Fogo poderia apagar por causa da troca)."""
+    if antigo == novo:
+        return 0
+    with _conexao() as con:
+        cur = con.execute(
+            "UPDATE fogos SET dia_aberto = ? "
+            "WHERE ativo = 1 AND dia_aberto = ?",
+            (novo, antigo),
+        )
+        return cur.rowcount
+
+
 def config_obter(chave: str) -> Optional[str]:
     with _conexao() as con:
         r = con.execute(

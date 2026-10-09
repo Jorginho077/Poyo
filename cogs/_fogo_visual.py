@@ -13,9 +13,12 @@ definido no .env ou aqui tem prioridade sobre o automático.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Sequence
 
 import discord
+
+from . import _fogo_hora as hora
 
 # ---------------------------------------------------------------- emojis
 
@@ -33,6 +36,20 @@ COR_FRIO = discord.Colour.from_rgb(120, 190, 255)  # azul gelo
 COR_NEUTRA = discord.Colour.from_rgb(110, 110, 120)
 
 
+# GIF de brilhos que fica em cima do botão "Acender o Fogo".
+ENFEITE_NOME = "fogo_brilho.gif"
+ENFEITE_CAMINHO = Path(__file__).resolve().parent.parent / "assets" / ENFEITE_NOME
+
+
+def enfeite_existe() -> bool:
+    return ENFEITE_CAMINHO.is_file()
+
+
+def arquivo_enfeite() -> discord.File:
+    """Um discord.File novo (cada envio gasta o seu)."""
+    return discord.File(ENFEITE_CAMINHO, filename=ENFEITE_NOME)
+
+
 def dias(n: int) -> str:
     return f"{n} dia" if n == 1 else f"{n} dias"
 
@@ -41,13 +58,18 @@ def dias(n: int) -> str:
 
 
 class CartaoFogo(discord.ui.LayoutView):
-    """Container com blocos de texto separados e, opcionalmente, botões."""
+    """Container com blocos de texto separados e, opcionalmente, botões.
+
+    Sem cor lateral (o parâmetro `cor` é aceito só por compatibilidade).
+    `midia` é o nome de um anexo ("attachment://...") mostrado acima dos botões.
+    """
 
     def __init__(
         self,
         *blocos: str,
         cor: discord.Colour = COR_FOGO,
         botoes: Sequence[discord.ui.Item] = (),
+        midia: str | None = None,
         timeout: float | None = None,
     ) -> None:
         super().__init__(timeout=timeout)
@@ -58,11 +80,19 @@ class CartaoFogo(discord.ui.LayoutView):
                 itens.append(discord.ui.Separator(visible=False))
             itens.append(discord.ui.TextDisplay(bloco))
 
+        if midia:
+            itens.append(discord.ui.Separator(visible=False))
+            itens.append(
+                discord.ui.MediaGallery(
+                    discord.MediaGalleryItem(f"attachment://{midia}")
+                )
+            )
+
         if botoes:
             itens.append(discord.ui.Separator(visible=False))
             itens.append(discord.ui.ActionRow(*botoes))
 
-        self.add_item(discord.ui.Container(*itens, accent_colour=cor))
+        self.add_item(discord.ui.Container(*itens))
 
 
 # ----------------------------------------------------------------- textos
@@ -145,14 +175,15 @@ def frase_chama(sequencia: int) -> str:
 
 
 def blocos_painel(f) -> list[str]:
-    """Textos do painel do dia (o botão é montado pelo cog)."""
-    a_ok, b_ok = bool(f["a_acendeu"]), bool(f["b_acendeu"])
-    status_a = "✅" if a_ok else EMOJI_ESPERA
-    status_b = "✅" if b_ok else EMOJI_ESPERA
+    """Texto do painel do dia (o GIF e o botão são montados pelo cog)."""
+    marca_a = "✅" if f["a_acendeu"] else "⬜"
+    marca_b = "✅" if f["b_acendeu"] else "⬜"
+    seq = f"Sequência de {dias(f['sequencia'])} · " if f["sequencia"] else ""
     return [
-        f"{EMOJI_FOGO_FELIZ} **Acendam o Fogo!**\n"
-        f"<@{f['usuario_a']}> {status_a} · <@{f['usuario_b']}> {status_b}\n"
-        "-# Até 23:59."
+        "### Acender o Fogo\n"
+        f"{marca_a} <@{f['usuario_a']}>\n"
+        f"{marca_b} <@{f['usuario_b']}>\n"
+        f"-# {seq}Até {hora.rotulo_fim()}"
     ]
 
 
@@ -180,7 +211,7 @@ def cartao_fogo_aceso(
             blocos.append(
                 "O Fogo ainda não tem nome."
             )
-    fim = "-# Volte às 00:00."
+    fim = f"-# Volte às {hora.rotulo()}."
     blocos.append(f"{fim}\n{rodape}" if rodape else fim)
 
     return CartaoFogo(*blocos, cor=COR_FOGO, botoes=botoes)
@@ -203,6 +234,16 @@ def cartao_fogo_apagado(f, rodape: str | None = None) -> CartaoFogo:
             + (f"\n{rodape}" if rodape else "")
         ),
         cor=COR_FRIO,
+    )
+
+
+def cartao_fogo_removido(f) -> CartaoFogo:
+    """Painel antigo de um Fogo removido por um administrador."""
+    return CartaoFogo(
+        "## 🧊 Fogo removido",
+        f"{_dupla_txt(f)}{_linha_nome(f)}\n"
+        "Esse Fogo foi encerrado por um administrador.",
+        cor=COR_NEUTRA,
     )
 
 
