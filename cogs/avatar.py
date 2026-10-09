@@ -120,13 +120,18 @@ async def buscar_minecraft(nome: str) -> Optional[dict]:
     if not uuid or not nome_real:
         return None
 
-    # mc-heads fornece uma renderização pública do corpo da skin.
-    imagem = f"https://mc-heads.net/body/{quote(nome_real)}/right"
+    # Visage lê o perfil oficial e renderiza a skin completa: camadas externas,
+    # cape equipada e o modelo correto (Alex/slim ou Steve/classic).
+    imagem = f"https://visage.surgeplay.com/full/832/{uuid}"
+    imagem_fallback = (
+        f"https://crafatar.com/renders/body/{uuid}?overlay&scale=4"
+    )
     return {
         "plataforma": "Minecraft",
         "nome": str(nome_real),
         "exibicao": str(nome_real),
         "imagem": imagem,
+        "imagem_fallback": imagem_fallback,
         "perfil": f"https://namemc.com/profile/{quote(nome_real)}",
         "logo_id": MINECRAFT_LOGO_ID,
     }
@@ -424,15 +429,21 @@ class Avatar(commands.Cog):
             )
             return
 
-        try:
-            arquivo = await baixar_arquivo(
-                resultado["imagem"],
-                "poyo-avatar.png",
-            )
-            imagem_url = "attachment://poyo-avatar.png"
-        except (OSError, TimeoutError, discord.HTTPException):
-            arquivo = None
-            imagem_url = resultado["imagem"]
+        arquivo = None
+        imagem_url = resultado["imagem"]
+        urls_imagem = [
+            resultado["imagem"],
+            resultado.get("imagem_fallback"),
+        ]
+        for url in urls_imagem:
+            if not url:
+                continue
+            try:
+                arquivo = await baixar_arquivo(url, "poyo-avatar.png")
+                imagem_url = "attachment://poyo-avatar.png"
+                break
+            except (OSError, TimeoutError, discord.HTTPException):
+                continue
 
         await ctx.send(
             view=SkinView(resultado, imagem_url),
