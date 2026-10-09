@@ -498,23 +498,43 @@ class Avatar(commands.Cog):
         nome: str,
         buscar: callable,
     ) -> None:
+        if ctx.interaction is not None and not ctx.interaction.response.is_done():
+            await ctx.defer()
+
+        async def avisar(texto: str) -> None:
+            if ctx.interaction is not None:
+                await ctx.send(texto, ephemeral=True)
+            else:
+                await ctx.send(texto, delete_after=10)
+
         config = self.configuracoes.get(ctx.guild.id)
-        if config is None or not config.ativo or config.canal_id is None:
+        if config is None or config.canal_id is None:
+            await avisar(
+                "O Skin View ainda não foi configurado. Use `/skinviewpainel`."
+            )
+            return
+        if not config.ativo:
+            await avisar("O Skin View está desativado. Clique em **Ativar** no painel.")
             return
         if ctx.channel.id != config.canal_id:
+            await avisar(f"Use este comando em <#{config.canal_id}>.")
             return
 
-        try:
-            await ctx.message.delete()
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            pass
+        if ctx.message is not None:
+            try:
+                await ctx.message.delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
 
-        resultado = await buscar(nome.strip().lstrip("@"))
-        if resultado is None:
-            await ctx.send(
-                "Não encontrei esse usuário nessa plataforma.",
-                delete_after=10,
+        try:
+            resultado = await asyncio.wait_for(
+                buscar(nome.strip().lstrip("@")), timeout=25
             )
+        except asyncio.TimeoutError:
+            await avisar("A consulta do Minecraft demorou demais. Tente novamente.")
+            return
+        if resultado is None:
+            await avisar("Não encontrei esse usuário nessa plataforma.")
             return
 
         arquivo = None
@@ -527,11 +547,17 @@ class Avatar(commands.Cog):
             if not url:
                 continue
             try:
-                arquivo = await baixar_arquivo(url, "poyo-avatar.png")
+                arquivo = await asyncio.wait_for(
+                    baixar_arquivo(url, "poyo-avatar.png"), timeout=30
+                )
                 imagem_url = "attachment://poyo-avatar.png"
                 break
-            except (OSError, TimeoutError, discord.HTTPException):
+            except (OSError, TimeoutError, asyncio.TimeoutError, discord.HTTPException):
                 continue
+
+        if arquivo is None:
+            await avisar("Não consegui baixar a imagem desse avatar agora. Tente novamente.")
+            return
 
         await ctx.send(
             view=SkinView(resultado, imagem_url),
