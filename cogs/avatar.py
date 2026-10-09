@@ -120,12 +120,14 @@ async def buscar_minecraft(nome: str) -> Optional[dict]:
     if not uuid or not nome_real:
         return None
 
-    # Visage lê o perfil oficial e renderiza a skin completa: camadas externas,
-    # cape equipada e o modelo correto (Alex/slim ou Steve/classic).
-    imagem = f"https://visage.surgeplay.com/full/832/{uuid}"
-    imagem_fallback = (
-        f"https://crafatar.com/renders/body/{uuid}?overlay&scale=4"
+    # O Crafatar mantém uma pose corporal isométrica estável, semelhante ao
+    # cartão 3D do NameMC, e lê automaticamente camadas, capa e o modelo
+    # correto (Alex/slim ou Steve/classic) do perfil oficial.
+    imagem = (
+        f"https://crafatar.com/renders/body/{uuid}"
+        "?overlay&scale=4"
     )
+    imagem_fallback = f"https://visage.surgeplay.com/full/832/{uuid}"
     return {
         "plataforma": "Minecraft",
         "nome": str(nome_real),
