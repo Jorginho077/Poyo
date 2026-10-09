@@ -157,11 +157,12 @@ async def buscar_minecraft(nome: str) -> Optional[dict]:
         return None
 
     perfil_url = f"https://namemc.com/profile/{quote(nome_real)}"
-    imagem_namemc = await obter_render_namemc(perfil_url)
-    # Primeiro usa o renderizador encontrado no próprio NameMC. Se a página
-    # estiver protegida ou mudar o HTML, os fallbacks continuam funcionando.
-    imagem = imagem_namemc or (
-        f"https://mc-heads.net/body/{quote(nome_real)}/right"
+    # Render pronto, com pose de caminhada, capa, camadas da skin e detecção
+    # automática dos braços Alex (slim) ou Steve (classic). O bot não altera
+    # a imagem: apenas baixa o PNG e o envia como anexo.
+    imagem = (
+        f"https://skinrender.dev/render/{uuid}/body"
+        "?pose=walk&frame=0.25&size=832&capeAngle=25"
     )
     imagem_fallback = (
         f"https://mc-api.io/render/FULL/{quote(nome_real)}"
