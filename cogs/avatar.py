@@ -456,42 +456,6 @@ class Avatar(commands.Cog):
         preparar_banco_skinview()
         self.configuracoes = carregar_configuracoes_skinview()
 
-    @commands.hybrid_command(
-        name="skinviewpainel",
-        description="Configura o canal de consulta de skins.",
-        extras={
-            "categoria": "Utilidades",
-            "uso": ",skinviewpainel",
-            "descricao": "Configura o canal para consultar skins.",
-        },
-    )
-    @commands.guild_only()
-    @commands.has_permissions(manage_guild=True)
-    @commands.bot_has_permissions(send_messages=True, read_message_history=True)
-    async def skinviewpainel(self, ctx: commands.Context) -> None:
-        try:
-            await ctx.message.delete()
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            pass
-
-        config = self.configuracoes.setdefault(
-            ctx.guild.id, ConfiguracaoSkin()
-        )
-        try:
-            arquivo = await baixar_arquivo(
-                BANNER_URL,
-                "poyo-skinview-banner.gif",
-            )
-            banner_url = PAINEL_BANNER_ATTACHMENT
-        except (OSError, TimeoutError, discord.HTTPException):
-            arquivo = None
-            banner_url = BANNER_URL
-
-        config.painel = await ctx.send(
-            view=PainelSkin(config, ctx.author.id, banner_url),
-            file=arquivo,
-        )
-
     async def _enviar_skin(
         self,
         ctx: commands.Context,
@@ -506,19 +470,6 @@ class Avatar(commands.Cog):
                 await ctx.send(texto, ephemeral=True)
             else:
                 await ctx.send(texto, delete_after=10)
-
-        config = self.configuracoes.get(ctx.guild.id)
-        if config is None or config.canal_id is None:
-            await avisar(
-                "O Skin View ainda não foi configurado. Use `/skinviewpainel`."
-            )
-            return
-        if not config.ativo:
-            await avisar("O Skin View está desativado. Clique em **Ativar** no painel.")
-            return
-        if ctx.channel.id != config.canal_id:
-            await avisar(f"Use este comando em <#{config.canal_id}>.")
-            return
 
         if ctx.message is not None:
             try:
