@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import re
 from dataclasses import dataclass
+from html import unescape
 from typing import Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -106,6 +108,40 @@ async def buscar_roblox(nome: str) -> Optional[dict]:
     }
 
 
+async def obter_render_namemc(perfil_url: str) -> Optional[str]:
+    """Localiza no perfil do NameMC a URL do render 3D usado por ele."""
+    def baixar_pagina() -> str:
+        pedido = Request(
+            perfil_url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (compatible; Poyo-Discord-Bot/1.0)"
+                )
+            },
+        )
+        with urlopen(pedido, timeout=15) as resposta:
+            return resposta.read().decode("utf-8", errors="replace")
+
+    try:
+        pagina = await asyncio.to_thread(baixar_pagina)
+    except (HTTPError, URLError, TimeoutError, OSError):
+        return None
+
+    pagina = unescape(pagina).replace("\\/", "/")
+    urls = re.findall(
+        r"https?://(?:render\.namemc\.com|s\.namemc\.com)/[^\"'<>\s]+",
+        pagina,
+        flags=re.IGNORECASE,
+    )
+    renderizadores = [
+        url.rstrip(".,);]")
+        for url in urls
+        if "/3d/" in url.lower()
+        and ("body" in url.lower() or "skin" in url.lower())
+    ]
+    return renderizadores[0] if renderizadores else None
+
+
 async def buscar_minecraft(nome: str) -> Optional[dict]:
     try:
         perfil = await requisicao_json(
@@ -120,9 +156,13 @@ async def buscar_minecraft(nome: str) -> Optional[dict]:
     if not uuid or not nome_real:
         return None
 
-    # Usa diretamente a imagem corporal gerada pelo nome, sem reconstruir,
-    # recortar ou reposicionar a skin no bot.
-    imagem = f"https://mc-heads.net/body/{quote(nome_real)}/right"
+    perfil_url = f"https://namemc.com/profile/{quote(nome_real)}"
+    imagem_namemc = await obter_render_namemc(perfil_url)
+    # Primeiro usa o renderizador encontrado no próprio NameMC. Se a página
+    # estiver protegida ou mudar o HTML, os fallbacks continuam funcionando.
+    imagem = imagem_namemc or (
+        f"https://mc-heads.net/body/{quote(nome_real)}/right"
+    )
     imagem_fallback = (
         f"https://mc-api.io/render/FULL/{quote(nome_real)}"
         "/JAVA?size=832"
@@ -133,7 +173,7 @@ async def buscar_minecraft(nome: str) -> Optional[dict]:
         "exibicao": str(nome_real),
         "imagem": imagem,
         "imagem_fallback": imagem_fallback,
-        "perfil": f"https://namemc.com/profile/{quote(nome_real)}",
+        "perfil": perfil_url,
         "logo_id": MINECRAFT_LOGO_ID,
     }
 
