@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,7 @@ class ConfiguracaoJoin:
     titulo: str = "Boas-vindas"
     descricao: str = "Olá {user}, seja bem-vindo(a)!"
     gif_url: Optional[str] = None
+    tempo_sumir: Optional[int] = None
     ativo: bool = False
     painel: Optional[discord.Message] = None
     painel_id: Optional[int] = None
@@ -60,6 +62,24 @@ def normalizar_url_visual(url: str) -> str:
             caminho = caminho.split("?", 1)[0].split("#", 1)[0]
             return f"https://raw.githubusercontent.com/{repositorio}/{caminho}"
     return url
+
+
+def interpretar_tempo_sumir(valor: str) -> Optional[int]:
+    """Retorna segundos; None significa que a mensagem nunca some."""
+    texto = valor.strip().lower()
+    if texto in {"", "nunca", "never", "0"}:
+        return None
+
+    correspondencia = re.fullmatch(r"(\d+)\s*([smhd])", texto)
+    if correspondencia is None:
+        raise ValueError("Use `nunca`, `20s`, `30s`, `1m`, `1h` ou `1d`.")
+
+    quantidade = int(correspondencia.group(1))
+    multiplicadores = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    segundos = quantidade * multiplicadores[correspondencia.group(2)]
+    if not 1 <= segundos <= 7 * 86400:
+        raise ValueError("Escolha um tempo entre `1s` e `7d`, ou use `nunca`.")
+    return segundos
 
 
 class WelcomeCard(discord.ui.LayoutView):
@@ -117,6 +137,11 @@ class JoinPanel(discord.ui.LayoutView):
         if len(config.descricao) > 180:
             preview += "..."
         gif_status = "definido" if config.gif_url else "não definido"
+        tempo_status = (
+            "nunca"
+            if config.tempo_sumir is None
+            else f"{config.tempo_sumir}s"
+        )
 
         botao_canal = discord.ui.Button(
             label="Canal da mensagem",
@@ -143,6 +168,12 @@ class JoinPanel(discord.ui.LayoutView):
         botao_mensagem.callback = self.abrir_modal
         botao_ativar.callback = self.ativar
         botao_testar.callback = self.testar
+        botao_tempo = discord.ui.Button(
+            label="Tempo após Sumir",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"join:tempo:{autor_id}",
+        )
+        botao_tempo.callback = self.configurar_tempo
 
         self.add_item(
             discord.ui.Container(
@@ -152,10 +183,12 @@ class JoinPanel(discord.ui.LayoutView):
                     f"Status: {status}\n"
                     f"Título: {config.titulo}\n"
                     f"Mensagem: {preview}\n"
-                    f"GIF: {gif_status}"
+                    f"GIF: {gif_status}\n"
+                    f"Tempo após sumir: {tempo_status}"
                 ),
                 discord.ui.ActionRow(botao_canal, botao_mensagem),
                 discord.ui.ActionRow(botao_ativar, botao_testar),
+                discord.ui.ActionRow(botao_tempo),
             )
         )
 
@@ -248,6 +281,10 @@ class JoinPanel(discord.ui.LayoutView):
                 MensagemJoinModal(self)
             )
 
+    async def configurar_tempo(self, interaction: discord.Interaction) -> None:
+        if await self.autorizado(interaction):
+            await interaction.response.send_modal(TempoSumirModal(self))
+
     async def ativar(self, interaction: discord.Interaction) -> None:
         if not await self.autorizado(interaction):
             return
@@ -292,7 +329,7 @@ class JoinPanel(discord.ui.LayoutView):
 
         arquivo, gif_anexo = await preparar_gif(self.config)
         try:
-            await canal.send(
+            mensagem = await canal.send(
                 view=WelcomeCard(
                     self.config,
                     interaction.user,
@@ -304,6 +341,9 @@ class JoinPanel(discord.ui.LayoutView):
                     roles=True,
                     everyone=False,
                 ),
+            )
+            asyncio.create_task(
+                apagar_depois(mensagem, self.config.tempo_sumir)
             )
         except (discord.Forbidden, discord.HTTPException):
             await interaction.response.send_message(
@@ -391,6 +431,35 @@ class MensagemJoinModal(discord.ui.Modal, title="Mensagem de boas-vindas"):
         await self.painel.atualizar()
 
 
+class TempoSumirModal(discord.ui.Modal, title="Tempo após sumir"):
+    tempo = discord.ui.TextInput(
+        label="Tempo",
+        placeholder="nunca, 20s, 30s, 1m, 1h ou 1d",
+        max_length=20,
+        required=True,
+    )
+
+    def __init__(self, painel: JoinPanel) -> None:
+        super().__init__(timeout=120)
+        self.painel = painel
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        try:
+            segundos = interpretar_tempo_sumir(str(self.tempo.value))
+        except ValueError as erro:
+            await interaction.response.send_message(str(erro), ephemeral=True)
+            return
+
+        self.painel.config.tempo_sumir = segundos
+        await self.painel.cog.salvar(self.painel.config)
+        descricao = "nunca" if segundos is None else f"{segundos} segundos"
+        await interaction.response.send_message(
+            f"Tempo após sumir salvo: **{descricao}**.",
+            ephemeral=True,
+        )
+        await self.painel.atualizar()
+
+
 async def preparar_gif(
     config: ConfiguracaoJoin,
 ) -> tuple[Optional[discord.File], bool]:
@@ -406,6 +475,19 @@ async def preparar_gif(
         return None, False
 
     return arquivo, True
+
+
+async def apagar_depois(
+    mensagem: discord.Message,
+    segundos: Optional[int],
+) -> None:
+    if segundos is None:
+        return
+    await asyncio.sleep(segundos)
+    try:
+        await mensagem.delete()
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        pass
 
 
 class JoinSystem(commands.Cog):
@@ -424,6 +506,7 @@ class JoinSystem(commands.Cog):
                     titulo TEXT NOT NULL,
                     descricao TEXT NOT NULL,
                     gif_url TEXT,
+                    tempo_sumir INTEGER,
                     ativo INTEGER NOT NULL DEFAULT 0,
                     painel_id INTEGER,
                     painel_canal_id INTEGER
@@ -440,6 +523,10 @@ class JoinSystem(commands.Cog):
                 banco.execute(
                     "ALTER TABLE join_config ADD COLUMN gif_url TEXT"
                 )
+            if "tempo_sumir" not in colunas:
+                banco.execute(
+                    "ALTER TABLE join_config ADD COLUMN tempo_sumir INTEGER"
+                )
             banco.commit()
 
     def _ler_banco(self) -> dict[int, ConfiguracaoJoin]:
@@ -448,7 +535,7 @@ class JoinSystem(commands.Cog):
             linhas = banco.execute(
                 """
                 SELECT guild_id, autor_id, canal_id, titulo, descricao,
-                       gif_url, ativo, painel_id, painel_canal_id
+                       gif_url, tempo_sumir, ativo, painel_id, painel_canal_id
                 FROM join_config
                 """
             ).fetchall()
@@ -461,6 +548,7 @@ class JoinSystem(commands.Cog):
                 titulo,
                 descricao,
                 gif_url,
+                tempo_sumir,
                 ativo,
                 painel_id,
                 painel_canal_id,
@@ -472,6 +560,9 @@ class JoinSystem(commands.Cog):
                 titulo=str(titulo),
                 descricao=str(descricao),
                 gif_url=str(gif_url) if gif_url else None,
+                tempo_sumir=(
+                    int(tempo_sumir) if tempo_sumir is not None else None
+                ),
                 ativo=bool(ativo),
                 painel_id=(
                     int(painel_id) if painel_id is not None else None
@@ -490,14 +581,15 @@ class JoinSystem(commands.Cog):
                 """
                 INSERT INTO join_config (
                     guild_id, autor_id, canal_id, titulo, descricao, gif_url,
-                    ativo, painel_id, painel_canal_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    tempo_sumir, ativo, painel_id, painel_canal_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(guild_id) DO UPDATE SET
                     autor_id=excluded.autor_id,
                     canal_id=excluded.canal_id,
                     titulo=excluded.titulo,
                     descricao=excluded.descricao,
                     gif_url=excluded.gif_url,
+                    tempo_sumir=excluded.tempo_sumir,
                     ativo=excluded.ativo,
                     painel_id=excluded.painel_id,
                     painel_canal_id=excluded.painel_canal_id
@@ -509,6 +601,7 @@ class JoinSystem(commands.Cog):
                     config.titulo,
                     config.descricao,
                     config.gif_url,
+                    config.tempo_sumir,
                     int(config.ativo),
                     config.painel_id,
                     config.painel_canal_id,
@@ -574,7 +667,7 @@ class JoinSystem(commands.Cog):
 
         arquivo, gif_anexo = await preparar_gif(config)
         try:
-            await canal.send(
+            mensagem = await canal.send(
                 view=WelcomeCard(config, membro, gif_anexo=gif_anexo),
                 file=arquivo,
                 allowed_mentions=discord.AllowedMentions(
@@ -582,6 +675,9 @@ class JoinSystem(commands.Cog):
                     roles=True,
                     everyone=False,
                 ),
+            )
+            asyncio.create_task(
+                apagar_depois(mensagem, config.tempo_sumir)
             )
         except (discord.Forbidden, discord.HTTPException):
             return
