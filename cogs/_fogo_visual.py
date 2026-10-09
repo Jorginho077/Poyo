@@ -41,6 +41,26 @@ ENFEITE_NOME = "fogo_brilho.gif"
 ENFEITE_CAMINHO = Path(__file__).resolve().parent.parent / "assets" / ENFEITE_NOME
 
 
+# GIF de brilhos azul-gelo, usado no cartão "Fogo apagado".
+GELO_NOME = "fogo_gelo.gif"
+GELO_CAMINHO = Path(__file__).resolve().parent.parent / "assets" / GELO_NOME
+
+
+def gelo_existe() -> bool:
+    return GELO_CAMINHO.is_file()
+
+
+def arquivo_gelo() -> discord.File:
+    """Um discord.File novo do GIF de gelo (cada envio gasta o seu)."""
+    return discord.File(GELO_CAMINHO, filename=GELO_NOME)
+
+
+def chamas(sequencia: int) -> str:
+    """Mais dias, mais chamas: 🔥 → 🔥🔥 (7+) → 🔥🔥🔥 (30+) → 🔥🔥🔥🔥 (100+)."""
+    n = 1 + (sequencia >= 7) + (sequencia >= 30) + (sequencia >= 100)
+    return EMOJI_FOGO * n
+
+
 def enfeite_existe() -> bool:
     return ENFEITE_CAMINHO.is_file()
 
@@ -93,6 +113,7 @@ class CartaoFogo(discord.ui.LayoutView):
             itens.append(discord.ui.ActionRow(*botoes))
 
         self.add_item(discord.ui.Container(*itens))
+        self.enfeite = bool(midia)  # o envio precisa anexar o GIF
 
 
 # ----------------------------------------------------------------- textos
@@ -168,7 +189,7 @@ def frase_chama(sequencia: int) -> str:
     if sequencia <= 1:
         return "A primeira chama pegou!"
     if sequencia < 7:
-        return "A chama está crescendo!"
+        return ""  # sem frase nessa faixa
     if sequencia < 30:
         return "O fogo está firme!"
     return "O fogo está queimando forte!"
@@ -180,7 +201,7 @@ def blocos_painel(f) -> list[str]:
     marca_b = "✅" if f["b_acendeu"] else "⬜"
     seq = f"Sequência de {dias(f['sequencia'])} · " if f["sequencia"] else ""
     return [
-        "### Acender o Fogo\n"
+        f"### {EMOJI_FOGO} Acender o Fogo ✨\n"
         f"{marca_a} <@{f['usuario_a']}>\n"
         f"{marca_b} <@{f['usuario_b']}>\n"
         f"-# {seq}Até {hora.rotulo_fim()}"
@@ -191,15 +212,17 @@ def cartao_fogo_aceso(
     f,
     botoes: Sequence[discord.ui.Item] = (),
     rodape: str | None = None,
+    midia: str | None = None,
 ) -> CartaoFogo:
-    blocos = [
-        f"## {EMOJI_FOGO_FELIZ} Fogo aceso!",
-        (
-            f"{_dupla_txt(f)}{_linha_nome(f)}\n"
-            f"**Sequência:** {dias(f['sequencia'])}\n\n"
-            f"{frase_chama(f['sequencia'])}"
-        ),
-    ]
+    frase = frase_chama(f["sequencia"])
+    corpo = (
+        f"{_dupla_txt(f)}{_linha_nome(f)}\n"
+        f"{chamas(f['sequencia'])} **Sequência:** {dias(f['sequencia'])}\n"
+        f"-# Volte às {hora.rotulo()}."  # pequeno, logo abaixo da sequência
+    )
+    if frase:
+        corpo += f"\n\n{frase}"
+    blocos = [f"## {EMOJI_FOGO_FELIZ} Fogo aceso! ✨", corpo]
 
     if botoes:  # o nome está liberado e o Fogo ainda não tem um
         if f["sequencia"] == NOME_MIN_DIAS:
@@ -208,22 +231,22 @@ def cartao_fogo_aceso(
                 "Vocês desbloquearam o **nome do Fogo**!"
             )
         else:
-            blocos.append(
-                "O Fogo ainda não tem nome."
-            )
-    fim = f"-# Volte às {hora.rotulo()}."
-    blocos.append(f"{fim}\n{rodape}" if rodape else fim)
+            blocos.append("O Fogo ainda não tem nome.")
+    if rodape:
+        blocos.append(rodape)
 
-    return CartaoFogo(*blocos, cor=COR_FOGO, botoes=botoes)
+    return CartaoFogo(*blocos, cor=COR_FOGO, botoes=botoes, midia=midia)
 
 
-def cartao_fogo_apagado(f, rodape: str | None = None) -> CartaoFogo:
+def cartao_fogo_apagado(
+    f, rodape: str | None = None, midia: str | None = None
+) -> CartaoFogo:
     if f["sequencia"] > 0:
-        fim = f"A sequência de {dias(f['sequencia'])} acabou."
+        fim = f"A sequência de {dias(f['sequencia'])} chegou ao fim."
     else:
         fim = "Apagou antes de começar."
     return CartaoFogo(
-        f"## {EMOJI_FOGO_TRISTE} O fogo apagou...",
+        f"## {EMOJI_FOGO_TRISTE} O fogo apagou... 🧊",
         (
             f"{_dupla_txt(f)}{_linha_nome(f)}\n"
             f"{fim}\n\n"
@@ -234,6 +257,7 @@ def cartao_fogo_apagado(f, rodape: str | None = None) -> CartaoFogo:
             + (f"\n{rodape}" if rodape else "")
         ),
         cor=COR_FRIO,
+        midia=midia,
     )
 
 

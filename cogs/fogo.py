@@ -151,14 +151,10 @@ AVISO_DM_FECHADA = (
 
 def _rodape(client: discord.Client, fogo: sqlite3.Row, modo: str) -> Optional[str]:
     """Linha pequena no fim do painel.
-    `modo`: 'dm', 'canal' (DM fechada), 'servidor' (painel compartilhado) ou 'legado'."""
+    `modo`: 'dm', 'canal' (DM fechada), 'servidor' (painel compartilhado) ou 'legado'.
+    Só o modo 'canal' tem rodapé (aviso de DM fechada); a DM não mostra mais o servidor."""
     if modo == "canal":
         return AVISO_DM_FECHADA
-    if modo == "dm":
-        # Na DM não há contexto: diz de qual servidor é o Fogo.
-        guild = client.get_guild(fogo["guild_id"])
-        if guild is not None:
-            return f"-# Servidor: **{discord.utils.escape_markdown(guild.name)}**"
     return None
 
 
@@ -178,6 +174,7 @@ def _view_do_dia(
             fogo,
             botoes=_botoes_nome(fogo),
             rodape=_rodape(client, fogo, modo) if modo == "dm" else None,
+            midia=visual.ENFEITE_NOME if enfeite and visual.enfeite_existe() else None,
         )
     return PainelView(fogo, _rodape(client, fogo, modo), enfeite)
 
@@ -188,6 +185,19 @@ def _envio(client: discord.Client, fogo: sqlite3.Row, modo: str) -> dict:
     dados: dict = {"view": view}
     if getattr(view, "enfeite", False):
         dados["files"] = [visual.arquivo_enfeite()]
+    return dados
+
+
+def _envio_apagado(fogo: sqlite3.Row) -> dict:
+    """Argumentos do aviso "Fogo apagado": o cartão e o GIF azul-gelo."""
+    usar = visual.gelo_existe()
+    dados: dict = {
+        "view": visual.cartao_fogo_apagado(
+            fogo, midia=visual.GELO_NOME if usar else None
+        )
+    }
+    if usar:
+        dados["files"] = [visual.arquivo_gelo()]
     return dados
 
 
@@ -259,7 +269,7 @@ class PainelView(visual.CartaoFogo):
         usar_gif = enfeite and visual.enfeite_existe()
         super().__init__(
             *blocos,
-            botoes=[AcenderBotao(fogo["id"])],
+            botoes=[AcenderBotao(fogo["id"]), *_botoes_nome(fogo)],
             midia=visual.ENFEITE_NOME if usar_gif else None,
         )
         self.enfeite = usar_gif
@@ -852,11 +862,7 @@ class Fogo(commands.Cog):
             for user_id in (fogo["usuario_a"], fogo["usuario_b"]):
                 try:
                     usuario = await self._usuario(user_id)
-                    await usuario.send(
-                        view=visual.cartao_fogo_apagado(
-                            fogo, rodape=_rodape(self.bot, fogo, "dm")
-                        )
-                    )
+                    await usuario.send(**_envio_apagado(fogo))
                 except (discord.Forbidden, discord.HTTPException):
                     sem_dm.append(user_id)
 
@@ -870,7 +876,7 @@ class Fogo(commands.Cog):
                 )
                 try:
                     await canal.send(
-                        view=visual.cartao_fogo_apagado(fogo),
+                        **_envio_apagado(fogo),
                         allowed_mentions=discord.AllowedMentions(
                             users=[discord.Object(u) for u in marcar]
                         ),
