@@ -120,14 +120,16 @@ async def buscar_minecraft(nome: str) -> Optional[dict]:
     if not uuid or not nome_real:
         return None
 
-    # O Crafatar mantém uma pose corporal isométrica estável, semelhante ao
-    # cartão 3D do NameMC, e lê automaticamente camadas, capa e o modelo
-    # correto (Alex/slim ou Steve/classic) do perfil oficial.
+    # O render FULL mantém a skin real em corpo inteiro, com a pose
+    # isométrica do visualizador do NameMC, camadas externas e modelo slim ou
+    # classic conforme o perfil do jogador.
     imagem = (
+        f"https://mc-api.io/render/FULL/{quote(nome_real)}/JAVA?size=832"
+    )
+    imagem_fallback = (
         f"https://crafatar.com/renders/body/{uuid}"
         "?overlay&scale=4"
     )
-    imagem_fallback = f"https://visage.surgeplay.com/full/832/{uuid}"
     return {
         "plataforma": "Minecraft",
         "nome": str(nome_real),
