@@ -4,8 +4,10 @@ import asyncio
 import io
 import json
 import re
+import sqlite3
 from dataclasses import dataclass
 from html import unescape
+from pathlib import Path
 from typing import Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -34,6 +36,7 @@ BANNER_URL = (
 PAINEL_BANNER_ATTACHMENT = "attachment://poyo-skinview-banner.gif"
 ROBLOX_LOGO_ID = 1509476102890979409
 MINECRAFT_LOGO_ID = 1509476073904148582
+DATABASE_PATH = Path(__file__).resolve().parent.parent / "avatar.sqlite3"
 
 
 @dataclass
@@ -198,6 +201,46 @@ def texto_curtidas(total: int) -> str:
     return f"{total} {'Curtida' if total == 1 else 'Curtidas'}"
 
 
+def preparar_banco_skinview() -> None:
+    with sqlite3.connect(DATABASE_PATH) as banco:
+        banco.execute(
+            """
+            CREATE TABLE IF NOT EXISTS skinview_config (
+                guild_id INTEGER PRIMARY KEY,
+                canal_id INTEGER,
+                ativo INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+
+
+def carregar_configuracoes_skinview() -> dict[int, ConfiguracaoSkin]:
+    configuracoes: dict[int, ConfiguracaoSkin] = {}
+    with sqlite3.connect(DATABASE_PATH) as banco:
+        for guild_id, canal_id, ativo in banco.execute(
+            "SELECT guild_id, canal_id, ativo FROM skinview_config"
+        ):
+            configuracoes[int(guild_id)] = ConfiguracaoSkin(
+                canal_id=int(canal_id) if canal_id is not None else None,
+                ativo=bool(ativo),
+            )
+    return configuracoes
+
+
+def salvar_configuracao_skinview(guild_id: int, config: ConfiguracaoSkin) -> None:
+    with sqlite3.connect(DATABASE_PATH) as banco:
+        banco.execute(
+            """
+            INSERT INTO skinview_config (guild_id, canal_id, ativo)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                canal_id = excluded.canal_id,
+                ativo = excluded.ativo
+            """,
+            (guild_id, config.canal_id, int(config.ativo)),
+        )
+
+
 class PainelSkin(discord.ui.LayoutView):
     def __init__(
         self,
@@ -313,6 +356,7 @@ class PainelSkin(discord.ui.LayoutView):
 
         self.config.canal_id = canal.id
         self.config.ativo = False
+        salvar_configuracao_skinview(interaction.guild.id, self.config)
         await interaction.followup.send(
             f"Canal definido: {canal.mention}", ephemeral=True
         )
@@ -328,6 +372,7 @@ class PainelSkin(discord.ui.LayoutView):
             return
 
         self.config.ativo = True
+        salvar_configuracao_skinview(interaction.guild.id, self.config)
         await interaction.response.send_message(
             f"Skin View ativado em <#{self.config.canal_id}>.",
             ephemeral=True,
@@ -408,7 +453,8 @@ class SkinView(discord.ui.LayoutView):
 class Avatar(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self.configuracoes: dict[int, ConfiguracaoSkin] = {}
+        preparar_banco_skinview()
+        self.configuracoes = carregar_configuracoes_skinview()
 
     @commands.hybrid_command(
         name="skinviewpainel",
