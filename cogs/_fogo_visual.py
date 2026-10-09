@@ -55,11 +55,11 @@ class CartaoFogo(discord.ui.LayoutView):
         itens: list[discord.ui.Item] = []
         for indice, bloco in enumerate(blocos):
             if indice:
-                itens.append(discord.ui.Separator())
+                itens.append(discord.ui.Separator(visible=False))
             itens.append(discord.ui.TextDisplay(bloco))
 
         if botoes:
-            itens.append(discord.ui.Separator())
+            itens.append(discord.ui.Separator(visible=False))
             itens.append(discord.ui.ActionRow(*botoes))
 
         self.add_item(discord.ui.Container(*itens, accent_colour=cor))
@@ -83,9 +83,9 @@ def texto_convite(de: str, para: str) -> list[str]:
 
 def cartao_fogo_criado(a: str, b: str) -> CartaoFogo:
     return CartaoFogo(
-        f"## {EMOJI_CORACAO} Fogo criado!",
+        f"# {EMOJI_CORACAO} Fogo criado!",
         (
-            f"{a} + {b}\n"
+            f"## {a} + {b}\n"
             f"{EMOJI_FOGO} **Sequência:** {dias(0)}\n\n"
             "Olhem a **DM**: o botão **Acender o Fogo** já chegou. "
             "Quando os dois clicarem, a sequência começa."
@@ -147,22 +147,12 @@ def frase_chama(sequencia: int) -> str:
 def blocos_painel(f) -> list[str]:
     """Textos do painel do dia (o botão é montado pelo cog)."""
     a_ok, b_ok = bool(f["a_acendeu"]), bool(f["b_acendeu"])
-    pendente = f"{EMOJI_ESPERA} falta acender"
-    status_a = "✅ acendeu" if a_ok else pendente
-    status_b = "✅ acendeu" if b_ok else pendente
-    seq = (
-        f"**Sequência:** {dias(f['sequencia'])}"
-        if f["sequencia"]
-        else "**Sequência:** ainda não começou"
-    )
+    status_a = "✅" if a_ok else EMOJI_ESPERA
+    status_b = "✅" if b_ok else EMOJI_ESPERA
     return [
-        f"## {EMOJI_FOGO_FELIZ} Hora de acender o Fogo!",
-        (
-            f"{_dupla_txt(f)}{_linha_nome(f)}\n{seq}\n\n"
-            f"<@{f['usuario_a']}>: {status_a}\n"
-            f"<@{f['usuario_b']}>: {status_b}"
-        ),
-        "-# Acendam até 23:59, ou o Fogo apaga.",
+        f"{EMOJI_FOGO_FELIZ} **Acendam o Fogo!**\n"
+        f"<@{f['usuario_a']}> {status_a} · <@{f['usuario_b']}> {status_b}\n"
+        "-# Até 23:59."
     ]
 
 

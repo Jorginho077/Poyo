@@ -68,9 +68,9 @@ class ConviteView(discord.ui.LayoutView):
         itens: list[discord.ui.Item] = []
         for indice, bloco in enumerate(blocos):
             if indice:
-                itens.append(discord.ui.Separator())
+                itens.append(discord.ui.Separator(visible=False))
             itens.append(discord.ui.TextDisplay(bloco))
-        itens.append(discord.ui.Separator())
+        itens.append(discord.ui.Separator(visible=False))
         itens.append(discord.ui.ActionRow(aceitar, recusar))
 
         self.add_item(
