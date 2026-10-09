@@ -4,8 +4,8 @@ Etapa 1: convite, aceitar/recusar e criação do Fogo.
 Etapa 2: ciclo diário (00:00), botão "Acender o Fogo", sequência e Fogo apagado.
 Etapa 3: nome do Fogo (liberado aos 10 dias, sugerido por um e aceito pelo par).
 Etapa 4: Lendários do Fogo (cogs/fogo_lendarios.py); aqui só há o aviso do 500º dia.
-Etapa 5: o Poyo (feliz / com frio) aparece ao lado do texto dos cartões; veja
-cogs/fogo_emojis.py e cogs/_fogo_visual.py.
+Etapa 5: o Poyo (feliz / com frio) aparece como emoji nos títulos dos cartões;
+veja cogs/fogo_emojis.py e cogs/_fogo_visual.py.
 Etapa 4.1: os avisos diários (painel, Fogo aceso, Fogo apagado) vão para a DM de
 cada pessoa da dupla, e não mais para o canal. Se a DM estiver fechada, aquela
 pessoa recebe o painel no canal do Fogo (marcando só ela).
@@ -81,7 +81,7 @@ class ConviteView(discord.ui.LayoutView):
         if interaction.user.id == self.para_id:
             return True
         await interaction.response.send_message(
-            f"Só <@{self.para_id}> pode responder a esse convite.",
+            f"Só <@{self.para_id}> pode responder.",
             ephemeral=True,
         )
         return False
@@ -106,7 +106,7 @@ class ConviteView(discord.ui.LayoutView):
             novo = visual.cartao_ja_existe(de, para)
         else:  # ja_resolvido
             await interaction.response.send_message(
-                "Esse convite já foi respondido.", ephemeral=True
+                "Convite já respondido.", ephemeral=True
             )
             return
 
@@ -133,7 +133,7 @@ class ConviteView(discord.ui.LayoutView):
             novo = visual.cartao_convite_expirado(de, para)
         else:
             await interaction.response.send_message(
-                "Esse convite já foi respondido.", ephemeral=True
+                "Convite já respondido.", ephemeral=True
             )
             return
 
@@ -144,8 +144,7 @@ class ConviteView(discord.ui.LayoutView):
 # ------------------------------------------------------------------- painel
 
 AVISO_DM_FECHADA = (
-    "-# 💌 Sua DM está fechada, então o painel veio para o canal. "
-    "Abra suas DMs com o Poyo para receber o aviso por lá!"
+    "-# 💌 Sua DM está fechada. Abra as DMs com o Poyo para receber os avisos lá."
 )
 
 
@@ -226,7 +225,6 @@ class PainelView(visual.CartaoFogo):
             *blocos,
             cor=visual.COR_FOGO,
             botoes=[AcenderBotao(fogo["id"])],
-            imagem=visual.IMG_FELIZ,
         )
 
 
@@ -267,10 +265,10 @@ async def acender(interaction: discord.Interaction, fogo_id: int) -> None:
                     print(f"Fogo {fogo_id}: erro ao anunciar marco: {erro!r}")
     else:
         avisos = {
-            "nao_participa": "Esse Fogo não é seu! Só a dupla pode acender.",
-            "ja_acendeu": "Você já acendeu hoje! Agora é esperar o outro.",
-            "dia_encerrado": "Esse painel é de um dia que já passou.",
-            "inativo": "Esse Fogo já se apagou...",
+            "nao_participa": "Esse Fogo não é seu.",
+            "ja_acendeu": "Você já acendeu. Falta o outro.",
+            "dia_encerrado": "Esse painel é de outro dia.",
+            "inativo": "Esse Fogo já apagou.",
         }
         await interaction.response.send_message(
             avisos.get(resultado, "Não consegui acender agora."),
@@ -314,7 +312,7 @@ class NomeModal(discord.ui.Modal, title="Nome do Fogo"):
 
         if status != "ok":
             avisos = {
-                "inativo": "Esse Fogo já se apagou...",
+                "inativo": "Esse Fogo já apagou.",
                 "nao_participa": "Esse Fogo não é seu!",
                 "bloqueado": "Esse Fogo ainda não chegou aos "
                 f"{nomes.NOME_MIN_DIAS} dias.",
@@ -356,14 +354,13 @@ class NomeModal(discord.ui.Modal, title="Nome do Fogo"):
             await canal.send(view=cartao, allowed_mentions=mencoes)
         except (discord.Forbidden, discord.HTTPException):
             await interaction.followup.send(
-                "Não consegui postar a sugestão no canal do Fogo. "
-                "Tente com `,nomefogo` direto no servidor.",
+                "Não consegui postar no canal. Use `,nomefogo` no servidor.",
                 ephemeral=True,
             )
             return
         await interaction.followup.send(
-            f"Sugestão enviada em {canal.mention}! "
-            f"Agora é só esperar <@{parceiro}> aceitar. 🔥",
+            f"Sugestão enviada em {canal.mention}. "
+            f"Aguarde <@{parceiro}> aceitar. 🔥",
             ephemeral=True,
         )
 
@@ -409,14 +406,14 @@ class NomeBotao(
         fogo = await asyncio.to_thread(db.obter_fogo, self.fogo_id)
 
         if fogo is None or not fogo["ativo"]:
-            aviso = "Esse Fogo já se apagou..."
+            aviso = "Esse Fogo já apagou."
         elif interaction.user.id not in (fogo["usuario_a"], fogo["usuario_b"]):
-            aviso = "Só a dupla do Fogo pode escolher o nome."
+            aviso = "Só a dupla pode escolher o nome."
         elif fogo["sequencia"] < nomes.NOME_MIN_DIAS:
             faltam = nomes.NOME_MIN_DIAS - fogo["sequencia"]
             aviso = (
-                f"O nome libera com {nomes.NOME_MIN_DIAS} dias de Fogo. "
-                f"Faltam {visual.dias(faltam)}!"
+                f"O nome libera com {nomes.NOME_MIN_DIAS} dias. "
+                f"Faltam {visual.dias(faltam)}."
             )
         else:
             await interaction.response.send_modal(NomeModal(self.fogo_id))
@@ -497,27 +494,25 @@ class RespostaNomeBotao(
         elif status == "expirada":
             await interaction.response.edit_message(
                 view=visual.cartao_proposta_encerrada(
-                    "Essa sugestão passou de 24 horas sem resposta."
+                    "Sugestão expirada (24 horas)."
                 )
             )
         elif status == "antiga":
             await interaction.response.edit_message(
                 view=visual.cartao_proposta_encerrada(
-                    "Essa sugestão já foi respondida ou foi substituída "
-                    "por outra."
+                    "Sugestão já respondida ou substituída."
                 )
             )
         elif status == "inativo":
             await interaction.response.edit_message(
                 view=visual.cartao_proposta_encerrada(
-                    "O Fogo se apagou antes de a sugestão ser respondida."
+                    "O Fogo apagou antes da resposta."
                 )
             )
         else:
             avisos = {
-                "proprio": "Quem sugeriu o nome não pode aceitar. "
-                "Aguarde seu par responder!",
-                "nao_participa": "Só a dupla do Fogo pode responder.",
+                "proprio": "Quem sugeriu não pode aceitar. Aguarde seu par.",
+                "nao_participa": "Só a dupla pode responder.",
             }
             await interaction.response.send_message(
                 avisos.get(status, "Não consegui responder agora."),
@@ -792,8 +787,8 @@ class Fogo(commands.Cog):
             "categoria": "Fogo",
             "uso": ",fogo @membro",
             "descricao": (
-                "Convida alguém para um Fogo, uma sequência de dias que "
-                "vocês dois reacendem juntos todo dia às 00:00."
+                "Convida alguém para um Fogo: uma sequência diária "
+                "que os dois acendem juntos."
             ),
         },
     )
@@ -808,7 +803,7 @@ class Fogo(commands.Cog):
             await self._aviso(
                 ctx,
                 "Fogo é coisa de dois",
-                "Você precisa chamar outra pessoa para acender o Fogo.",
+                "Chame outra pessoa.",
             )
             return
 
@@ -816,8 +811,7 @@ class Fogo(commands.Cog):
             await self._aviso(
                 ctx,
                 "Bots não acendem Fogo",
-                "Nem o Poyo consegue reacender fogo com um bot. "
-                "Chame uma pessoa!",
+                "Chame uma pessoa.",
             )
             return
 
@@ -828,8 +822,8 @@ class Fogo(commands.Cog):
             await self._aviso(
                 ctx,
                 "Vocês já têm um Fogo",
-                f"{autor.mention} + {membro.mention} já estão com um Fogo "
-                "ativo. Use `,fogos` para ver como ele está.",
+                f"{autor.mention} + {membro.mention} já têm um Fogo "
+                "ativo. Veja com `,fogos`.",
             )
             return
 
@@ -840,7 +834,7 @@ class Fogo(commands.Cog):
             await self._aviso(
                 ctx,
                 "Já existe um convite",
-                f"Já tem um convite aguardando resposta entre "
+                f"Já existe um convite entre "
                 f"{autor.mention} e {membro.mention}.",
             )
             return
@@ -873,8 +867,8 @@ class Fogo(commands.Cog):
             "categoria": "Fogo",
             "uso": ",nomefogo [@parceiro]",
             "descricao": (
-                "Com 10 dias de Fogo vocês podem dar um nome à sequência. "
-                "Um sugere e o outro aceita."
+                "Com 10 dias, deem um nome ao Fogo. "
+                "Um sugere, o outro aceita."
             ),
         },
     )
@@ -903,7 +897,7 @@ class Fogo(commands.Cog):
                 "Nenhum Fogo encontrado",
                 "Você não tem um Fogo ativo"
                 + (f" com {parceiro.mention}" if parceiro else "")
-                + ". Chame alguém com `,fogo @membro`!",
+                + ". Use `,fogo @membro`.",
             )
             return
 
@@ -921,8 +915,8 @@ class Fogo(commands.Cog):
             await self._aviso(
                 ctx,
                 "Ainda não liberou",
-                f"O nome do Fogo libera com {nomes.NOME_MIN_DIAS} dias de "
-                f"sequência. Faltam {visual.dias(faltam)}!",
+                f"O nome libera com {nomes.NOME_MIN_DIAS} dias. "
+                f"Faltam {visual.dias(faltam)}.",
             )
             return
 
@@ -959,8 +953,7 @@ class Fogo(commands.Cog):
             await self._aviso(
                 ctx,
                 "Nenhum Fogo por aqui",
-                f"{quem} nenhum Fogo ativo. "
-                "Que tal chamar alguém com `,fogo @membro`?",
+                f"{quem} nenhum Fogo ativo. Use `,fogo @membro`.",
             )
             return
 

@@ -111,12 +111,12 @@ def cartao_lendario(m, ocupadas: int) -> visual.CartaoFogo:
     """Anúncio de quem conquistou uma das vagas de Lendário."""
     restantes = LENDARIO_VAGAS - ocupadas
     if restantes <= 0:
-        situacao = "As duas vagas dos Lendários agora estão preenchidas."
+        situacao = "As duas vagas foram preenchidas."
     else:
         situacao = (
-            "Ainda resta 1 vaga de Lendário do Fogo."
+            "Resta 1 vaga."
             if restantes == 1
-            else f"Ainda restam {restantes} vagas de Lendário do Fogo."
+            else f"Restam {restantes} vagas."
         )
     return visual.CartaoFogo(
         f"## {EMOJI_LENDARIO} Lendários do Fogo!",
@@ -124,9 +124,8 @@ def cartao_lendario(m, ocupadas: int) -> visual.CartaoFogo:
             f"{_dupla(m)}{_linha_nome(m)}\n"
             f"**Sequência:** {visual.dias(m['dias'])}\n\n"
             f"{visual.EMOJI_FOGO_FELIZ} Vocês são a **{_ordinal(m['posicao'])} "
-            "dupla da história do Poyo** a chegar aos "
-            f"{visual.dias(m['dias'])} de Fogo! O nome de vocês fica "
-            "registrado **para sempre** na bio do Poyo."
+            f"dupla** a chegar a {visual.dias(m['dias'])} de Fogo! "
+            "O nome de vocês fica **para sempre** na bio do Poyo."
         ),
         f"-# {situacao}",
         cor=visual.COR_FOGO,
@@ -137,14 +136,12 @@ def cartao_marco_sem_vaga(m, ja_lendaria: bool) -> visual.CartaoFogo:
     """500 dias sem vaga: comemora, mas explica que não entra na bio."""
     if ja_lendaria:
         motivo = (
-            "Vocês já são Lendários do Fogo, e cada dupla só ocupa "
-            "uma vaga. Mas que chama longa!"
+            "Vocês já são Lendários. Cada dupla ocupa só uma vaga."
         )
     else:
         motivo = (
-            "As duas vagas dos Lendários do Fogo já tinham sido "
-            "preenchidas por outras duplas, mas vocês fizeram história "
-            "do mesmo jeito!"
+            "As vagas dos Lendários já foram preenchidas, "
+            "mas vocês fizeram história!"
         )
     return visual.CartaoFogo(
         f"## {visual.EMOJI_FOGO_FELIZ} {visual.dias(m['dias'])} de Fogo!",
@@ -165,7 +162,7 @@ def cartao_hall(
     for posicao in range(1, LENDARIO_VAGAS + 1):
         m = por_posicao.get(posicao)
         if m is None:
-            linhas.append(f"**{_ordinal(posicao)} vaga:** aberta, esperando uma dupla!")
+            linhas.append(f"**{_ordinal(posicao)} vaga:** aberta")
         else:
             linhas.append(
                 f"**{_ordinal(posicao)} vaga:** {_dupla(m)}"
@@ -181,19 +178,18 @@ def cartao_hall(
     abertas = LENDARIO_VAGAS - len(lendarios)
     if abertas > 0:
         rodape = (
-            f"-# Para entrar: chegar a {visual.dias(LENDARIO_DIAS)} de "
-            f"sequência. Vagas abertas: {abertas} de {LENDARIO_VAGAS}."
+            f"-# Para entrar: {visual.dias(LENDARIO_DIAS)} de sequência. "
+            f"Vagas abertas: {abertas} de {LENDARIO_VAGAS}."
         )
         if melhor_ativo is not None:
             rodape += (
-                f"\n-# Fogo mais perto agora: <@{melhor_ativo['usuario_a']}> + "
+                f"\n-# Mais perto: <@{melhor_ativo['usuario_a']}> + "
                 f"<@{melhor_ativo['usuario_b']}> com "
                 f"{visual.dias(melhor_ativo['sequencia'])}."
             )
         blocos.append(rodape)
     else:
         blocos.append(
-            "-# As duas vagas foram preenchidas e estão registradas "
-            "para sempre na bio do Poyo."
+            "-# Vagas preenchidas. Registradas para sempre na bio do Poyo."
         )
     return visual.CartaoFogo(*blocos, cor=visual.COR_FOGO)

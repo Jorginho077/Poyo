@@ -4,7 +4,7 @@ Ao ligar o bot, esta cog:
 
 1. Garante os emojis do Poyo feliz e com frio como **emojis do aplicativo**
    (valem em qualquer servidor). Se ainda não existirem, envia os PNGs da
-   pasta `assets/`. Eles aparecem nos textos e como imagem ao lado dos cartões.
+   pasta `assets/`. Eles aparecem nos títulos dos cartões.
 2. Procura nos servidores onde o Poyo está os emojis `poyo_coracao`,
    `poyo_piscadinha` e `poyo_sono`, para enfeitar o resto das mensagens.
 
@@ -29,11 +29,11 @@ from . import _fogo_visual as visual
 
 ASSETS = Path(__file__).resolve().parent.parent / "assets"
 
-# Poyo feliz / com frio: (variável do .env, nome do emoji do app, arquivo,
-# constante do texto, constante da imagem do cartão)
+# Poyo feliz / com frio: (variável do .env, nome do emoji do app e do PNG,
+# constante do texto em _fogo_visual)
 POYOS = (
-    ("FOGO_EMOJI_FELIZ", "poyo_fogo_feliz", "EMOJI_FOGO_FELIZ", "IMG_FELIZ"),
-    ("FOGO_EMOJI_TRISTE", "poyo_fogo_triste", "EMOJI_FOGO_TRISTE", "IMG_TRISTE"),
+    ("FOGO_EMOJI_FELIZ", "poyo_fogo_feliz", "EMOJI_FOGO_FELIZ"),
+    ("FOGO_EMOJI_TRISTE", "poyo_fogo_triste", "EMOJI_FOGO_TRISTE"),
 )
 
 # Emojis que já existem no servidor, achados pelo nome.
@@ -42,15 +42,6 @@ DO_SERVIDOR = (
     ("FOGO_EMOJI_CORACAO", "poyo_coracao", "EMOJI_CORACAO"),
     ("FOGO_EMOJI_ESPERA", "poyo_sono", "EMOJI_ESPERA"),
 )
-
-
-def _url_do_texto(texto: str) -> str | None:
-    """URL da imagem de um emoji customizado no formato <:nome:id>."""
-    try:
-        emoji = discord.PartialEmoji.from_str(texto)
-    except Exception:
-        return None
-    return emoji.url if emoji.id else None
 
 
 class FogoEmojis(commands.Cog):
@@ -84,11 +75,8 @@ class FogoEmojis(commands.Cog):
             print(f"Fogo emojis: não consegui listar os emojis do app: {erro!r}")
             existentes = {}
 
-        for variavel, nome, constante, imagem in POYOS:
-            manual = os.getenv(variavel)
-            if manual:  # o .env manda; só descobre a imagem do cartão
-                if not getattr(visual, imagem):
-                    setattr(visual, imagem, _url_do_texto(manual))
+        for variavel, nome, constante in POYOS:
+            if os.getenv(variavel):  # o .env manda mais que o automático
                 continue
 
             emoji = existentes.get(nome)
@@ -104,7 +92,6 @@ class FogoEmojis(commands.Cog):
 
             if emoji is not None:
                 setattr(visual, constante, str(emoji))
-                setattr(visual, imagem, str(emoji.url))
 
     def _do_servidor(self) -> None:
         for variavel, nome, constante in DO_SERVIDOR:

@@ -124,7 +124,7 @@ class FogoLendarios(commands.Cog):
         async with self._trava_bio:
             lista = await asyncio.to_thread(db.lendarios)
             if not lista:
-                return False, "Ainda não há Lendários para gravar na bio."
+                return False, "Ainda não há Lendários."
 
             duplas: list[tuple[str, str, int]] = []
             for m in lista:
@@ -192,8 +192,7 @@ class FogoLendarios(commands.Cog):
             "categoria": "Fogo",
             "uso": ",lendarios",
             "descricao": (
-                "As duas primeiras duplas a chegar a 500 dias de Fogo "
-                "ficam na bio do Poyo para sempre."
+                "As 2 primeiras duplas a chegar a 500 dias entram na bio do Poyo."
             ),
         },
     )
@@ -236,7 +235,7 @@ class FogoLendarios(commands.Cog):
         if ok:
             cartao = visual.cartao_aviso(
                 "Bio atualizada",
-                f"Pronto! A bio do Poyo agora está assim:\n>>> {detalhe}",
+                f"Nova bio:\n>>> {detalhe}",
             )
         else:
             cartao = visual.cartao_aviso("Não deu certo", detalhe)
