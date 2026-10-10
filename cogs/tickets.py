@@ -151,6 +151,7 @@ DEFAULTS = {
     "log": os.getenv("TICKET_LOG_CHANNEL", "chat-staff"),  # id do canal ou pedaco do nome
     "categoria": None,         # (antigo) categoria dos tickets que eram canais; os novos sao topicos
     "canal_tickets": None,     # canal onde os topicos de ticket nascem (vazio = canal do painel)
+    "formulario": True,        # True = pede assunto e detalhes antes de abrir · False = abre direto
     "limite": max(1, _env_int("TICKET_MAX_PER_USER", 1)),
     "delay": 10,               # segundos ate apagar o canal
     "transcricao_dm": True,
@@ -432,17 +433,19 @@ def build_ticket_view(data, cfg, ping=""):
     cor = t.get("cor") or cfg["ticket"].get("cor")
     tom = lambda i: cor if cor is not None else TICKET_TONS[i]
 
-    cartao = discord.ui.Container(
-        top,
-        discord.ui.Separator(),
-        discord.ui.TextDisplay(
-            f"**{cfg['modal']['assunto']}**\n{_quote(data['assunto'], 80)}\n\n"
-            f"**{cfg['modal']['detalhes']}**\n{_quote(data['descricao'], 1000)}"
-        ),
-        discord.ui.Separator(),
-        discord.ui.TextDisplay(info),
-        accent_colour=tom(1),
-    )
+    # ticket aberto sem formulario nao tem assunto nem detalhes: pula esse bloco
+    tem_form = (data.get("assunto") or "").strip() not in ("", "—") or bool((data.get("descricao") or "").strip())
+    corpo = [top, discord.ui.Separator()]
+    if tem_form:
+        corpo += [
+            discord.ui.TextDisplay(
+                f"**{cfg['modal']['assunto']}**\n{_quote(data['assunto'], 80)}\n\n"
+                f"**{cfg['modal']['detalhes']}**\n{_quote(data['descricao'], 1000)}"
+            ),
+            discord.ui.Separator(),
+        ]
+    corpo.append(discord.ui.TextDisplay(info))
+    cartao = discord.ui.Container(*corpo, accent_colour=tom(1))
     baixo = [discord.ui.ActionRow(TicketMenu(claimed=bool(claimed)))]
     if cfg["ticket"].get("rodape"):
         baixo.append(discord.ui.TextDisplay(_negrito(cfg["ticket"]["rodape"], miudo=True)))
@@ -511,6 +514,13 @@ class PanelSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         await _start(interaction, self.values[0])
+        # limpa a opcao marcada: sem isso nao da pra escolher a mesma opcao de novo
+        if interaction.message is not None:
+            try:
+                cfg = get_cfg(interaction.guild.id)
+                await interaction.message.edit(view=build_panel_view(cfg), attachments=panel_files(cfg))
+            except discord.HTTPException as e:
+                log.warning("nao consegui limpar o seletor do painel: %s", e)
 
 
 # imagem do topo enviada pelo admin: fica em assets/ticket_topo.<ext> e vale pra
@@ -803,6 +813,10 @@ async def _start(interaction, tipo):
             view=Card("Você já tem um ticket aberto", f"Continue por aqui: {existing[0].mention}"),
             ephemeral=True,
         )
+        return
+    if not cfg.get("formulario", True):
+        # sem formulario: abre na hora, sem assunto nem detalhes
+        await create_ticket(interaction, tipo, "", "")
         return
     await interaction.response.send_modal(TicketModal(tipo, cfg))
 
@@ -1157,6 +1171,7 @@ SETTINGS = {
     "canal_tickets": (("canal_tickets",), "canal", None, True, "canal onde os tópicos de ticket são criados (vazio = canal do painel)"),
     "limite": (("limite",), "int", (1, 10), False, "tickets abertos por pessoa"),
     "delay": (("delay",), "int", (0, 60), False, "segundos até apagar o tópico ao fechar"),
+    "formulario": (("formulario",), "bool", None, False, "pedir assunto e detalhes antes de abrir o ticket (sim) ou abrir direto (nao)"),
     "transcricao_dm": (("transcricao_dm",), "bool", None, False, "enviar transcrição na DM"),
     "transcricao_log": (("transcricao_log",), "bool", None, False, "enviar transcrição pro canal de log"),
 }
@@ -1355,7 +1370,8 @@ HELP_1 = (
     "**Cores:** `cor` (painel) e `cor_ticket`. Aceitam hex (`#5865F2`) ou nome "
     "(" + ", ".join(COLOR_NAMES) + "). Sem cor = tons de cinza.\n"
     "**Equipe:** `staff` (cargos: ids, nomes ou menções, vários separados por vírgula) · `log` (canal das transcrições) · `canal_tickets` (canal onde os tópicos de ticket nascem; vazio = canal do painel)\n"
-    "**Regras:** `limite` (1 a 10) · `delay` (0 a 60 s) · `transcricao_dm` e `transcricao_log` (sim/nao)\n\n"
+    "**Regras:** `limite` (1 a 10) · `delay` (0 a 60 s) · `transcricao_dm` e `transcricao_log` (sim/nao)\n"
+    "**Formulário:** `formulario` (sim/nao) · `sim` pede assunto e detalhes antes de abrir · `nao` cria o ticket na hora, assim que a pessoa escolhe a opção\n\n"
     "**Variáveis** em `boasvindas`: `{usuario}` `{staff}` `{categoria}` `{emoji}`\n"
     "**Variáveis** em `nome_canal`: `{emoji}` `{tipo}` `{usuario}` `{id}`"
 )
@@ -1841,6 +1857,7 @@ class ConfigView(discord.ui.LayoutView):
         g = self.guild
         menu = cfg["painel"]["modo"] == "menu"
         dm, lg = cfg["transcricao_dm"], cfg["transcricao_log"]
+        form = cfg.get("formulario", True)
         verde, cinza = discord.ButtonStyle.success, discord.ButtonStyle.secondary
         cats = "\n".join(f"{_ico(c)}**{c['label']}**  `{k}`" for k, c in cfg["categorias"].items())
 
@@ -1873,11 +1890,14 @@ class ConfigView(discord.ui.LayoutView):
             _sec("🎟️ Dentro do ticket", "o que aparece no canal quando alguém abre"),
             discord.ui.TextDisplay(
                 f"**Boas-vindas**  {_show(g, 'boasvindas', cfg)}\n**Nome do canal**  {_show(g, 'nome_canal', cfg)}\n"
-                f"**Tickets por pessoa**  {_show(g, 'limite', cfg)}\n**Segundos até apagar**  {_show(g, 'delay', cfg)}"
+                f"**Tickets por pessoa**  {_show(g, 'limite', cfg)}\n**Segundos até apagar**  {_show(g, 'delay', cfg)}\n"
+                f"**Formulário (assunto e detalhes)**  {_show(g, 'formulario', cfg)}"
             ),
             discord.ui.ActionRow(
                 self._btn("Editar mensagens", self._modal("ticket"), emoji="✏️"),
                 self._btn("Regras e cor", self._modal("ticketregras"), emoji="⚖️"),
+                self._btn(f"Formulário: {'sim' if form else 'não'}", self._toggle(("formulario",)),
+                          verde if form else cinza, "📝"),
             ),
             sep(),
 
