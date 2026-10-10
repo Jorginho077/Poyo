@@ -402,7 +402,8 @@ class TicketMenu(discord.ui.Select):
         ops.append(discord.SelectOption(
             label="Adicionar membro", value="add", description="Dá acesso a mais uma pessoa"))
         ops.append(discord.SelectOption(
-            label="Encerrar ticket", value="close", description="Fecha o canal e envia a transcrição"))
+            label="Encerrar ticket", value="close",
+            description="Fecha o ticket e envia a transcrição" if claimed else "Só depois que a equipe assumir o ticket"))
         super().__init__(custom_id="tk:menu", placeholder="Ações do ticket", options=ops)
 
     async def callback(self, interaction: discord.Interaction):
@@ -948,7 +949,11 @@ async def _menu_action(interaction: discord.Interaction, acao: str):
     elif acao == "add":
         extra = AddMemberView()
     elif acao == "close":
-        extra = ConfirmCloseView()
+        # so fecha depois que alguem da equipe assumiu
+        if not data.get("claimed"):
+            erro = ("Assuma o ticket primeiro", "O ticket só pode ser encerrado depois que alguém da equipe assumir o atendimento.")
+        else:
+            extra = ConfirmCloseView()
 
     await interaction.response.edit_message(view=build_ticket_view(data, cfg), attachments=panel_files(cfg))
     if erro:
@@ -1024,6 +1029,11 @@ class OldAddMemberRow(discord.ui.ActionRow):
 class ConfirmCloseRow(discord.ui.ActionRow):
     @discord.ui.button(label="Encerrar ticket", style=discord.ButtonStyle.secondary)
     async def yes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # confere de novo: o ticket precisa ter sido assumido
+        if not _data_for(interaction.channel).get("claimed"):
+            await interaction.response.edit_message(
+                view=Card("Assuma o ticket primeiro", "O ticket só pode ser encerrado depois que alguém da equipe assumir."))
+            return
         await interaction.response.edit_message(view=Card("Encerrando", "Gerando a transcrição."))
         await close_ticket(interaction.channel, interaction.user)
 
