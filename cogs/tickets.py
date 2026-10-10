@@ -104,6 +104,14 @@ CAT_DEFAULTS = {
         **CAT_BLANK, "emoji": "❖", "label": "Parceria",
         "hint": "Mande o link do seu servidor e o que você propõe.",
     },
+    "pagamentos": {
+        **CAT_BLANK, "emoji": "", "label": "Pagamentos",
+        "hint": "Dúvidas ou comprovantes de pagamento (Pix).",
+    },
+    "desabafo": {
+        **CAT_BLANK, "emoji": "", "label": "Desabafo",
+        "hint": "Um espaço reservado pra conversar com a Staff.",
+    },
     "outros": {
         **CAT_BLANK, "emoji": "⋆", "label": "Outros",
         "hint": "Qualquer outro assunto que precise da Staff.",
@@ -176,6 +184,10 @@ def _merge(base: dict, over: dict):
 AUTO_EMOJIS: dict = {}
 
 
+# categorias cujo emoji tem nome diferente da chave (chave -> nome do emoji)
+EMOJI_APELIDOS = {"pagamentos": "poyo_pix", "pagamento": "poyo_pix", "pix": "poyo_pix"}
+
+
 def _emoji_auto(chave: str, atual: str) -> str:
     # categoria "suporte" usa o emoji :poyo_suporte: se ele existir no servidor
     # (tambem acha no plural: parceria -> poyo_parcerias). Se o admin ja
@@ -184,7 +196,7 @@ def _emoji_auto(chave: str, atual: str) -> str:
     if atual not in ("", padrao):
         return atual
     base = chave.lower()
-    for nome in (f"poyo_{base}", f"poyo_{base}s", f"poyo_{base.rstrip('s')}"):
+    for nome in (EMOJI_APELIDOS.get(base, ""), f"poyo_{base}", f"poyo_{base}s", f"poyo_{base.rstrip('s')}"):
         if nome in AUTO_EMOJIS:
             return AUTO_EMOJIS[nome]
     return atual
@@ -378,9 +390,9 @@ def build_ticket_view(data, cfg, ping=""):
         usuario=f"<@{data['owner']}>", staff=f" {ping}" if ping else "",
         categoria=t["label"], emoji=t["emoji"],
     )
-    header = f"-# ATENDIMENTO PRIVADO\n## {_ico(t)}{t['label']}\n{welcome}"
+    header = f"-# **ATENDIMENTO PRIVADO**\n## {_ico(t)}{t['label']}\n{_negrito(welcome)}"
     attendant = f"<@{claimed}>" if claimed else "aguardando"
-    info = f"-# Aberto <t:{data['opened']}:R>  ·  Atendente: {attendant}"
+    info = f"-# **Aberto <t:{data['opened']}:R>  ·  Atendente: {attendant}**"
 
     # foto do lado se tiver
     if data.get("avatar"):
@@ -404,7 +416,7 @@ def build_ticket_view(data, cfg, ping=""):
     )
     baixo = [discord.ui.ActionRow(TicketMenu(claimed=bool(claimed)))]
     if cfg["ticket"].get("rodape"):
-        baixo.append(discord.ui.TextDisplay(f"-# {cfg['ticket']['rodape']}"))
+        baixo.append(discord.ui.TextDisplay(_negrito(cfg["ticket"]["rodape"], miudo=True)))
 
     view = discord.ui.LayoutView(timeout=None)
     # mesmo gif do painel: um em cima e um embaixo
@@ -568,6 +580,24 @@ def _miudo(texto: str) -> str:
     return "\n".join(linhas)
 
 
+def _negrito(texto: str, miudo: bool = False) -> str:
+    # deixa cada linha em negrito (titulos # ja sao negrito, ficam como estao)
+    linhas = []
+    for linha in str(texto).splitlines():
+        t = linha.strip()
+        if not t:
+            continue
+        if t.startswith("#") and not t.startswith("-#"):
+            linhas.append(t)
+            continue
+        if t.startswith("-# "):
+            t = t[3:]
+            miudo = True
+        t = t.replace("**", "")
+        linhas.append(f"{'-# ' if miudo else ''}**{t}**")
+    return "\n".join(linhas)
+
+
 # Painel inteiro em um único container, mantendo configurações e IDs.
 def build_panel_view(cfg):
     p = cfg["painel"]
@@ -579,16 +609,15 @@ def build_panel_view(cfg):
         itens.append(discord.ui.Separator())
     head = f"## {p['titulo']}" if p.get("titulo") else ""
     if p.get("descricao"):
-        head += ("\n" if head else "") + p["descricao"]
+        head += ("\n" if head else "") + _negrito(p["descricao"])
     if head:
         itens.append(discord.ui.TextDisplay(head))
-    notas = []
+    # categorias uma embaixo da outra; em titulo (###) o emoji fica maior
     if cats:
-        notas.append("-# " + " · ".join(f"{c['emoji']} {c['label']}".strip() for c in cats.values()))
+        lista = "\n".join(f"### {c['emoji']} {c['label']}".replace("###  ", "### ") for c in cats.values())
+        itens.extend([discord.ui.Separator(), discord.ui.TextDisplay(lista)])
     if p.get("info"):
-        notas.append(_miudo(p["info"]))
-    if notas:
-        itens.extend([discord.ui.Separator(), discord.ui.TextDisplay("\n".join(notas))])
+        itens.extend([discord.ui.Separator(), discord.ui.TextDisplay(_negrito(p["info"], miudo=True))])
     itens.append(discord.ui.Separator())
     if p.get("modo") == "menu":
         itens.append(discord.ui.ActionRow(PanelSelect(cfg)))
@@ -601,7 +630,7 @@ def build_panel_view(cfg):
         for i in range(0, len(botoes), 5):
             itens.append(discord.ui.ActionRow(*botoes[i:i + 5]))
     if p.get("rodape"):
-        itens.append(discord.ui.TextDisplay(f"-# {p['rodape']}"))
+        itens.append(discord.ui.TextDisplay(_negrito(p["rodape"], miudo=True)))
     fim = _img(p.get("gif_fim"))
     if fim:
         itens.append(discord.ui.MediaGallery(discord.MediaGalleryItem(fim)))
