@@ -271,15 +271,26 @@ def _role(guild, ref):
     return None
 
 
+def _roles(guild, ref) -> list:
+    # ref pode ser um cargo (id ou nome) ou uma lista deles
+    refs = ref if isinstance(ref, (list, tuple)) else [ref]
+    achados = []
+    for item in refs:
+        r = _role(guild, item)
+        if r is not None and r not in achados:
+            achados.append(r)
+    return achados
+
+
 def staff_roles(guild, cfg, tipo=None) -> list:
     refs = [cfg.get("staff")]
     if tipo:
         refs.append(cat_of(cfg, tipo).get("staff"))
     roles = []
     for ref in refs:
-        r = _role(guild, ref)
-        if r is not None and r not in roles:
-            roles.append(r)
+        for r in _roles(guild, ref):
+            if r not in roles:
+                roles.append(r)
     return roles
 
 
@@ -426,7 +437,7 @@ def build_ticket_view(data, cfg, ping=""):
 
     view = discord.ui.LayoutView(timeout=None)
     # mesmo gif do painel: um em cima e um embaixo
-    topo = _img(cfg["painel"].get("banner"))
+    topo = _img_topo(cfg["painel"].get("banner"))
     fim = _img(cfg["painel"].get("gif_fim"))
     if topo:
         cartao = discord.ui.Container(
@@ -490,6 +501,30 @@ class PanelSelect(discord.ui.Select):
         await _start(interaction, self.values[0])
 
 
+# imagem do topo enviada pelo admin: fica em assets/ticket_topo.<ext> e vale pra
+# todos os servidores, sem precisar mandar de novo
+ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
+TOPO_BASE = "ticket_topo"
+TOPO_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+
+
+def _topo_salvo() -> Optional[Path]:
+    for ext in TOPO_EXTS:
+        p = ASSETS_DIR / f"{TOPO_BASE}{ext}"
+        if p.is_file():
+            return p
+    return None
+
+
+def _img_topo(valor):
+    # topo "padrao": usa a imagem salva em assets (se tiver), senao o gif padrao
+    if valor is None:
+        p = _topo_salvo()
+        if p is not None:
+            return f"attachment://{p.name}"
+    return _img(valor)
+
+
 def _default_img():
     # gif salvo na pasta assets (permanente) > link do gif > banner cinza
     if GIF_FILE.exists():
@@ -530,8 +565,11 @@ def _img(valor):
 
 def panel_files(cfg) -> list:
     p = cfg["painel"]
-    urls = {_img(p.get("banner")), _img(p.get("gif_fim"))}
+    topo = _topo_salvo()
+    urls = {_img_topo(p.get("banner")), _img(p.get("gif_fim"))}
     files = []
+    if topo is not None and f"attachment://{topo.name}" in urls:
+        files.append(discord.File(topo, filename=topo.name))
     if f"attachment://{GIF_NAME}" in urls:
         files.append(discord.File(GIF_FILE, filename=GIF_NAME))
     if f"attachment://{BANNER_NAME}" in urls:
@@ -544,6 +582,43 @@ def panel_files(cfg) -> list:
             usados.add(path.name)
             files.append(discord.File(path, filename=path.name))
     return files
+
+
+async def salvar_topo(attachment: discord.Attachment):
+    """grava a imagem do topo em assets/ticket_topo.<ext> -> (caminho, erro)"""
+    ext = Path(attachment.filename).suffix.lower()
+    if ext not in TOPO_EXTS:
+        return None, "Mande uma imagem ou gif (png, jpg, gif ou webp)."
+    if attachment.size > MAX_IMG_BYTES:
+        return None, f"Arquivo grande demais (máximo {MAX_IMG_BYTES // 1024 // 1024} MB)."
+    try:
+        dados = await attachment.read()
+    except discord.HTTPException:
+        return None, "Não consegui baixar o arquivo, tenta de novo."
+    destino = ASSETS_DIR / f"{TOPO_BASE}{ext}"
+    try:
+        ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+        destino.write_bytes(dados)
+    except OSError as e:
+        log.warning("nao consegui salvar o topo em %s: %s", destino, e)
+        return None, "Não consegui salvar o arquivo na pasta assets."
+    for outra in ASSETS_DIR.glob(f"{TOPO_BASE}.*"):   # so uma versao por vez
+        if outra != destino:
+            try:
+                outra.unlink()
+            except OSError:
+                pass
+    return destino, None
+
+
+async def aplicar_imagem(guild_id, chave, attachment: discord.Attachment):
+    """salva o anexo no lugar certo e devolve (valor pro config, erro).
+    topo (banner) -> pasta assets, vale pra todos os servidores (config vira "padrao")
+    final (gif_fim) -> so deste servidor"""
+    if chave == "banner":
+        destino, erro = await salvar_topo(attachment)
+        return (None, erro) if erro else (None, None)
+    return await save_image(guild_id, chave, attachment)
 
 
 async def save_image(guild_id, chave, attachment: discord.Attachment):
@@ -609,7 +684,7 @@ def build_panel_view(cfg):
     p = cfg["painel"]
     cats = cfg["categorias"]
     itens = []
-    banner = _img(p.get("banner"))
+    banner = _img_topo(p.get("banner"))
     if banner:
         itens.append(discord.ui.MediaGallery(discord.MediaGalleryItem(banner)))
         itens.append(discord.ui.Separator())
@@ -1049,7 +1124,7 @@ SETTINGS = {
     "nome_canal": (("ticket", "nome_canal"), "texto", 60, False, "formato do nome do canal"),
     "campo_assunto": (("modal", "assunto"), "texto", 45, False, "nome do 1º campo do formulário"),
     "campo_detalhes": (("modal", "detalhes"), "texto", 45, False, "nome do 2º campo do formulário"),
-    "staff": (("staff",), "cargo", None, True, "cargo da equipe"),
+    "staff": (("staff",), "cargos", None, True, "cargos da equipe (ids, nomes ou menções, separados por espaço ou vírgula)"),
     "log": (("log",), "canal", None, True, "canal que recebe as transcrições"),
     "categoria": (("categoria",), "categoria", None, True, "categoria do Discord onde os tickets nascem"),
     "limite": (("limite",), "int", (1, 10), False, "tickets abertos por pessoa"),
@@ -1065,7 +1140,7 @@ CAT_FIELDS = {
     "dica": ("hint", "texto", 100, True),
     "botao": ("botao", "estilo", None, False),
     "cor": ("cor", "cor", None, True),
-    "cargo": ("staff", "cargo", None, True),
+    "cargo": ("staff", "cargos", None, True),
     "categoria": ("categoria", "categoria", None, True),
     "boasvindas": ("boasvindas", "texto", 1000, True),
 }
@@ -1133,6 +1208,10 @@ async def parse_value(ctx, kind, raw, limit, vazio, default=None):
         if low in FALSE_WORDS:
             return False, None
         return None, "Responda `sim` ou `nao`."
+    if kind == "cargos":
+        if wants_none:
+            return None, None
+        return await _parse_cargos(raw, getattr(ctx, "guild", None), ctx)
     if kind in ("cargo", "canal", "categoria"):
         if wants_none:
             return None, None
@@ -1151,6 +1230,47 @@ async def parse_value(ctx, kind, raw, limit, vazio, default=None):
     return None, "Tipo de campo desconhecido."
 
 
+async def _parse_cargos(raw, guild, ctx=None):
+    """aceita ids, mencoes e nomes (varios, separados por espaco ou virgula) -> (lista de ids, erro).
+    nome com espaco: separe os cargos por virgula"""
+    ids = []
+
+    def add(i):
+        if i not in ids:
+            ids.append(i)
+
+    for achado in re.findall(r"\d{15,20}", raw):
+        add(int(achado))
+    # o que sobra depois de tirar ids e mencoes pode ser nome de cargo
+    resto = re.sub(r"<@&\d+>|\d{15,20}", ",", raw)
+    nomes = [n.strip().lstrip("@").strip() for n in re.split(r"[,\n]+", resto)]
+    nomes = [n for n in nomes if n]
+    sem_achar = []
+    for nome in nomes:
+        cargo = None
+        if guild is not None:
+            cargo = discord.utils.find(lambda r: r.name.casefold() == nome.casefold(), guild.roles)
+            if cargo is None:
+                parecidos = [r for r in guild.roles if nome.casefold() in r.name.casefold()]
+                cargo = parecidos[0] if len(parecidos) == 1 else None
+        if cargo is None and ctx is not None:
+            try:
+                cargo = await commands.RoleConverter().convert(ctx, nome)
+            except commands.BadArgument:
+                cargo = None
+        if cargo is None:
+            sem_achar.append(f"`{nome}`")
+        else:
+            add(cargo.id)
+    if guild is not None:
+        sem_achar += [f"`{i}`" for i in ids if guild.get_role(i) is None]
+    if sem_achar:
+        return None, "Não achei no servidor: " + ", ".join(sem_achar) + "."
+    if not ids:
+        return None, "Mande o ID ou o nome do cargo (vários separados por espaço ou vírgula)."
+    return ids, None
+
+
 def _short(v, n=60) -> str:
     v = str(v).replace("\n", " ⏎ ")
     return v if len(v) <= n else v[: n - 1] + "…"
@@ -1164,6 +1284,8 @@ def _show(guild, key, cfg) -> str:
     if key in ("banner", "gif_fim"):
         if isinstance(v, str) and v.startswith(FILE_PREFIX):
             return "📎 *arquivo enviado*" if _custom_path(v) else "*(arquivo sumiu, usando o padrão)*"
+        if v is None and key == "banner" and _topo_salvo() is not None:
+            return f"📎 *salva em assets* (`{_topo_salvo().name}`)"
         return "*(padrão do bot)*" if v is None else "*(sem imagem)*" if v == "" else f"`{_short(v)}`"
     if key == "botao" and not v:
         return "*(nome da categoria)*"
@@ -1175,6 +1297,12 @@ def _show(guild, key, cfg) -> str:
         return f"`#{v:06X}`"
     if kind == "bool":
         return "sim" if v else "não"
+    if kind == "cargos":
+        partes = []
+        for ref in (v if isinstance(v, (list, tuple)) else [v]):
+            r = _role(guild, ref)
+            partes.append(r.mention if r else f"`{ref}` *(não encontrado)*")
+        return " ".join(partes)
     if kind == "cargo":
         r = _role(guild, v)
         return r.mention if r else f"`{v}` *(não encontrado)*"
@@ -1195,9 +1323,10 @@ HELP_1 = (
     "`rodape_ticket` `nome_canal` `campo_assunto` `campo_detalhes`\n"
     "**Visual:** `modo` (`menu` é o padrão, ou `botoes`) · `banner` (imagem do topo) · `gif_fim` (imagem do final), cada um aceita link, `padrao`, `nenhum` ou um **arquivo anexado** na mensagem do comando\n"
     "Exemplo com arquivo: anexe a imagem e mande `,ptconfig set banner` (ou use o botão 📎 em `,ptconfig`)\n"
+    "A imagem do **topo** enviada assim fica salva em `assets/ticket_topo` e vale pra todos os servidores.\n"
     "**Cores:** `cor` (painel) e `cor_ticket`. Aceitam hex (`#5865F2`) ou nome "
     "(" + ", ".join(COLOR_NAMES) + "). Sem cor = tons de cinza.\n"
-    "**Equipe:** `staff` (cargo) · `log` (canal) · `categoria` (categoria do Discord pros tickets)\n"
+    "**Equipe:** `staff` (cargos: ids, nomes ou menções, vários separados por vírgula) · `log` (canal) · `categoria` (categoria do Discord pros tickets)\n"
     "**Regras:** `limite` (1 a 10) · `delay` (0 a 60 s) · `transcricao_dm` e `transcricao_log` (sim/nao)\n\n"
     "**Variáveis** em `boasvindas`: `{usuario}` `{staff}` `{categoria}` `{emoji}`\n"
     "**Variáveis** em `nome_canal`: `{emoji}` `{tipo}` `{usuario}` `{id}`"
@@ -1347,6 +1476,36 @@ class _RoleSel(_Fn, discord.ui.RoleSelect):
 
 class _ChanSel(_Fn, discord.ui.ChannelSelect):
     pass
+
+
+# janela pra digitar o id dos cargos na mao (um ou varios)
+class RoleIdsModal(discord.ui.Modal):
+    def __init__(self, painel, titulo, salvar, atuais=None):
+        super().__init__(title=titulo[:45])
+        self.painel = painel
+        self.salvar = salvar
+        ids = atuais if isinstance(atuais, (list, tuple)) else [atuais]
+        padrao = " ".join(str(i) for i in ids if isinstance(i, int))
+        self.campo = discord.ui.TextInput(
+            label="ID ou nome dos cargos",
+            placeholder="123456789012345678, 987654321098765432, Staff",
+            default=padrao[:400] or None,
+            style=discord.TextStyle.paragraph,
+            max_length=400,
+        )
+        self.add_item(self.campo)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        ids, erro = await _parse_cargos(self.campo.value, self.painel.guild)
+        if erro:
+            await _erro_card(interaction, "Nada foi salvo", erro)
+            return
+        self.salvar(ids)
+        await self.painel.update(interaction, f"✅ Salvo · {len(ids)} cargo(s)")
+
+    async def on_error(self, interaction, error):
+        log.exception("erro na janela de ids", exc_info=error)
+        await _erro_card(interaction, "Algo deu errado", "Tente de novo.")
 
 
 # janela generica serve pra varias opcoes do settings
@@ -1586,6 +1745,15 @@ class ConfigView(discord.ui.LayoutView):
             await self.update(interaction, "✅ Salvo")
         return h
 
+    def _ids_modal(self, path):
+        # botao que abre a janela pra digitar o(s) id(s) do cargo
+        async def h(interaction, item):
+            def salvar(ids):
+                set_path(self.guild.id, path, ids)
+            atual = _dig(get_cfg(self.guild.id), path)
+            await interaction.response.send_modal(RoleIdsModal(self, "Cargos da equipe", salvar, atual))
+        return h
+
     def _clear(self, path):
         async def h(interaction, item):
             set_path(self.guild.id, path, None)
@@ -1615,7 +1783,7 @@ class ConfigView(discord.ui.LayoutView):
                 await interaction.followup.send(view=Card("⏱️ Tempo esgotado", "Clique no botão 📎 de novo."), ephemeral=True)
                 return
             anexo = next(a for a in msg.attachments if Path(a.filename).suffix.lower() in IMG_EXTS)
-            valor, erro = await save_image(self.guild.id, chave, anexo)
+            valor, erro = await aplicar_imagem(self.guild.id, chave, anexo)
             if erro:
                 await interaction.followup.send(view=Card("⚠️ Não salvei", erro), ephemeral=True)
                 return
@@ -1626,7 +1794,8 @@ class ConfigView(discord.ui.LayoutView):
             except discord.HTTPException:
                 pass
             n = await refresh_panels(self.guild)
-            self.notice = f"✅ Imagem salva · {n} painel(is) atualizado(s)" if n else "✅ Imagem salva"
+            onde = " em assets (vale pra todos os servidores)" if chave == "banner" else ""
+            self.notice = f"✅ Imagem salva{onde} · {n} painel(is) atualizado(s)" if n else f"✅ Imagem salva{onde}"
             self.render()
             try:
                 await self.sent.edit(view=self)
@@ -1727,7 +1896,10 @@ class ConfigView(discord.ui.LayoutView):
 
             _sec("🛡️ Cargo da equipe", f"agora: {_show(g, 'staff', cfg)}  ·  admin e gerenciar mensagens já contam como staff"),
             discord.ui.ActionRow(_RoleSel(self._pick(("staff",)), placeholder="Escolher o cargo", min_values=1, max_values=1)),
-            discord.ui.ActionRow(self._btn("Tirar cargo", self._clear(("staff",)))),
+            discord.ui.ActionRow(
+                self._btn("Digitar ID ou nome", self._ids_modal(("staff",)), discord.ButtonStyle.primary, "🔢"),
+                self._btn("Tirar cargo", self._clear(("staff",))),
+            ),
             sep(),
 
             _sec("📄 Canal das transcrições", f"agora: {_show(g, 'log', cfg)}"),
@@ -1793,7 +1965,8 @@ class ConfigView(discord.ui.LayoutView):
         c = cfg["categorias"][key]
         ordem = list(cfg["categorias"])
         g = self.guild
-        cargo = _role(g, c.get("staff"))
+        cargos = _roles(g, c.get("staff"))
+        cargo_txt = " ".join(r.mention for r in cargos) or "*(usa o geral)*"
         cat_dc = g.get_channel(c["categoria"]) if isinstance(c.get("categoria"), int) else None
 
         async def estilo(interaction, item):
@@ -1813,6 +1986,12 @@ class ConfigView(discord.ui.LayoutView):
         async def tirar_cargo(interaction, item):
             _cat_set(g.id, key, "staff", None)
             await self.update(interaction, "✅ Removido")
+
+        async def ids_cargo(interaction, item):
+            def salvar(ids):
+                _cat_set(g.id, key, "staff", ids)
+            await interaction.response.send_modal(
+                RoleIdsModal(self, "Cargos desta categoria", salvar, c.get("staff")))
 
         async def tirar_cat(interaction, item):
             _cat_set(g.id, key, "categoria", None)
@@ -1843,13 +2022,14 @@ class ConfigView(discord.ui.LayoutView):
             discord.ui.ActionRow(_Sel(estilo, placeholder=f"Cor do botão (agora: {c['botao']})", options=estilos)),
             sep(),
 
-            _sec("👥 Quem atende", f"cargo: {cargo.mention if cargo else '*(usa o geral)*'}  ·  categoria do Discord: {cat_dc.mention if cat_dc else '*(usa a geral)*'}"),
+            _sec("👥 Quem atende", f"cargos: {cargo_txt}  ·  categoria do Discord: {cat_dc.mention if cat_dc else '*(usa a geral)*'}"),
             discord.ui.ActionRow(_RoleSel(escolher("staff"), placeholder="Cargo só desta categoria", min_values=1, max_values=1)),
             discord.ui.ActionRow(_ChanSel(
                 escolher("categoria"), placeholder="Categoria do Discord só desta",
                 channel_types=[discord.ChannelType.category], min_values=1, max_values=1,
             )),
             discord.ui.ActionRow(
+                self._btn("Digitar ID ou nome", ids_cargo, discord.ButtonStyle.primary, "🔢"),
                 self._btn("Tirar cargo", tirar_cargo),
                 self._btn("Tirar categoria", tirar_cat),
             ),
@@ -2003,7 +2183,7 @@ class Tickets(commands.Cog):
         path, kind, limit, vazio, desc = SETTINGS[chave]
         # imagem por arquivo: anexa a imagem na mensagem do comando
         if chave in IMG_KEYS and ctx.message.attachments and not valor.strip():
-            valor_salvo, erro = await save_image(ctx.guild.id, chave, ctx.message.attachments[0])
+            valor_salvo, erro = await aplicar_imagem(ctx.guild.id, chave, ctx.message.attachments[0])
             if erro:
                 await _say(ctx, f"Não deu pra usar o arquivo em `{chave}`", erro, ok=False)
                 return
