@@ -372,6 +372,73 @@ def _open_tickets(guild: discord.Guild, user_id: int) -> list:
     return abertos
 
 
+# ---------------------------------------------------------------- falar no topico
+
+# o topico herda a permissao do canal pai: quem nao tem "enviar mensagens em topicos" la
+# fica em somente leitura. libera so pro membro (overwrite no canal pai) e tira ao fechar
+async def _liberar_fala(channel, member, data) -> bool:
+    parent = getattr(channel, "parent", None)
+    if parent is None:  # ticket antigo em canal: as permissoes ja sao do proprio canal
+        return True
+    m = member if isinstance(member, discord.Member) else channel.guild.get_member(member.id)
+    if m is None:
+        return True
+    ids = data.setdefault("liberados", [])
+    data["parent"] = parent.id
+    if m.id in ids:
+        return True
+
+    # outro ticket aberto ja liberou essa pessoa neste canal: so divide o registro
+    usado_por_outro = any(
+        m.id in d.get("liberados", [])
+        for k, d in state["tickets"].items()
+        if k != str(channel.id) and d.get("parent") == parent.id
+    )
+    if not usado_por_outro:
+        if parent.permissions_for(m).send_messages_in_threads:
+            return True  # ja consegue falar, nao precisa mexer em nada
+        ow = parent.overwrites_for(m)  # mantem o que ja tinha, so soma a permissao
+        ow.send_messages_in_threads = True
+        try:
+            await parent.set_permissions(m, overwrite=ow, reason="Ticket: liberar fala no tópico")
+        except discord.HTTPException as e:
+            log.warning(
+                "nao consegui liberar %s pra falar nos topicos de #%s: %s "
+                "(o bot precisa de Gerenciar Permissoes nesse canal)", m, parent.name, e,
+            )
+            return False
+    ids.append(m.id)
+    _save()
+    return True
+
+
+async def _limpar_liberados(guild, parent_id, ids):
+    # tira a permissao que o ticket deu (so se nenhum outro ticket aberto ainda precisa dela)
+    parent = guild.get_channel(parent_id)
+    if parent is None or not ids:
+        return
+    em_uso = {
+        u for d in state["tickets"].values()
+        if d.get("parent") == parent_id for u in d.get("liberados", [])
+    }
+    for uid in ids:
+        if uid in em_uso:
+            continue
+        m = guild.get_member(uid)
+        try:
+            if m is None:  # saiu do servidor: apaga o overwrite dele
+                await parent._state.http.delete_channel_permissions(parent.id, uid, reason="Ticket encerrado")
+                continue
+            ow = parent.overwrites_for(m)
+            ow.send_messages_in_threads = None
+            if ow.is_empty():
+                await parent.set_permissions(m, overwrite=None, reason="Ticket encerrado")
+            else:
+                await parent.set_permissions(m, overwrite=ow, reason="Ticket encerrado")
+        except discord.HTTPException as e:
+            log.warning("nao consegui limpar a permissao de %s em #%s: %s", uid, parent.name, e)
+
+
 # ---------------------------------------------------------------- visual
 
 # cartao simples (container puro sem barra colorida)
@@ -403,7 +470,7 @@ class TicketMenu(discord.ui.Select):
             label="Adicionar membro", value="add", description="Dá acesso a mais uma pessoa"))
         ops.append(discord.SelectOption(
             label="Encerrar ticket", value="close",
-            description="Fecha o ticket e envia a transcrição" if claimed else "Só depois que a equipe assumir o ticket"))
+            description="Só quem assumiu encerra e envia a transcrição" if claimed else "Só depois que a equipe assumir o ticket"))
         super().__init__(custom_id="tk:menu", placeholder="Ações do ticket", options=ops)
 
     async def callback(self, interaction: discord.Interaction):
@@ -905,17 +972,28 @@ async def create_ticket(interaction: discord.Interaction, tipo: str, assunto: st
     data = {
         "owner": user.id, "tipo": tipo, "assunto": assunto.strip(), "descricao": descricao.strip(),
         "opened": int(datetime.now().timestamp()), "claimed": None,
-        "avatar": user.display_avatar.url,
+        "avatar": user.display_avatar.url, "parent": parent.id,
     }
     # salva os dados do ticket
     state["tickets"][str(channel.id)] = data
     _save()
+    # quem abriu sempre pode falar, mesmo se o canal do painel for somente leitura
+    fala_ok = await _liberar_fala(channel, user, data)
 
     await channel.send(
         view=build_ticket_view(data, cfg, ping=" ".join(r.mention for r in roles)),
         files=panel_files(cfg),
         allowed_mentions=discord.AllowedMentions(users=[user], roles=roles or False),
     )
+    if not fala_ok:
+        await channel.send(
+            view=Card(
+                "Atenção",
+                f"{user.mention} pode não conseguir escrever aqui. Libere **Enviar mensagens em tópicos** "
+                f"em {parent.mention} ou dê **Gerenciar permissões** ao bot nesse canal.",
+            ),
+            allowed_mentions=NO_MENTIONS,
+        )
     await interaction.followup.send(
         view=Card("Ticket criado", f"Seu atendimento foi aberto em {channel.mention}."),
         ephemeral=True,
@@ -952,6 +1030,9 @@ async def _menu_action(interaction: discord.Interaction, acao: str):
         # so fecha depois que alguem da equipe assumiu
         if not data.get("claimed"):
             erro = ("Assuma o ticket primeiro", "O ticket só pode ser encerrado depois que alguém da equipe assumir o atendimento.")
+        elif interaction.user.id not in (data["claimed"], data["owner"]):
+            erro = ("Só quem assumiu pode encerrar",
+                    f"Este ticket está com <@{data['claimed']}>. Só quem assumiu (ou quem abriu o ticket) pode encerrá-lo.")
         else:
             extra = ConfirmCloseView()
 
@@ -992,11 +1073,23 @@ class AddMemberRow(discord.ui.ActionRow):
             await interaction.response.edit_message(
                 view=Card("Não consegui adicionar", "Confira as permissões do bot neste ticket."))
             return
+        fala_ok = True
+        if isinstance(interaction.channel, discord.Thread):
+            fala_ok = await _liberar_fala(interaction.channel, member, _data_for(interaction.channel))
         await interaction.response.edit_message(view=Card("Pronto", f"{member.mention} foi adicionado."))
         await interaction.followup.send(
             view=Card("Membro adicionado", f"{member.mention} agora tem acesso a este ticket."),
             allowed_mentions=discord.AllowedMentions(users=[member]),
         )
+        if not fala_ok:
+            await interaction.followup.send(
+                view=Card(
+                    "Atenção",
+                    f"{member.mention} pode não conseguir escrever. Libere **Enviar mensagens em tópicos** "
+                    "no canal onde o tópico foi criado ou dê **Gerenciar permissões** ao bot nele.",
+                ),
+                ephemeral=True,
+            )
 
 
 class AddMemberView(discord.ui.LayoutView):
@@ -1029,10 +1122,15 @@ class OldAddMemberRow(discord.ui.ActionRow):
 class ConfirmCloseRow(discord.ui.ActionRow):
     @discord.ui.button(label="Encerrar ticket", style=discord.ButtonStyle.secondary)
     async def yes(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # confere de novo: o ticket precisa ter sido assumido
-        if not _data_for(interaction.channel).get("claimed"):
+        # confere de novo: precisa ter sido assumido e so quem assumiu (ou o dono) encerra
+        dados = _data_for(interaction.channel)
+        if not dados.get("claimed"):
             await interaction.response.edit_message(
                 view=Card("Assuma o ticket primeiro", "O ticket só pode ser encerrado depois que alguém da equipe assumir."))
+            return
+        if interaction.user.id not in (dados["claimed"], dados["owner"]):
+            await interaction.response.edit_message(
+                view=Card("Só quem assumiu pode encerrar", f"Este ticket está com <@{dados['claimed']}>."))
             return
         await interaction.response.edit_message(view=Card("Encerrando", "Gerando a transcrição."))
         await close_ticket(interaction.channel, interaction.user)
@@ -1130,6 +1228,8 @@ async def close_ticket(channel, closer):
 
     state["tickets"].pop(str(channel.id), None)
     _save()
+    if data.get("liberados"):
+        await _limpar_liberados(channel.guild, data.get("parent"), data["liberados"])
     try:
         await channel.delete(reason=f"Ticket fechado por {closer}")
     except discord.HTTPException as e:
@@ -2192,8 +2292,11 @@ class Tickets(commands.Cog):
     @commands.Cog.listener()
     async def on_thread_delete(self, thread):
         # topico de ticket apagado na mao: limpa o registro
-        if state["tickets"].pop(str(thread.id), None) is not None:
+        data = state["tickets"].pop(str(thread.id), None)
+        if data is not None:
             _save()
+            if data.get("liberados"):
+                await _limpar_liberados(thread.guild, data.get("parent"), data["liberados"])
 
     @commands.Cog.listener()
     async def on_thread_update(self, before, after):
