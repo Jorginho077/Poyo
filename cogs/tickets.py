@@ -171,10 +171,31 @@ def _merge(base: dict, over: dict):
             base[k] = copy.deepcopy(v)
 
 
+# emojis poyo_* que o bot enxerga nos servidores (nome -> "<:nome:id>")
+# quem preenche e a cog Tickets quando o bot liga (ou quando mexem nos emojis)
+AUTO_EMOJIS: dict = {}
+
+
+def _emoji_auto(chave: str, atual: str) -> str:
+    # categoria "suporte" usa o emoji :poyo_suporte: se ele existir no servidor
+    # (tambem acha no plural: parceria -> poyo_parcerias). Se o admin ja
+    # escolheu outro emoji pra categoria, esse vence.
+    padrao = CAT_DEFAULTS.get(chave, {}).get("emoji", "")
+    if atual not in ("", padrao):
+        return atual
+    base = chave.lower()
+    for nome in (f"poyo_{base}", f"poyo_{base}s", f"poyo_{base.rstrip('s')}"):
+        if nome in AUTO_EMOJIS:
+            return AUTO_EMOJIS[nome]
+    return atual
+
+
 def get_cfg(guild_id) -> dict:
     cfg = copy.deepcopy(DEFAULTS)
     _merge(cfg, _cfg_store["guilds"].get(str(guild_id), {}))
     cfg["categorias"] = {k: {**CAT_BLANK, **c} for k, c in cfg["categorias"].items()}
+    for chave, c in cfg["categorias"].items():
+        c["emoji"] = _emoji_auto(chave, c.get("emoji", ""))
     return cfg
 
 
@@ -1863,6 +1884,24 @@ class Tickets(commands.Cog):
 
     async def cog_load(self):
         register_views(self.bot)
+        self._ler_emojis()      # se o bot ja estiver ligado (reload da cog)
+
+    def _ler_emojis(self):
+        # guarda os emojis poyo_* de todos os servidores onde o bot esta
+        achados = {}
+        for e in self.bot.emojis:
+            if e.name.startswith("poyo_") and e.available:
+                achados.setdefault(e.name, str(e))
+        AUTO_EMOJIS.clear()
+        AUTO_EMOJIS.update(achados)
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        self._ler_emojis()
+
+    @commands.Cog.listener()
+    async def on_guild_emojis_update(self, guild, before, after):
+        self._ler_emojis()
 
     async def cog_check(self, ctx):
         if ctx.guild is None:
