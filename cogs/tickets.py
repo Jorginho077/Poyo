@@ -15,6 +15,12 @@ import discord
 
 from discord.ext import commands
 
+try:
+    from ._acesso import tem_acesso_total   # cargo com acesso a todos os comandos
+except ImportError:
+    def tem_acesso_total(membro) -> bool:
+        return False
+
 log = logging.getLogger("bot.tickets")
 
 # evita pingar sem querer
@@ -1497,7 +1503,7 @@ class ConfigView(discord.ui.LayoutView):
             )
             return False
         perms = getattr(interaction.user, "guild_permissions", None)
-        if perms is None or not perms.administrator:
+        if not (perms is not None and perms.administrator) and not tem_acesso_total(interaction.user):
             await _erro_card(interaction, "Sem permissão", "Só administradores mexem aqui.")
             return False
         return True
@@ -1935,7 +1941,7 @@ class Tickets(commands.Cog):
     async def cog_check(self, ctx):
         if ctx.guild is None:
             raise commands.NoPrivateMessage()
-        if not ctx.author.guild_permissions.administrator:
+        if not (ctx.author.guild_permissions.administrator or tem_acesso_total(ctx.author)):
             raise commands.MissingPermissions(["administrator"])
         return True
 
