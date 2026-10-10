@@ -35,7 +35,7 @@ from . import _fogo_visual as visual
 # ------------------------------------------------------------------ convite
 
 
-class ConviteView(discord.ui.LayoutView):
+class ConviteView(visual.CartaoFogo):
     """Mensagem de convite com os botões Aceitar / Recusar.
 
     Usa custom_id fixo por convite, então os botões continuam funcionando
@@ -45,7 +45,6 @@ class ConviteView(discord.ui.LayoutView):
     def __init__(
         self, convite_id: int, de_id: int, para_id: int
     ) -> None:
-        super().__init__(timeout=None)
         self.convite_id = convite_id
         self.de_id = de_id
         self.para_id = para_id
@@ -66,17 +65,7 @@ class ConviteView(discord.ui.LayoutView):
         recusar.callback = self._recusar
 
         blocos = visual.texto_convite(f"<@{de_id}>", f"<@{para_id}>")
-        itens: list[discord.ui.Item] = []
-        for indice, bloco in enumerate(blocos):
-            if indice:
-                itens.append(discord.ui.Separator(visible=False))
-            itens.append(discord.ui.TextDisplay(bloco))
-        itens.append(discord.ui.Separator(visible=False))
-        itens.append(discord.ui.ActionRow(aceitar, recusar))
-
-        self.add_item(
-            discord.ui.Container(*itens)
-        )
+        super().__init__(*blocos, botoes=[aceitar, recusar], cor=visual.COR_POYO)
 
     async def _so_convidado(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.para_id:
@@ -111,7 +100,7 @@ class ConviteView(discord.ui.LayoutView):
             )
             return
 
-        await interaction.response.edit_message(view=novo)
+        await interaction.response.edit_message(**visual.edicao(novo))
         self.stop()
 
         if resultado == "ok" and fogo is not None:
@@ -138,7 +127,7 @@ class ConviteView(discord.ui.LayoutView):
             )
             return
 
-        await interaction.response.edit_message(view=novo)
+        await interaction.response.edit_message(**visual.edicao(novo))
         self.stop()
 
 
@@ -182,23 +171,13 @@ def _view_do_dia(
 def _envio(client: discord.Client, fogo: sqlite3.Row, modo: str) -> dict:
     """Argumentos de um envio novo: a view e, se for o painel, o GIF."""
     view = _view_do_dia(client, fogo, modo)
-    dados: dict = {"view": view}
-    if getattr(view, "enfeite", False):
-        dados["files"] = [visual.arquivo_enfeite()]
-    return dados
+    return visual.envio(view)
 
 
 def _envio_apagado(fogo: sqlite3.Row) -> dict:
-    """Argumentos do aviso "Fogo apagado": o cartão e o GIF azul-gelo."""
-    usar = visual.gelo_existe()
-    dados: dict = {
-        "view": visual.cartao_fogo_apagado(
-            fogo, midia=visual.GELO_NOME if usar else None
-        )
-    }
-    if usar:
-        dados["files"] = [visual.arquivo_gelo()]
-    return dados
+    """Aviso de apagão com animação azul e Poyo com frio."""
+    return visual.envio(visual.cartao_fogo_apagado(fogo))
+
 
 
 def _paineis_unicos(paineis) -> list[tuple[sqlite3.Row, str]]:
@@ -297,7 +276,7 @@ async def acender(interaction: discord.Interaction, fogo_id: int) -> None:
             msg and any(a.filename == visual.ENFEITE_NOME for a in msg.attachments)
         )
         await interaction.response.edit_message(
-            view=_view_do_dia(interaction.client, fogo, modo, enfeite=enfeite)
+            **visual.edicao(_view_do_dia(interaction.client, fogo, modo, enfeite=enfeite))
         )
 
         cog = interaction.client.get_cog("Fogo")
@@ -392,7 +371,7 @@ class NomeModal(discord.ui.Modal, title="Nome do Fogo"):
 
         if interaction.guild is not None:
             await interaction.response.send_message(
-                view=cartao, allowed_mentions=mencoes
+                **visual.envio(cartao), allowed_mentions=mencoes
             )
             return
 
@@ -404,7 +383,7 @@ class NomeModal(discord.ui.Modal, title="Nome do Fogo"):
         try:
             if canal is None:
                 raise discord.HTTPException(None, "canal indisponível")
-            await canal.send(view=cartao, allowed_mentions=mencoes)
+            await canal.send(**visual.envio(cartao), allowed_mentions=mencoes)
         except (discord.Forbidden, discord.HTTPException):
             await interaction.followup.send(
                 "Não consegui postar no canal. Use `,nomefogo` no servidor.",
@@ -530,7 +509,7 @@ class RespostaNomeBotao(
 
         if status == "aceito":
             await interaction.response.edit_message(
-                view=visual.cartao_fogo_batizado(fogo)
+                **visual.edicao(visual.cartao_fogo_batizado(fogo))
             )
             cog = interaction.client.get_cog("Fogo")
             if cog is not None:  # o nome novo aparece nos painéis de hoje
@@ -540,27 +519,27 @@ class RespostaNomeBotao(
                     print(f"Fogo {fogo['id']}: erro ao atualizar painéis: {erro!r}")
         elif status == "recusado":
             await interaction.response.edit_message(
-                view=visual.cartao_nome_recusado(
+                **visual.edicao(visual.cartao_nome_recusado(
                     fogo, nome_sugerido or "sugerido", interaction.user.id
-                )
+                ))
             )
         elif status == "expirada":
             await interaction.response.edit_message(
-                view=visual.cartao_proposta_encerrada(
+                **visual.edicao(visual.cartao_proposta_encerrada(
                     "Sugestão expirada (24 horas)."
-                )
+                ))
             )
         elif status == "antiga":
             await interaction.response.edit_message(
-                view=visual.cartao_proposta_encerrada(
+                **visual.edicao(visual.cartao_proposta_encerrada(
                     "Sugestão já respondida ou substituída."
-                )
+                ))
             )
         elif status == "inativo":
             await interaction.response.edit_message(
-                view=visual.cartao_proposta_encerrada(
+                **visual.edicao(visual.cartao_proposta_encerrada(
                     "O Fogo apagou antes da resposta."
-                )
+                ))
             )
         else:
             avisos = {
@@ -613,9 +592,9 @@ class Fogo(commands.Cog):
         """Aviso curto: efêmero no slash, some sozinho no comando de prefixo."""
         view = visual.cartao_aviso(titulo, texto)
         if ctx.interaction is not None:
-            await ctx.send(view=view, ephemeral=True)
+            await ctx.send(**visual.envio(view), ephemeral=True)
         else:
-            await ctx.send(view=view, delete_after=15)
+            await ctx.send(**visual.envio(view), delete_after=15)
 
     async def _marcar_mensagem_expirada(self, convite: sqlite3.Row) -> None:
         if convite["mensagem_id"] is None:
@@ -628,9 +607,9 @@ class Fogo(commands.Cog):
                 return
         try:
             await canal.get_partial_message(convite["mensagem_id"]).edit(
-                view=visual.cartao_convite_expirado(
+                **visual.edicao(visual.cartao_convite_expirado(
                     f"<@{convite['de_id']}>", f"<@{convite['para_id']}>"
-                )
+                ))
             )
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             pass
@@ -813,7 +792,7 @@ class Fogo(commands.Cog):
         for enfeite in (True, False):
             try:
                 await self._mensagem(p).edit(
-                    view=_view_do_dia(self.bot, fogo, modo, enfeite=enfeite)
+                    **visual.edicao(_view_do_dia(self.bot, fogo, modo, enfeite=enfeite))
                 )
                 return
             except (discord.NotFound, discord.Forbidden):
@@ -840,7 +819,7 @@ class Fogo(commands.Cog):
         for p, _modo in _paineis_unicos(paineis):
             try:
                 await self._mensagem(p).edit(
-                    view=visual.cartao_painel_encerrado(fogo)
+                    **visual.edicao(visual.cartao_painel_encerrado(fogo))
                 )
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 pass
@@ -851,7 +830,7 @@ class Fogo(commands.Cog):
             if canal is not None:
                 try:
                     await canal.get_partial_message(fogo["painel_id"]).edit(
-                        view=visual.cartao_painel_encerrado(fogo)
+                        **visual.edicao(visual.cartao_painel_encerrado(fogo))
                     )
                 except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                     pass
@@ -893,7 +872,7 @@ class Fogo(commands.Cog):
         for p, _modo in _paineis_unicos(paineis):
             try:
                 await self._mensagem(p).edit(
-                    view=visual.cartao_fogo_removido(fogo)
+                    **visual.edicao(visual.cartao_fogo_removido(fogo))
                 )
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 pass
@@ -902,7 +881,7 @@ class Fogo(commands.Cog):
             if canal is not None:
                 try:
                     await canal.get_partial_message(fogo["painel_id"]).edit(
-                        view=visual.cartao_fogo_removido(fogo)
+                        **visual.edicao(visual.cartao_fogo_removido(fogo))
                     )
                 except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                     pass
@@ -1006,7 +985,7 @@ class Fogo(commands.Cog):
 
         try:
             mensagem = await ctx.send(
-                view=ConviteView(convite_id, autor.id, membro.id),
+                **visual.envio(ConviteView(convite_id, autor.id, membro.id)),
                 allowed_mentions=discord.AllowedMentions(users=[membro]),
             )
         except (discord.Forbidden, discord.HTTPException):
@@ -1078,7 +1057,7 @@ class Fogo(commands.Cog):
             return
 
         await ctx.send(
-            view=visual.cartao_convite_nome(fogo, [NomeBotao(fogo["id"])]),
+            **visual.envio(visual.cartao_convite_nome(fogo, [NomeBotao(fogo["id"])])),
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
@@ -1132,11 +1111,11 @@ class Fogo(commands.Cog):
             linhas.append(f"-# ... e mais {len(lista) - 15} Fogo(s).")
 
         await ctx.send(
-            view=visual.CartaoFogo(
+            **visual.envio(visual.CartaoFogo(
                 f"## {visual.EMOJI_FOGO_FELIZ} Fogos de {alvo.display_name}",
                 "\n\n".join(linhas),
                 cor=visual.COR_FOGO,
-            ),
+            )),
             allowed_mentions=discord.AllowedMentions.none(),
         )
 

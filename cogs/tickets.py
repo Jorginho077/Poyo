@@ -28,6 +28,8 @@ BANNER_NAME = "banner.png"
 # gif do inicio e do final do painel e do ticket
 # o ideal e salvar o gif em assets/gif.gif (nao expira) o link do discord morre em ~24h
 GIF_FILE = Path(__file__).resolve().parent.parent / "assets" / "gif.gif"
+if not GIF_FILE.is_file():
+    GIF_FILE = GIF_FILE.with_name("Tumblr-l-67143811701311.gif")
 GIF_NAME = "gif.gif"
 GIF_URL = os.getenv("TICKET_GIF_URL", "https://cdn.discordapp.com/attachments/1556065837830639676/1557126421896372254/Tumblr_l_67143811701311.gif?backend=b2&ex=6ac6aa7c&is=6ac558fc&hm=05eabefc1e0d8f17b1c9e9afedb11113d956579e45035bfd070c51cdd32150b6&").strip()
 
@@ -344,7 +346,7 @@ class TicketMenu(discord.ui.Select):
         await _menu_action(interaction, self.values[0])
 
 
-# monta o ticket: retangulo de cima com as infos e o de baixo so com o menu
+# Ticket completo em um único container: mídia, informações e ações.
 def build_ticket_view(data, cfg, ping=""):
     t = cat_of(cfg, data["tipo"])
     claimed = data.get("claimed")
@@ -388,11 +390,16 @@ def build_ticket_view(data, cfg, ping=""):
     topo = _img(cfg["painel"].get("banner"))
     fim = _img(cfg["painel"].get("gif_fim"))
     if topo:
-        view.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(topo)))   # solta, sem caixa escura em volta
+        cartao = discord.ui.Container(
+            discord.ui.MediaGallery(discord.MediaGalleryItem(topo)),
+            *cartao.children, accent_colour=tom(1),
+        )
+    cartao.add_item(discord.ui.Separator())
+    for item in baixo:
+        cartao.add_item(item)
     view.add_item(cartao)
-    view.add_item(discord.ui.Container(*baixo, accent_colour=tom(2)))
     if fim:
-        view.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(fim)))   # solta, sem caixa escura em volta
+        cartao.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(fim)))
     return view
 
 
@@ -540,46 +547,30 @@ def _miudo(texto: str) -> str:
     return "\n".join(linhas)
 
 
-# painel em retangulos separados: gif · linha fininha · texto · linha fininha · menu · gif
+# Painel inteiro em um único container, mantendo configurações e IDs.
 def build_panel_view(cfg):
     p = cfg["painel"]
-    cor = p.get("cor")
-    tom = lambda i: cor if cor is not None else PANEL_TONS[i]
-    view = discord.ui.LayoutView(timeout=None)
-
+    cats = cfg["categorias"]
+    itens = []
     banner = _img(p.get("banner"))
     if banner:
-        view.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(banner)))   # solta, sem caixa escura em volta
-        # retangulo fininho so com a linha
-        view.add_item(discord.ui.Container(discord.ui.Separator(), accent_colour=tom(1)))
-
-    cats = cfg["categorias"]
-    texto = []
-    # titulo pequeno (###) e o resto em letrinha miudinha (-#)
-    head = f"### {p['titulo']}" if p.get("titulo") else ""
+        itens.append(discord.ui.MediaGallery(discord.MediaGalleryItem(banner)))
+        itens.append(discord.ui.Separator())
+    head = f"## {p['titulo']}" if p.get("titulo") else ""
     if p.get("descricao"):
-        head = (head + "\n" if head else "") + _miudo(p["descricao"])
+        head += ("\n" if head else "") + p["descricao"]
     if head:
-        texto.append(discord.ui.TextDisplay(head))
-
-    # categorias numa linha so (as dicas ficam na descricao do menu)
+        itens.append(discord.ui.TextDisplay(head))
     notas = []
     if cats:
         notas.append("-# " + " · ".join(f"{c['emoji']} {c['label']}".strip() for c in cats.values()))
     if p.get("info"):
         notas.append(_miudo(p["info"]))
     if notas:
-        texto += [discord.ui.Separator(), discord.ui.TextDisplay("\n".join(notas))]
-    if texto:
-        # sem barra branca na lateral: so aparece se o admin escolher uma cor
-        view.add_item(discord.ui.Container(*texto, accent_colour=tom(2)))
-        # retangulo fininho so com a linha (igual ao de cima, mas embaixo do texto)
-        view.add_item(discord.ui.Container(discord.ui.Separator(), accent_colour=tom(3)))
-
-    # retangulo de baixo: a caixa de selecao (ou os botoes no modo antigo)
-    baixo = []
+        itens.extend([discord.ui.Separator(), discord.ui.TextDisplay("\n".join(notas))])
+    itens.append(discord.ui.Separator())
     if p.get("modo") == "menu":
-        baixo.append(discord.ui.ActionRow(PanelSelect(cfg)))
+        itens.append(discord.ui.ActionRow(PanelSelect(cfg)))
     else:
         fixo = p.get("botao") or ""
         botoes = [
@@ -587,14 +578,14 @@ def build_panel_view(cfg):
             for tipo, c in cats.items()
         ]
         for i in range(0, len(botoes), 5):
-            baixo.append(discord.ui.ActionRow(*botoes[i:i + 5]))
+            itens.append(discord.ui.ActionRow(*botoes[i:i + 5]))
     if p.get("rodape"):
-        baixo.append(discord.ui.TextDisplay(f"-# {p['rodape']}"))
-    view.add_item(discord.ui.Container(*baixo, accent_colour=tom(4)))
-    # gif do final
+        itens.append(discord.ui.TextDisplay(f"-# {p['rodape']}"))
     fim = _img(p.get("gif_fim"))
     if fim:
-        view.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(fim)))   # solta, sem caixa escura em volta
+        itens.append(discord.ui.MediaGallery(discord.MediaGalleryItem(fim)))
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(discord.ui.Container(*itens, accent_colour=p.get("cor")))
     return view
 
 
@@ -1504,20 +1495,8 @@ class ConfigView(discord.ui.LayoutView):
         if self.notice:
             children.append(discord.ui.TextDisplay(f"-# {self.notice}"))
         self.clear_items()
-        # cada secao vira um balao proprio (igual ao painel de atendimento)
-        # as linhas separadoras viram o espaco entre os baloes
-        grupos, atual = [], []
-        for item in children:
-            if isinstance(item, discord.ui.Separator):
-                if atual:
-                    grupos.append(atual)
-                atual = []
-            else:
-                atual.append(item)
-        if atual:
-            grupos.append(atual)
-        for grupo in grupos:
-            self.add_item(discord.ui.Container(*grupo))
+        # As seções compartilham uma caixa, preservando os separadores.
+        self.add_item(discord.ui.Container(*children))
 
     # ---- coisinhas pra montar os itens
 

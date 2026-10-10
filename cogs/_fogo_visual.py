@@ -37,12 +37,12 @@ COR_NEUTRA = discord.Colour.from_rgb(110, 110, 120)
 
 
 # GIF de brilhos que fica em cima do botão "Acender o Fogo".
-ENFEITE_NOME = "fogo_brilho.gif"
+ENFEITE_NOME = "poyo_fogo_aurora.gif"
 ENFEITE_CAMINHO = Path(__file__).resolve().parent.parent / "assets" / ENFEITE_NOME
 
 
 # GIF de brilhos azul-gelo, usado no cartão "Fogo apagado".
-GELO_NOME = "fogo_gelo.gif"
+GELO_NOME = "poyo_fogo_neve.gif"
 GELO_CAMINHO = Path(__file__).resolve().parent.parent / "assets" / GELO_NOME
 
 
@@ -77,12 +77,61 @@ def dias(n: int) -> str:
 # ---------------------------------------------------------------- cartão
 
 
-class CartaoFogo(discord.ui.LayoutView):
-    """Container com blocos de texto separados e, opcionalmente, botões.
+ASSETS = Path(__file__).resolve().parent.parent / "assets"
+COR_POYO = discord.Colour.from_rgb(244, 147, 185)
+COR_LENDARIO = discord.Colour.from_rgb(247, 202, 113)
 
-    Sem cor lateral (o parâmetro `cor` é aceito só por compatibilidade).
-    `midia` é o nome de um anexo ("attachment://...") mostrado acima dos botões.
+
+def container(*itens: discord.ui.Item, cor=COR_POYO, midia=None):
+    """Uma caixa unificada com a arte original do Poyo e cor de estado."""
+    nome = midia or (GELO_NOME if cor == COR_FRIO else ENFEITE_NOME)
+    conteudo = []
+    if (ASSETS / nome).is_file():
+        conteudo.extend([
+            discord.ui.MediaGallery(discord.MediaGalleryItem(
+                f"attachment://{nome}", description="Poyo, nosso axolotezinho, em uma animação original.")),
+            discord.ui.Separator(),
+        ])
+    conteudo.extend(itens)
+    conteudo.extend([
+        discord.ui.Separator(visible=False, spacing=discord.SeparatorSpacing.small),
+        discord.ui.TextDisplay("-# ✦ POYO  ·  um carinho em cada chama ♡"),
+    ])
+    return discord.ui.Container(*conteudo, accent_colour=cor)
+
+
+def arquivos(view: discord.ui.LayoutView) -> list[discord.File]:
+    """Anexa exatamente a mídia usada; cada envio/edição abre arquivos novos.
+
+    Não depende de links temporários e funciona também em mensagens antigas.
     """
+    nomes = set()
+    def visitar(valor):
+        if isinstance(valor, dict):
+            for item in valor.values():
+                visitar(item)
+        elif isinstance(valor, list):
+            for item in valor:
+                visitar(item)
+        elif isinstance(valor, str) and valor.startswith("attachment://"):
+            nome = valor.removeprefix("attachment://")
+            if Path(nome).name == nome and (ASSETS / nome).is_file():
+                nomes.add(nome)
+    visitar(view.to_components())
+    return [discord.File(ASSETS / nome, filename=nome) for nome in sorted(nomes)]
+
+
+def envio(view: discord.ui.LayoutView) -> dict:
+    return {"view": view, "files": arquivos(view)}
+
+
+def edicao(view: discord.ui.LayoutView) -> dict:
+    # Substitui os anexos visuais junto com o estado, evitando GIFs quebrados.
+    return {"view": view, "attachments": arquivos(view)}
+
+
+class CartaoFogo(discord.ui.LayoutView):
+    """Container único com banner animado, hierarquia de texto e ações."""
 
     def __init__(
         self,
@@ -93,27 +142,21 @@ class CartaoFogo(discord.ui.LayoutView):
         timeout: float | None = None,
     ) -> None:
         super().__init__(timeout=timeout)
-
-        itens: list[discord.ui.Item] = []
+        itens = []
         for indice, bloco in enumerate(blocos):
             if indice:
                 itens.append(discord.ui.Separator(visible=False))
             itens.append(discord.ui.TextDisplay(bloco))
-
-        if midia:
-            itens.append(discord.ui.Separator(visible=False))
-            itens.append(
-                discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(f"attachment://{midia}")
-                )
-            )
-
         if botoes:
-            itens.append(discord.ui.Separator(visible=False))
+            itens.append(discord.ui.Separator())
             itens.append(discord.ui.ActionRow(*botoes))
+        self.add_item(container(*itens, cor=cor, midia=midia))
+        self.enfeite = arquivos_nomes(self)
 
-        self.add_item(discord.ui.Container(*itens))
-        self.enfeite = bool(midia)  # o envio precisa anexar o GIF
+
+def arquivos_nomes(view):
+    # Só inspeciona referências; não abre arquivos durante a montagem da view.
+    return "attachment://" in str(view.to_components())
 
 
 # ----------------------------------------------------------------- textos
@@ -197,15 +240,20 @@ def frase_chama(sequencia: int) -> str:
 
 def blocos_painel(f) -> list[str]:
     """Texto do painel do dia (o GIF e o botão são montados pelo cog)."""
-    marca_a = "✅" if f["a_acendeu"] else "⬜"
-    marca_b = "✅" if f["b_acendeu"] else "⬜"
-    seq = f"Sequência de {dias(f['sequencia'])} · " if f["sequencia"] else ""
+    marca_a = "🔥 acendeu" if f["a_acendeu"] else "⏳ esperando"
+    marca_b = "🔥 acendeu" if f["b_acendeu"] else "⏳ esperando"
+    nome = f"**{f['nome']}**" if f["nome"] else "A chaminha de vocês"
+    total = int(bool(f["a_acendeu"])) + int(bool(f["b_acendeu"]))
     return [
-        f"### {EMOJI_FOGO} Acender o Fogo ✨\n"
-        f"{marca_a} <@{f['usuario_a']}>\n"
-        f"{marca_b} <@{f['usuario_b']}>\n"
-        f"-# {seq}Até {hora.rotulo_fim()}"
+        f"## {EMOJI_FOGO} Acender o Fogo",
+        f"### {nome}\n"
+        f"**{dias(f['sequencia'])}** de carinho em sequência\n\n"
+        f"<@{f['usuario_a']}> · {marca_a}\n"
+        f"<@{f['usuario_b']}> · {marca_b}",
+        f"**{'▰' * total}{'▱' * (2 - total)}  {total}/2** · chaminhas de hoje\n"
+        f"-# Até {hora.rotulo_fim()} · o Poyo está torcendo por vocês ♡",
     ]
+
 
 
 def cartao_fogo_aceso(

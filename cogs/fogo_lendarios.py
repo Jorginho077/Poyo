@@ -101,7 +101,7 @@ class FogoLendarios(commands.Cog):
                 return False
         try:
             await canal.send(
-                view=cartao,
+                **visual.envio(cartao),
                 allowed_mentions=discord.AllowedMentions(
                     users=[
                         discord.Object(marco["usuario_a"]),
@@ -214,7 +214,7 @@ class FogoLendarios(commands.Cog):
                 melhor = max(candidatos, key=lambda f: f["sequencia"])
 
         await ctx.send(
-            view=lend.cartao_hall(lista, melhor),
+            **visual.envio(lend.cartao_hall(lista, melhor)),
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
@@ -240,9 +240,9 @@ class FogoLendarios(commands.Cog):
         else:
             cartao = visual.cartao_aviso("Não deu certo", detalhe)
         if ctx.interaction is not None:
-            await ctx.send(view=cartao, ephemeral=True)
+            await ctx.send(**visual.envio(cartao), ephemeral=True)
         else:
-            await ctx.send(view=cartao)
+            await ctx.send(**visual.envio(cartao))
 
 
 async def setup(bot: commands.Bot) -> None:

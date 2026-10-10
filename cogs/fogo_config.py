@@ -90,12 +90,12 @@ class HorarioModal(discord.ui.Modal, title="Horário da virada"):
 
         ativos = await _ativos_do_servidor(self.painel.guild_id)
         await interaction.response.edit_message(
-            view=PainelConfig(
+            **visual.edicao(PainelConfig(
                 self.painel.bot,
                 self.painel.autor_id,
                 self.painel.guild_id,
                 ativos,
-            )
+            ))
         )
 
 
@@ -138,7 +138,7 @@ class PainelConfig(_ViewDoAutor):
         remover.callback = self._remover
 
         self.add_item(
-            discord.ui.Container(
+            visual.container(
                 discord.ui.TextDisplay("## ⚙️ Config do Fogo"),
                 discord.ui.Separator(visible=False),
                 discord.ui.TextDisplay(
@@ -181,7 +181,7 @@ class PainelConfig(_ViewDoAutor):
         await asyncio.to_thread(conf.definir_envio, dm, servidor)
         ativos = await _ativos_do_servidor(self.guild_id)
         await interaction.response.edit_message(
-            view=PainelConfig(self.bot, self.autor_id, self.guild_id, ativos)
+            **visual.edicao(PainelConfig(self.bot, self.autor_id, self.guild_id, ativos))
         )
 
     async def _alternar_dm(self, interaction: discord.Interaction) -> None:
@@ -192,7 +192,7 @@ class PainelConfig(_ViewDoAutor):
 
     async def _remover(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(
-            view=EscolherPessoa(self.autor_id, self.guild_id),
+            **visual.envio(EscolherPessoa(self.autor_id, self.guild_id)),
             ephemeral=True,
         )
 
@@ -209,7 +209,7 @@ class EscolherPessoa(_ViewDoAutor):
         )
         self.seletor.callback = self._escolheu
         self.add_item(
-            discord.ui.Container(
+            visual.container(
                 discord.ui.TextDisplay(
                     "## 🧯 Remover Fogo\nEscolha a pessoa."
                 ),
@@ -225,10 +225,10 @@ class EscolherPessoa(_ViewDoAutor):
         )
         if not lista:
             await interaction.response.edit_message(
-                view=visual.cartao_aviso(
+                **visual.edicao(visual.cartao_aviso(
                     "Nada a remover",
                     f"<@{pessoa.id}> não tem Fogo ativo aqui.",
-                )
+                ))
             )
             return
         if len(lista) == 1:
@@ -239,7 +239,7 @@ class EscolherPessoa(_ViewDoAutor):
             view = EscolherFogo(
                 self.autor_id, pessoa.id, lista, interaction.guild
             )
-        await interaction.response.edit_message(view=view)
+        await interaction.response.edit_message(**visual.edicao(view))
 
 
 class EscolherFogo(_ViewDoAutor):
@@ -262,7 +262,7 @@ class EscolherFogo(_ViewDoAutor):
         )
         self.seletor.callback = self._escolheu
         self.add_item(
-            discord.ui.Container(
+            visual.container(
                 discord.ui.TextDisplay(
                     f"## 🧯 Remover Fogo\n<@{pessoa_id}> tem "
                     f"{len(lista)} Fogos. Qual remover?"
@@ -278,13 +278,13 @@ class EscolherFogo(_ViewDoAutor):
         )
         if fogo is None or not fogo["ativo"]:
             await interaction.response.edit_message(
-                view=visual.cartao_aviso(
+                **visual.edicao(visual.cartao_aviso(
                     "Já encerrado", "Esse Fogo já não estava ativo."
-                )
+                ))
             )
             return
         await interaction.response.edit_message(
-            view=ConfirmarRemocao(self.autor_id, fogo)
+            **visual.edicao(ConfirmarRemocao(self.autor_id, fogo))
         )
 
 
@@ -304,7 +304,7 @@ class ConfirmarRemocao(_ViewDoAutor):
 
         nome = f"\n{visual.EMOJI_FOGO} **Fogo:** {fogo['nome']}" if fogo["nome"] else ""
         self.add_item(
-            discord.ui.Container(
+            visual.container(
                 discord.ui.TextDisplay("## 🧯 Remover Fogo"),
                 discord.ui.Separator(visible=False),
                 discord.ui.TextDisplay(
@@ -319,7 +319,7 @@ class ConfirmarRemocao(_ViewDoAutor):
 
     async def _cancelar(self, interaction: discord.Interaction) -> None:
         await interaction.response.edit_message(
-            view=visual.cartao_aviso("Cancelado", "Nada foi removido.")
+            **visual.edicao(visual.cartao_aviso("Cancelado", "Nada foi removido."))
         )
         self.stop()
 
@@ -342,7 +342,7 @@ class ConfirmarRemocao(_ViewDoAutor):
                 f"<@{fogo['usuario_a']}> + <@{fogo['usuario_b']}> "
                 "não têm mais um Fogo. Eles podem abrir outro com `,fogo`.",
             )
-        await interaction.edit_original_response(view=aviso)
+        await interaction.edit_original_response(**visual.edicao(aviso))
         self.stop()
 
 
@@ -372,9 +372,9 @@ class FogoConfig(commands.Cog):
         ativos = await _ativos_do_servidor(ctx.guild.id)
         view = PainelConfig(self.bot, ctx.author.id, ctx.guild.id, ativos)
         if ctx.interaction is not None:
-            await ctx.send(view=view, ephemeral=True)
+            await ctx.send(**visual.envio(view), ephemeral=True)
         else:
-            await ctx.send(view=view, delete_after=300)
+            await ctx.send(**visual.envio(view), delete_after=300)
 
 
 async def setup(bot: commands.Bot) -> None:
