@@ -149,7 +149,8 @@ DEFAULTS = {
     "modal": {"assunto": "Assunto", "detalhes": "Detalhes"},
     "staff": os.getenv("TICKET_STAFF_ROLE", "Staff"),   # id do cargo ou nome
     "log": os.getenv("TICKET_LOG_CHANNEL", "chat-staff"),  # id do canal ou pedaco do nome
-    "categoria": None,         # categoria do discord onde os ticets nascem
+    "categoria": None,         # (antigo) categoria dos tickets que eram canais; os novos sao topicos
+    "canal_tickets": None,     # canal onde os topicos de ticket nascem (vazio = canal do painel)
     "limite": max(1, _env_int("TICKET_MAX_PER_USER", 1)),
     "delay": 10,               # segundos ate apagar o canal
     "transcricao_dm": True,
@@ -353,10 +354,21 @@ def _data_for(channel):
 
 
 def _open_tickets(guild: discord.Guild, user_id: int) -> list:
-    return [
-        ch for ch in guild.text_channels
-        if (info := _topic_info(ch)) is not None and info[0] == user_id
-    ]
+    abertos, vistos = [], set()
+    # tickets em topico: o dono fica salvo no estado
+    for cid, d in state["tickets"].items():
+        if d.get("owner") != user_id:
+            continue
+        ch = guild.get_channel_or_thread(int(cid))
+        if ch is not None and ch.id not in vistos:
+            vistos.add(ch.id)
+            abertos.append(ch)
+    # tickets antigos em canal: o dono fica no topico do canal
+    for ch in guild.text_channels:
+        if ch.id not in vistos and (info := _topic_info(ch)) is not None and info[0] == user_id:
+            vistos.add(ch.id)
+            abertos.append(ch)
+    return abertos
 
 
 # ---------------------------------------------------------------- visual
@@ -821,47 +833,59 @@ async def create_ticket(interaction: discord.Interaction, tipo: str, assunto: st
         return
 
     roles = staff_roles(guild, cfg, tipo)
-    # so o dono e a staff veem
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=False),
-        user: discord.PermissionOverwrite(
-            view_channel=True, send_messages=True, read_message_history=True,
-            attach_files=True, embed_links=True,
-        ),
-        guild.me: discord.PermissionOverwrite(
-            view_channel=True, send_messages=True, manage_channels=True, manage_messages=True
-        ),
-    }
-    for r in roles:
-        overwrites[r] = discord.PermissionOverwrite(
-            view_channel=True, send_messages=True, read_message_history=True,
-            attach_files=True, manage_messages=True,
-        )
 
-    # categoria do discord: a da categoria de ticket dps a geral dps a do painel
+    # onde o topico nasce: o canal configurado (canal_tickets) ou o canal do painel
     parent = None
-    for ref in (t.get("categoria"), cfg.get("categoria")):
-        found = guild.get_channel(ref) if isinstance(ref, int) else None
-        if isinstance(found, discord.CategoryChannel):
-            parent = found
-            break
-    if parent is None and interaction.channel:
-        parent = interaction.channel.category
-
-    try:
-        channel = await guild.create_text_channel(
-            _channel_name(cfg, t, tipo, user),
-            category=parent,
-            topic=f"ticket:{user.id}:{tipo}",
-            overwrites=overwrites,
-            reason=f"Ticket de {user} ({tipo})",
+    ref = cfg.get("canal_tickets")
+    found = guild.get_channel(ref) if isinstance(ref, int) else None
+    if isinstance(found, discord.TextChannel):
+        parent = found
+    else:
+        atual = interaction.channel
+        if isinstance(atual, discord.Thread):
+            atual = atual.parent
+        if isinstance(atual, discord.TextChannel):
+            parent = atual
+    if parent is None:
+        await interaction.followup.send(
+            view=Card("Não consegui abrir o ticket", "Não achei um canal de texto pra criar o tópico. Avise a Staff."),
+            ephemeral=True,
         )
+        return
+
+    # topico privado: so entra quem for adicionado (dono + staff pelo ping dos cargos)
+    nome = _channel_name(cfg, t, tipo, user)
+    channel = None
+    try:
+        for arquivar in (10080, 1440):  # 7 dias, se o servidor nao aceitar cai pra 1 dia
+            try:
+                channel = await parent.create_thread(
+                    name=nome,
+                    type=discord.ChannelType.private_thread,
+                    invitable=False,
+                    auto_archive_duration=arquivar,
+                    reason=f"Ticket de {user} ({tipo})",
+                )
+                break
+            except discord.HTTPException as e:
+                if e.code == 50035 and arquivar != 1440:  # valor de arquivamento invalido
+                    continue
+                raise
     except discord.HTTPException as e:
-        log.warning("nao consegui criar o ticket: %s", e)
+        log.warning(
+            "nao consegui criar o topico do ticket em #%s: %s "
+            "(o bot precisa de Criar Topicos Privados, Enviar Mensagens em Topicos e Gerenciar Topicos)",
+            parent.name, e,
+        )
         await interaction.followup.send(
             view=Card("Não consegui abrir o ticket", "Avise a Staff, por favor."), ephemeral=True
         )
         return
+
+    try:
+        await channel.add_user(user)
+    except discord.HTTPException as e:
+        log.warning("nao consegui adicionar %s ao topico %s: %s", user, channel.id, e)
 
     data = {
         "owner": user.id, "tipo": tipo, "assunto": assunto.strip(), "descricao": descricao.strip(),
@@ -939,12 +963,15 @@ class AddMemberRow(discord.ui.ActionRow):
                 view=Card("Selecione uma pessoa", "Bots não podem ser adicionados aqui."))
             return
         try:
-            await interaction.channel.set_permissions(
-                member, view_channel=True, send_messages=True, read_message_history=True, attach_files=True
-            )
+            if isinstance(interaction.channel, discord.Thread):
+                await interaction.channel.add_user(member)
+            else:  # ticket antigo em canal
+                await interaction.channel.set_permissions(
+                    member, view_channel=True, send_messages=True, read_message_history=True, attach_files=True
+                )
         except discord.HTTPException:
             await interaction.response.edit_message(
-                view=Card("Não consegui adicionar", "Confira as permissões do bot neste canal."))
+                view=Card("Não consegui adicionar", "Confira as permissões do bot neste ticket."))
             return
         await interaction.response.edit_message(view=Card("Pronto", f"{member.mention} foi adicionado."))
         await interaction.followup.send(
@@ -998,7 +1025,7 @@ class ConfirmCloseView(discord.ui.LayoutView):
             discord.ui.Container(
                 discord.ui.TextDisplay(
                     "### Encerrar este ticket?\n"
-                    "O canal será apagado e a transcrição da conversa será enviada."
+                    "O ticket será apagado e a transcrição da conversa será enviada."
                 ),
                 ConfirmCloseRow(),
             )
@@ -1066,7 +1093,7 @@ async def close_ticket(channel, closer):
         wait = f"**{delay} segundos**" if delay else "instantes"
         try:
             await channel.send(
-                view=Card("Ticket encerrado", f"Encerrado por {closer.mention}. Este canal será apagado em {wait}."),
+                view=Card("Ticket encerrado", f"Encerrado por {closer.mention}. Este {'tópico' if isinstance(channel, discord.Thread) else 'canal'} será apagado em {wait}."),
                 allowed_mentions=NO_MENTIONS,
             )
         except discord.HTTPException:
@@ -1126,9 +1153,10 @@ SETTINGS = {
     "campo_detalhes": (("modal", "detalhes"), "texto", 45, False, "nome do 2º campo do formulário"),
     "staff": (("staff",), "cargos", None, True, "cargos da equipe (ids, nomes ou menções, separados por espaço ou vírgula)"),
     "log": (("log",), "canal", None, True, "canal que recebe as transcrições"),
-    "categoria": (("categoria",), "categoria", None, True, "categoria do Discord onde os tickets nascem"),
+    "categoria": (("categoria",), "categoria", None, True, "(antigo) categoria dos tickets em canal; os novos viram tópicos"),
+    "canal_tickets": (("canal_tickets",), "canal", None, True, "canal onde os tópicos de ticket são criados (vazio = canal do painel)"),
     "limite": (("limite",), "int", (1, 10), False, "tickets abertos por pessoa"),
-    "delay": (("delay",), "int", (0, 60), False, "segundos até apagar o canal ao fechar"),
+    "delay": (("delay",), "int", (0, 60), False, "segundos até apagar o tópico ao fechar"),
     "transcricao_dm": (("transcricao_dm",), "bool", None, False, "enviar transcrição na DM"),
     "transcricao_log": (("transcricao_log",), "bool", None, False, "enviar transcrição pro canal de log"),
 }
@@ -1326,7 +1354,7 @@ HELP_1 = (
     "A imagem do **topo** enviada assim fica salva em `assets/ticket_topo` e vale pra todos os servidores.\n"
     "**Cores:** `cor` (painel) e `cor_ticket`. Aceitam hex (`#5865F2`) ou nome "
     "(" + ", ".join(COLOR_NAMES) + "). Sem cor = tons de cinza.\n"
-    "**Equipe:** `staff` (cargos: ids, nomes ou menções, vários separados por vírgula) · `log` (canal) · `categoria` (categoria do Discord pros tickets)\n"
+    "**Equipe:** `staff` (cargos: ids, nomes ou menções, vários separados por vírgula) · `log` (canal das transcrições) · `canal_tickets` (canal onde os tópicos de ticket nascem; vazio = canal do painel)\n"
     "**Regras:** `limite` (1 a 10) · `delay` (0 a 60 s) · `transcricao_dm` e `transcricao_log` (sim/nao)\n\n"
     "**Variáveis** em `boasvindas`: `{usuario}` `{staff}` `{categoria}` `{emoji}`\n"
     "**Variáveis** em `nome_canal`: `{emoji}` `{tipo}` `{usuario}` `{id}`"
@@ -1867,7 +1895,7 @@ class ConfigView(discord.ui.LayoutView):
             _sec("👥 Equipe e canais", "quem atende e onde as coisas ficam"),
             discord.ui.TextDisplay(
                 f"**Cargo**  {_show(g, 'staff', cfg)}\n**Canal das transcrições**  {_show(g, 'log', cfg)}\n"
-                f"**Categoria dos tickets**  {_show(g, 'categoria', cfg)}"
+                f"**Canal dos tópicos de ticket**  {_show(g, 'canal_tickets', cfg)}"
             ),
             discord.ui.ActionRow(self._btn("Escolher cargo e canais", self._goto("geral"), emoji="👥")),
             sep(),
@@ -1910,12 +1938,12 @@ class ConfigView(discord.ui.LayoutView):
             discord.ui.ActionRow(self._btn("Tirar canal", self._clear(("log",)))),
             sep(),
 
-            _sec("📁 Categoria do Discord", f"agora: {_show(g, 'categoria', cfg)}  ·  onde os canais de ticket nascem"),
+            _sec("🧵 Canal dos tópicos de ticket", f"agora: {_show(g, 'canal_tickets', cfg)}  ·  cada ticket vira um tópico privado aqui (vazio = canal do painel)"),
             discord.ui.ActionRow(_ChanSel(
-                self._pick(("categoria",)), placeholder="Escolher a categoria",
-                channel_types=[discord.ChannelType.category], min_values=1, max_values=1,
+                self._pick(("canal_tickets",)), placeholder="Escolher o canal",
+                channel_types=[discord.ChannelType.text], min_values=1, max_values=1,
             )),
-            discord.ui.ActionRow(self._btn("Tirar categoria", self._clear(("categoria",)))),
+            discord.ui.ActionRow(self._btn("Tirar canal", self._clear(("canal_tickets",)))),
             sep(),
 
             discord.ui.ActionRow(self._btn("Voltar pro início", self._goto("home"), emoji="⬅️")),
@@ -2131,6 +2159,22 @@ class Tickets(commands.Cog):
         if state["tickets"].pop(str(channel.id), None) is not None:
             _save()
 
+    @commands.Cog.listener()
+    async def on_thread_delete(self, thread):
+        # topico de ticket apagado na mao: limpa o registro
+        if state["tickets"].pop(str(thread.id), None) is not None:
+            _save()
+
+    @commands.Cog.listener()
+    async def on_thread_update(self, before, after):
+        # o discord arquiva topico parado: ticket aberto tem que continuar aberto
+        data = state["tickets"].get(str(after.id))
+        if data and after.archived and not before.archived and not data.get("closing"):
+            try:
+                await after.edit(archived=False)
+            except discord.HTTPException as e:
+                log.warning("nao consegui reabrir o topico do ticket %s: %s", after.id, e)
+
     async def _updated(self, ctx, title, text=""):
         n = await refresh_panels(ctx.guild)
         extra = f"\n-# {n} painel(is) atualizado(s)." if n else ""
@@ -2146,7 +2190,10 @@ class Tickets(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    @commands.bot_has_permissions(manage_channels=True, send_messages=True)
+    @commands.bot_has_permissions(
+        send_messages=True, create_private_threads=True,
+        send_messages_in_threads=True, manage_threads=True,
+    )
     async def pticket(self, ctx):
         await post_panel(ctx.channel)
         try:
