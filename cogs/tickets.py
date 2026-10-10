@@ -612,9 +612,9 @@ def build_panel_view(cfg):
         head += ("\n" if head else "") + _negrito(p["descricao"])
     if head:
         itens.append(discord.ui.TextDisplay(head))
-    # categorias uma embaixo da outra; em titulo (###) o emoji fica maior
+    # categorias uma embaixo da outra, linhas coladas (titulo # abre espaco demais)
     if cats:
-        lista = "\n".join(f"### {c['emoji']} {c['label']}".replace("###  ", "### ") for c in cats.values())
+        lista = "\n".join(f"{c['emoji']} **{c['label']}**".strip() for c in cats.values())
         itens.extend([discord.ui.Separator(), discord.ui.TextDisplay(lista)])
     if p.get("info"):
         itens.extend([discord.ui.Separator(), discord.ui.TextDisplay(_negrito(p["info"], miudo=True))])
