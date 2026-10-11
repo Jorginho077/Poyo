@@ -114,8 +114,17 @@ def carregar_memoria(guild_id: int, user_id: int) -> list[dict[str, str]]:
 def post_json(url: str, payload: dict, headers: dict[str, str], timeout: int = 45) -> dict:
     corpo = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     pedido = Request(url, data=corpo, headers=headers, method="POST")
-    with urlopen(pedido, timeout=timeout) as resposta:
-        return json.loads(resposta.read().decode("utf-8"))
+    try:
+        with urlopen(pedido, timeout=timeout) as resposta:
+            return json.loads(resposta.read().decode("utf-8"))
+    except HTTPError as erro:
+        try:
+            detalhe = erro.read().decode("utf-8", errors="replace")[:300]
+        except OSError:
+            detalhe = "sem detalhes"
+        raise RuntimeError(
+            f"Gemini rejeitou a solicitação (HTTP {erro.code}). Detalhes: {detalhe}"
+        ) from erro
 
 
 def gerar_texto_sync(mensagens: list[dict[str, str]]) -> str:
@@ -183,14 +192,31 @@ def gerar_audio_sync(texto: str, destino: Path) -> None:
         },
         method="POST",
     )
-    with urlopen(pedido, timeout=60) as resposta:
-        destino.write_bytes(resposta.read())
+    try:
+        with urlopen(pedido, timeout=60) as resposta:
+            destino.write_bytes(resposta.read())
+    except HTTPError as erro:
+        try:
+            detalhe = erro.read().decode("utf-8", errors="replace")[:300]
+        except OSError:
+            detalhe = "sem detalhes"
+        raise RuntimeError(
+            "ElevenLabs rejeitou a solicitação "
+            f"(HTTP {erro.code}). Verifique ELEVENLABS_API_KEY e "
+            f"ELEVENLABS_VOICE_ID. Detalhes: {detalhe}"
+        ) from erro
 
 
 class PoyoVoz(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.locks: dict[int, asyncio.Lock] = {}
+        print(
+            "[PoyoVoz] Configuração: "
+            f"Gemini={'ok' if GEMINI_API_KEY else 'ausente'} | "
+            f"ElevenLabs chave={'ok' if ELEVENLABS_API_KEY else 'ausente'} | "
+            f"Voice ID={'ok' if ELEVENLABS_VOICE_ID else 'ausente'}"
+        )
 
     def lock_for(self, guild_id: int) -> asyncio.Lock:
         return self.locks.setdefault(guild_id, asyncio.Lock())
