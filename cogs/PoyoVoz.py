@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ids
+# Chaves e IDs ficam somente no .env.
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
 ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2").strip()
@@ -209,9 +209,12 @@ class PoyoVoz(commands.Cog):
 
     async def falar_no_canal(self, message: discord.Message, texto: str) -> bool:
         voz = getattr(message.author, "voice", None)
-        if voz is None or voz.channel is None:
+        canal = voz.channel if voz is not None else None
+        if canal is None and message.guild.voice_client is not None:
+            canal = message.guild.voice_client.channel
+        if canal is None:
+            print("[PoyoVoz] Áudio ignorado: o usuário não está em um canal de voz.")
             return False
-        canal = voz.channel
         guild_id = message.guild.id
         async with self.lock_for(guild_id):
             caminho = VOICE_DIR / f"{guild_id}-{message.id}.mp3"
@@ -282,16 +285,11 @@ class PoyoVoz(commands.Cog):
             texto = await asyncio.wait_for(
                 self.resposta_ia(message, pergunta), timeout=45
             )
-            falou = await asyncio.wait_for(self.falar_no_canal(message, texto), timeout=100)
-            if not falou:
-                await message.reply(texto, mention_author=False, delete_after=30)
+            await asyncio.wait_for(self.falar_no_canal(message, texto), timeout=100)
         except (RuntimeError, HTTPError, URLError, TimeoutError, asyncio.TimeoutError, KeyError, ValueError) as erro:
-            print(f"[PoyoVoz] Falha: {erro}")
-            await message.reply(
-                "Eu ouvi, mas minha voz está descansando agora. Configura minhas APIs no `.env` e tenta de novo!",
-                mention_author=False,
-                delete_after=15,
-            )
+            # A Poyo é uma bot de voz: falhas ficam no console e não viram
+            # uma resposta textual no canal.
+            print(f"[PoyoVoz] Falha ao responder em áudio: {erro}")
 
 
 async def setup(bot: commands.Bot) -> None:
