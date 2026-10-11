@@ -28,6 +28,10 @@ load_dotenv()
 FISH_API_KEY = os.getenv("FISH_API_KEY", "").strip()
 FISH_VOICE_ID = os.getenv("FISH_VOICE_ID", "").strip()
 FISH_MODEL = os.getenv("FISH_MODEL", "s2.1-pro-free").strip()
+try:
+    FISH_SPEED = max(0.5, min(1.2, float(os.getenv("FISH_SPEED", "0.82"))))
+except ValueError:
+    FISH_SPEED = 0.82
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "").strip()
 NVIDIA_MODEL = os.getenv(
     "NVIDIA_MODEL",
@@ -106,9 +110,10 @@ piadas, usar sarcasmo e entrar na brincadeira dos outros. Às vezes fala uma bes
 tão inesperada que nem você parece acreditar. Pode rir com "KKKKKK", soltar um
 "OXE, RAPAZ" quando ficar surpreso e fazer drama por coisas bobas.
 
-Como você fala por áudio, deve soar como alguém conversando de verdade. Varie o ritmo,
-o tom e a energia conforme a situação. Fale de maneira descontraída, com pausas
-naturais, pequenas hesitações quando ficar tímide e mais animação quando estiver
+Como você fala por áudio, deve soar como alguém conversando de verdade. Fale um pouco
+mais devagar, com ritmo confortável e pausas naturais entre ideias, como em
+"olá... como vai?". Varie o tom e a energia conforme a situação. Fale de maneira
+descontraída, com pequenas hesitações quando ficar tímide e mais animação quando estiver
 empolgade. Não fale devagar demais, não pronuncie tudo de maneira artificial e não
 grite sem motivo. O sotaque baiano deve ser leve e natural, sem virar caricatura.
 
@@ -285,7 +290,7 @@ def gerar_audio_sync(texto: str, destino: Path) -> None:
         "temperature": 0.7,
         "top_p": 0.7,
         "prosody": {
-            "speed": 1,
+            "speed": FISH_SPEED,
             "volume": 0,
             "normalize_loudness": True,
         },
@@ -556,13 +561,14 @@ class PoyoVoz(commands.Cog):
                 )
 
         try:
-            contexto = await self.contexto_do_canal(message)
-            texto = await asyncio.wait_for(
-                self.resposta_ia(message, pergunta, contexto), timeout=45
-            )
-            await asyncio.wait_for(
-                self.enviar_audio_no_chat(message, texto), timeout=100
-            )
+            async with message.channel.typing():
+                contexto = await self.contexto_do_canal(message)
+                texto = await asyncio.wait_for(
+                    self.resposta_ia(message, pergunta, contexto), timeout=45
+                )
+                await asyncio.wait_for(
+                    self.enviar_audio_no_chat(message, texto), timeout=100
+                )
         except (RuntimeError, HTTPError, URLError, TimeoutError, asyncio.TimeoutError, KeyError, ValueError) as erro:
             # A Poyo é uma bot de voz: falhas ficam no console e não viram
             # uma resposta textual no canal.
