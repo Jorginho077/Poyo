@@ -669,51 +669,55 @@ class PoyoVoz(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        # Ignora mensagens de bots e mensagens privadas.
         if message.author.bot or message.guild is None:
             return
 
         if self.bot.user is None:
             return
 
-        # REGRA: só aceita respostas diretas a mensagens do Poyo.
-        # Menções, saudações e mensagens comuns não ativam o bot.
-        if not message.reference or not message.reference.message_id:
-            return
+        # Mencionar o Poyo continua funcionando.
+        mencionado = self.bot.user in message.mentions
 
-        referida = message.reference.resolved
+        # Respostas só ativam o bot quando a mensagem original é
+        # uma Voice Message nativa enviada pelo próprio Poyo.
+        respondeu_voz_poyo = False
 
-        # Se o Discord não forneceu a mensagem referenciada no evento,
-        # tenta buscá-la pelo ID.
-        if not isinstance(referida, discord.Message):
-            try:
-                referida = await message.channel.fetch_message(
-                    message.reference.message_id
-                )
-            except (
-                discord.NotFound,
-                discord.Forbidden,
-                discord.HTTPException,
+        if message.reference and message.reference.message_id:
+            referida = message.reference.resolved
+
+            if not isinstance(referida, discord.Message):
+                try:
+                    referida = await message.channel.fetch_message(
+                        message.reference.message_id
+                    )
+                except (
+                    discord.NotFound,
+                    discord.Forbidden,
+                    discord.HTTPException,
+                ):
+                    referida = None
+
+            if (
+                isinstance(referida, discord.Message)
+                and referida.author.id == self.bot.user.id
+                and getattr(referida.flags, "voice", False)
             ):
-                return
+                respondeu_voz_poyo = True
 
-        # A mensagem original precisa ter sido enviada pelo próprio Poyo.
-        if referida.author.id != self.bot.user.id:
+        # Nenhum outro tipo de mensagem ativa o bot.
+        if not mencionado and not respondeu_voz_poyo:
             return
 
-        # ESSENCIAL: precisa ser uma Voice Message nativa do Discord.
-        # Um texto ou um anexo de áudio comum não é suficiente.
-        if not getattr(referida.flags, "voice", False):
-            return
-
-        # A partir daqui, a mensagem passou pelos filtros.
-        # O Poyo pode gerar a resposta em áudio.
-        pergunta = message.content.strip()
+        pergunta = re.sub(
+            rf"<@!?{self.bot.user.id}>",
+            "",
+            message.content,
+        ).strip()
 
         if not pergunta:
             pergunta = (
-                "Responda naturalmente à mensagem de voz anterior, "
-                "considerando o contexto recente da conversa."
+                "A pessoa me chamou. Considere o contexto recente "
+                "e responda naturalmente à conversa."
             )
 
         try:
