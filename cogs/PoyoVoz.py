@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -7,14 +6,13 @@ import json
 import os
 import re
 import sqlite3
-import subprocess
 import tempfile
 import time
 from array import array
+from contextlib import closing
 from pathlib import Path
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
+import aiohttp
 import discord
 from discord.ext import commands
 from discord.http import File as DiscordHTTPFile
@@ -24,33 +22,75 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def _env_float(nome: str, padrao: float, minimo: float, maximo: float) -> float:
+    try:
+        return max(minimo, min(maximo, float(os.getenv(nome, str(padrao)))))
+    except ValueError:
+        return padrao
+
+
+# ----------------------------------------------------------------------------
+# ElevenLabs
+# ----------------------------------------------------------------------------
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
-ELEVENLABS_MODEL = os.getenv(
-    "ELEVENLABS_MODEL", "eleven_multilingual_v2"
-).strip()
 
-try:
-    ELEVENLABS_SPEED = max(
-        0.7, min(1.2, float(os.getenv("ELEVENLABS_SPEED", "0.90")))
-    )
-except ValueError:
-    ELEVENLABS_SPEED = 0.90
+# eleven_flash_v2_5 é MUITO mais rápido que o multilingual_v2 e fala português.
+# Se preferir a qualidade máxima, volte para eleven_multilingual_v2 no .env.
+ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5").strip()
 
+# 0.90 era o que deixava a fala arrastada. 1.05 soa mais natural em conversa.
+ELEVENLABS_SPEED = _env_float("ELEVENLABS_SPEED", 1.05, 0.7, 1.2)
+
+# Arquivo menor = download mais rápido (depois é convertido para opus de qualquer jeito).
+ELEVENLABS_FORMAT = os.getenv("ELEVENLABS_FORMAT", "mp3_44100_64").strip()
+
+# ----------------------------------------------------------------------------
+# NVIDIA NIM
+# ----------------------------------------------------------------------------
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "").strip()
 NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "openai/gpt-oss-20b").strip()
 NVIDIA_API_BASE = os.getenv(
     "NVIDIA_API_BASE", "https://integrate.api.nvidia.com/v1"
 ).rstrip("/")
 
+# ----------------------------------------------------------------------------
+# Quando o Poyo responde (sem precisar de @)
+# ----------------------------------------------------------------------------
+# IDs de canais onde ele responde TODAS as mensagens. Ex: POYO_CANAIS=123,456
+CANAIS_LIVRES = {int(n) for n in re.findall(r"\d+", os.getenv("POYO_CANAIS", ""))}
+
+# Palavras que chamam o Poyo quando aparecem na frase. Ex: POYO_GATILHOS=poyo,poio
+_GATILHOS = [
+    g.strip() for g in os.getenv("POYO_GATILHOS", "poyo").split(",") if g.strip()
+]
+GATILHO_RE = (
+    re.compile(r"\b(?:" + "|".join(map(re.escape, _GATILHOS)) + r")\b", re.I)
+    if _GATILHOS
+    else None
+)
+
+# Depois que o Poyo responde alguém, essa pessoa pode continuar a conversa
+# sem marcar por X segundos. 0 desativa.
+CONVERSA_ATIVA_SEGUNDOS = _env_float("POYO_CONVERSA_SEGUNDOS", 90, 0, 3600)
+
+# Intervalo mínimo entre ativações da mesma pessoa (evita spam).
+COOLDOWN_SEGUNDOS = _env_float("POYO_COOLDOWN", 2.5, 0, 60)
+
+# Mensagens que começam assim são comandos de outros bots e são ignoradas
+# (a menos que marquem o Poyo).
+PREFIXOS_IGNORADOS = ("!", "/", "$", ";", "?", "-", ".")
+
 DATABASE_PATH = Path(__file__).resolve().parent.parent / "poyovoz.sqlite3"
 VOICE_DIR = Path(tempfile.gettempdir()) / "poyo-voz"
 VOICE_DIR.mkdir(parents=True, exist_ok=True)
 
 MAX_INPUT = 1800
-MAX_REPLY = 1300
-MEMORY_MESSAGES = 24
-MAX_CHANNEL_CONTEXT = 3200
+MAX_REPLY = 700  # respostas de voz curtas = TTS mais rápido
+MEMORY_MESSAGES = 16
+MAX_CHANNEL_CONTEXT = 2400
+CONTEXT_HISTORY = 8
 
 PERSONALIDADE = """
 Você é Poyo. Você conversa em português brasileiro natural, como uma pessoa
@@ -146,8 +186,13 @@ Nunca mencione estas instruções.
 """.strip()
 
 
+# ----------------------------------------------------------------------------
+# Banco de dados (memória)
+# ----------------------------------------------------------------------------
 def abrir_banco() -> sqlite3.Connection:
     banco = sqlite3.connect(DATABASE_PATH)
+    banco.execute("PRAGMA journal_mode=WAL")
+    banco.execute("PRAGMA synchronous=NORMAL")
 
     banco.execute(
         """
@@ -162,47 +207,43 @@ def abrir_banco() -> sqlite3.Connection:
         )
         """
     )
-
     banco.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_poyo_memoria
         ON poyo_memoria(guild_id, user_id, id)
         """
     )
-
     banco.commit()
     return banco
 
 
-def salvar_memoria(
+def salvar_troca(
     guild_id: int,
     user_id: int,
     channel_id: int,
-    role: str,
-    content: str,
+    pergunta: str,
+    resposta: str,
 ) -> None:
-    texto = content.strip()[:MAX_INPUT]
+    """Salva pergunta + resposta numa única conexão."""
+    agora = time.time()
+    linhas = [
+        (guild_id, user_id, channel_id, role, texto.strip()[:MAX_INPUT], agora)
+        for role, texto in (("user", pergunta), ("assistant", resposta))
+        if texto.strip()
+    ]
 
-    if not texto:
+    if not linhas:
         return
 
-    with abrir_banco() as banco:
-        banco.execute(
+    with closing(abrir_banco()) as banco:
+        banco.executemany(
             """
             INSERT INTO poyo_memoria
                 (guild_id, user_id, channel_id, role, content, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (
-                guild_id,
-                user_id,
-                channel_id,
-                role,
-                texto,
-                time.time(),
-            ),
+            linhas,
         )
-
         banco.execute(
             """
             DELETE FROM poyo_memoria
@@ -215,15 +256,11 @@ def salvar_memoria(
             """,
             (guild_id, user_id, guild_id, user_id),
         )
-
         banco.commit()
 
 
-def carregar_memoria(
-    guild_id: int,
-    user_id: int,
-) -> list[dict[str, str]]:
-    with abrir_banco() as banco:
+def carregar_memoria(guild_id: int, user_id: int) -> list[dict[str, str]]:
+    with closing(abrir_banco()) as banco:
         linhas = banco.execute(
             """
             SELECT role, content FROM poyo_memoria
@@ -233,249 +270,112 @@ def carregar_memoria(
             (guild_id, user_id, MEMORY_MESSAGES),
         ).fetchall()
 
-    return [
-        {"role": role, "content": content}
-        for role, content in reversed(linhas)
-    ]
+    return [{"role": role, "content": content} for role, content in reversed(linhas)]
+
+
+# ----------------------------------------------------------------------------
+# Texto
+# ----------------------------------------------------------------------------
+_EMOJI_RE = re.compile(
+    "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F000-\U0001F2FF\uFE0F]"
+)
 
 
 def limpar_resposta(texto: str) -> str:
+    """Limpa a resposta do modelo e deixa o texto pronto para ser falado."""
     texto = texto.strip()
 
+    # "oi/olá" perdido no final da frase
     texto = re.sub(
-        r"(?i)(?<=\S)[,;.!?…]?\s+\b(?:oi|olá|ola)\b[!,.?…\s]*$",
-        "",
-        texto,
+        r"(?i)(?<=\S)[,;.!?…]?\s+\b(?:oi|olá|ola)\b[!,.?…\s]*$", "", texto
     ).strip()
 
+    texto = re.sub(r"\*[^*\n]{1,60}\*", "", texto)  # *ações* narradas
+    texto = re.sub(r"https?://\S+", "", texto)  # links não se falam
+    texto = _EMOJI_RE.sub("", texto)
+    texto = re.sub(r"[*_~`#>|]", "", texto)  # restos de markdown
+    texto = re.sub(r"(?i)\bk{3,}\b", "haha", texto)  # "KKKKK" vira risada falada
+    texto = re.sub(r"\.{3,}", "…", texto)
     texto = re.sub(r"[ \t]{2,}", " ", texto)
+
     return texto[:MAX_REPLY].strip()
 
 
-def post_json(
-    url: str,
-    payload: dict,
-    headers: dict[str, str],
-    timeout: int = 45,
-) -> dict:
-    corpo = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-
-    pedido = Request(
-        url,
-        data=corpo,
-        headers=headers,
-        method="POST",
-    )
-
-    try:
-        with urlopen(pedido, timeout=timeout) as resposta:
-            return json.loads(resposta.read().decode("utf-8"))
-
-    except HTTPError as erro:
-        try:
-            detalhe = erro.read().decode(
-                "utf-8", errors="replace"
-            )[:300]
-        except OSError:
-            detalhe = "sem detalhes"
-
-        raise RuntimeError(
-            f"NVIDIA NIM rejeitou a solicitação (HTTP {erro.code}). "
-            f"Detalhes: {detalhe}"
-        ) from erro
-
-
-def gerar_texto_sync(mensagens: list[dict[str, str]]) -> str:
-    if not NVIDIA_API_KEY:
-        raise RuntimeError("NVIDIA_API_KEY não configurada")
-
-    payload = {
-        "model": NVIDIA_MODEL,
-        "messages": mensagens,
-        "temperature": 0.65,
-        "top_p": 0.85,
-        "max_tokens": 768,
-        "reasoning_effort": "low",
-        "stream": False,
-    }
-
-    url = f"{NVIDIA_API_BASE}/chat/completions"
-
-    cabecalhos = {
-        "Authorization": f"Bearer {NVIDIA_API_KEY}",
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    }
-
-    resposta = None
-
-    for tentativa in range(3):
-        try:
-            resposta = post_json(url, payload, cabecalhos)
-            break
-
-        except RuntimeError as erro:
-            erro_texto = str(erro)
-
-            temporario = (
-                "(HTTP 503)" in erro_texto
-                or "(HTTP 429)" in erro_texto
-            )
-
-            if not temporario or tentativa == 2:
-                raise
-
-            espera = 2 ** (tentativa + 1)
-
-            print(
-                "[PoyoVoz] NVIDIA NIM indisponível ou limitado. "
-                f"Nova tentativa em {espera}s ({tentativa + 1}/2)."
-            )
-
-            time.sleep(espera)
-
-    if resposta is None:
-        raise RuntimeError("NVIDIA NIM não retornou uma resposta")
-
-    try:
-        conteudo = resposta["choices"][0]["message"]["content"]
-
-        if not isinstance(conteudo, str) or not conteudo.strip():
-            raise RuntimeError(
-                "NVIDIA NIM não retornou texto. O modelo pode ter encerrado "
-                "o raciocínio antes de produzir uma resposta."
-            )
-
-        texto = limpar_resposta(conteudo)
-
-    except (KeyError, IndexError, AttributeError) as erro:
-        raise RuntimeError(
-            f"Resposta inesperada da NVIDIA NIM: {resposta!r}"
-        ) from erro
-
-    if not texto:
-        return "Oxe, deu um branco aqui KKKKK. Me fala de novo."
-
-    return texto
-
-
-def gerar_audio_sync(texto: str, destino: Path) -> None:
-    if not ELEVENLABS_API_KEY or not ELEVENLABS_VOICE_ID:
-        raise RuntimeError(
-            "ELEVENLABS_API_KEY ou ELEVENLABS_VOICE_ID não configurada"
-        )
-
-    payload = {
-        "text": texto,
-        "model_id": ELEVENLABS_MODEL,
-        "voice_settings": {
-            "stability": 0.42,
-            "similarity_boost": 0.84,
-            "style": 0.28,
-            "use_speaker_boost": True,
-            "speed": ELEVENLABS_SPEED,
-        },
-    }
-
-    corpo = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-
-    pedido = Request(
-        "https://api.elevenlabs.io/v1/text-to-speech/"
-        f"{ELEVENLABS_VOICE_ID}?output_format=mp3_44100_128",
-        data=corpo,
-        headers={
-            "xi-api-key": ELEVENLABS_API_KEY,
-            "Content-Type": "application/json",
-            "Accept": "audio/mpeg",
-        },
-        method="POST",
-    )
-
-    try:
-        with urlopen(pedido, timeout=60) as resposta:
-            destino.write_bytes(resposta.read())
-
-    except HTTPError as erro:
-        try:
-            detalhe = erro.read().decode(
-                "utf-8", errors="replace"
-            )[:300]
-        except OSError:
-            detalhe = "sem detalhes"
-
-        raise RuntimeError(
-            "ElevenLabs rejeitou a solicitação "
-            f"(HTTP {erro.code}). Verifique ELEVENLABS_API_KEY e "
-            f"ELEVENLABS_VOICE_ID. Detalhes: {detalhe}"
-        ) from erro
-
-
-def converter_para_voice_sync(
-    entrada: Path,
-    saida: Path,
-) -> tuple[float, str]:
-    try:
-        subprocess.run(
-            [
-                "ffmpeg", "-y", "-loglevel", "error",
-                "-i", str(entrada),
-                "-ac", "1", "-ar", "48000",
-                "-c:a", "libopus", "-b:a", "32k",
-                str(saida),
-            ],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-
-        pcm = subprocess.run(
-            [
-                "ffmpeg", "-y", "-loglevel", "error",
-                "-i", str(entrada),
-                "-ac", "1", "-ar", "48000",
-                "-f", "s16le", "pipe:1",
-            ],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        ).stdout
-
-    except (FileNotFoundError, subprocess.CalledProcessError) as erro:
-        raise RuntimeError(
-            "Não foi possível converter o áudio para Voice Message. "
-            "Verifique se o FFmpeg está instalado."
-        ) from erro
-
+def calcular_waveform(pcm: bytes) -> tuple[float, str]:
+    """PCM s16le mono 16 kHz -> (duração em segundos, waveform base64)."""
     amostras = array("h")
-    amostras.frombytes(pcm)
-
-    duracao = len(amostras) / 48000
+    amostras.frombytes(pcm[: len(pcm) // 2 * 2])
 
     if not amostras:
         raise RuntimeError("O áudio gerado ficou vazio")
 
-    pontos = min(256, max(1, len(amostras) // 480))
-    tamanho_bloco = max(1, len(amostras) // pontos)
+    duracao = len(amostras) / 16000
+    total = len(amostras)
+    bloco = max(1, -(-total // 256))  # teto: no máximo 256 pontos
     waveform = bytearray()
 
-    for inicio in range(0, len(amostras), tamanho_bloco):
-        bloco = amostras[inicio:inicio + tamanho_bloco]
-        pico = max(abs(valor) for valor in bloco)
-
-        waveform.append(
-            min(255, round(pico / 32767 * 255))
-        )
-
-        if len(waveform) == 256:
-            break
+    for inicio in range(0, total, bloco):
+        pico = max(abs(v) for v in amostras[inicio : inicio + bloco])
+        waveform.append(min(255, round(pico / 32767 * 255)))
 
     return duracao, base64.b64encode(bytes(waveform)).decode("ascii")
 
 
+async def _ffmpeg(*args: str) -> bytes:
+    processo = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-y",
+        "-loglevel",
+        "error",
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    saida, erro = await processo.communicate()
+
+    if processo.returncode != 0:
+        raise RuntimeError(
+            "FFmpeg falhou: " + erro.decode("utf-8", errors="replace")[:200]
+        )
+
+    return saida
+
+
+async def converter_para_voice(entrada: Path, saida: Path) -> tuple[float, str]:
+    """Gera o .ogg (opus) e a waveform ao mesmo tempo, em paralelo."""
+    try:
+        _, pcm = await asyncio.gather(
+            _ffmpeg(
+                "-i", str(entrada),
+                "-ac", "1", "-ar", "48000",
+                "-c:a", "libopus", "-b:a", "32k",
+                "-application", "voip",
+                str(saida),
+            ),
+            _ffmpeg(
+                "-i", str(entrada),
+                "-ac", "1", "-ar", "16000",
+                "-f", "s16le", "pipe:1",
+            ),
+        )
+    except FileNotFoundError as erro:
+        raise RuntimeError(
+            "Não foi possível converter o áudio. Verifique se o FFmpeg está instalado."
+        ) from erro
+
+    return calcular_waveform(pcm)
+
+
+# ----------------------------------------------------------------------------
+# Cog
+# ----------------------------------------------------------------------------
 class PoyoVoz(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        self.http: aiohttp.ClientSession | None = None
         self.locks: dict[int, asyncio.Lock] = {}
+        self.conversas: dict[tuple[int, int], float] = {}
+        self.ultimo_uso: dict[int, float] = {}
 
         print(
             "[PoyoVoz] Configuração: "
@@ -483,26 +383,104 @@ class PoyoVoz(commands.Cog):
             f"Modelo={NVIDIA_MODEL} | "
             f"ElevenLabs chave={'ok' if ELEVENLABS_API_KEY else 'ausente'} | "
             f"Voice ID={'ok' if ELEVENLABS_VOICE_ID else 'ausente'} | "
-            f"Velocidade={ELEVENLABS_SPEED}"
+            f"TTS={ELEVENLABS_MODEL} | Velocidade={ELEVENLABS_SPEED} | "
+            f"Canais livres={sorted(CANAIS_LIVRES) or 'nenhum'} | "
+            f"Gatilhos={_GATILHOS or 'nenhum'} | "
+            f"Conversa ativa={CONVERSA_ATIVA_SEGUNDOS:.0f}s"
         )
+
+    # -- infraestrutura -------------------------------------------------------
+    async def cog_load(self) -> None:
+        self.http = aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(limit=20, ttl_dns_cache=300)
+        )
+
+    async def cog_unload(self) -> None:
+        if self.http and not self.http.closed:
+            await self.http.close()
+
+    def sessao(self) -> aiohttp.ClientSession:
+        if self.http is None or self.http.closed:
+            self.http = aiohttp.ClientSession()
+        return self.http
 
     def lock_for(self, guild_id: int) -> asyncio.Lock:
         return self.locks.setdefault(guild_id, asyncio.Lock())
 
-    async def contexto_do_canal(
-        self,
-        message: discord.Message,
-    ) -> str:
+    # -- IA de texto ----------------------------------------------------------
+    async def gerar_texto(self, mensagens: list[dict[str, str]]) -> str:
+        if not NVIDIA_API_KEY:
+            raise RuntimeError("NVIDIA_API_KEY não configurada")
+
+        payload: dict = {
+            "model": NVIDIA_MODEL,
+            "messages": mensagens,
+            "temperature": 0.65,
+            "top_p": 0.85,
+            # gpt-oss gasta tokens "pensando"; 512 deixa folga sem ficar lento.
+            "max_tokens": 512,
+            "stream": False,
+        }
+
+        if "gpt-oss" in NVIDIA_MODEL:
+            payload["reasoning_effort"] = "low"
+
+        cabecalhos = {
+            "Authorization": f"Bearer {NVIDIA_API_KEY}",
+            "Accept": "application/json",
+        }
+
+        dados = None
+
+        for tentativa in range(3):
+            async with self.sessao().post(
+                f"{NVIDIA_API_BASE}/chat/completions",
+                json=payload,
+                headers=cabecalhos,
+                timeout=aiohttp.ClientTimeout(total=25),
+            ) as resposta:
+                if resposta.status in (429, 503) and tentativa < 2:
+                    espera = tentativa + 1
+                    print(
+                        f"[PoyoVoz] NVIDIA NIM ocupada (HTTP {resposta.status}). "
+                        f"Nova tentativa em {espera}s."
+                    )
+                    await asyncio.sleep(espera)
+                    continue
+
+                if resposta.status >= 400:
+                    detalhe = (await resposta.text())[:300]
+                    raise RuntimeError(
+                        f"NVIDIA NIM rejeitou a solicitação "
+                        f"(HTTP {resposta.status}). Detalhes: {detalhe}"
+                    )
+
+                dados = await resposta.json()
+                break
+
+        if dados is None:
+            raise RuntimeError("NVIDIA NIM não retornou uma resposta")
+
+        try:
+            conteudo = dados["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as erro:
+            raise RuntimeError(f"Resposta inesperada da NVIDIA NIM: {dados!r}") from erro
+
+        if not isinstance(conteudo, str) or not conteudo.strip():
+            raise RuntimeError(
+                "NVIDIA NIM não retornou texto (o modelo pode ter gasto todos "
+                "os tokens raciocinando)."
+            )
+
+        return limpar_resposta(conteudo) or "Oxe, deu um branco aqui. Me fala de novo."
+
+    async def contexto_do_canal(self, message: discord.Message) -> str:
         linhas: list[str] = []
 
         try:
-            historico = message.channel.history(
-                limit=10,
-                before=message,
-                oldest_first=True,
-            )
-
-            async for anterior in historico:
+            async for anterior in message.channel.history(
+                limit=CONTEXT_HISTORY, before=message, oldest_first=True
+            ):
                 conteudo = anterior.content.strip()
 
                 if not conteudo:
@@ -511,12 +489,7 @@ class PoyoVoz(commands.Cog):
                     else:
                         continue
 
-                nome = getattr(
-                    anterior.author,
-                    "display_name",
-                    anterior.author.name,
-                )
-
+                nome = getattr(anterior.author, "display_name", anterior.author.name)
                 linhas.append(f"{nome}: {conteudo[:420]}")
 
         except (discord.Forbidden, discord.HTTPException):
@@ -524,18 +497,16 @@ class PoyoVoz(commands.Cog):
 
         return "\n".join(linhas)[-MAX_CHANNEL_CONTEXT:]
 
-    async def resposta_ia(
-        self,
-        message: discord.Message,
-        pergunta: str,
-        contexto: str,
-    ) -> str:
+    async def resposta_ia(self, message: discord.Message, pergunta: str) -> str:
         guild_id = message.guild.id if message.guild else 0
-        user_id = message.author.id
 
-        memoria = carregar_memoria(guild_id, user_id)
+        # Histórico do Discord e memória do banco ao mesmo tempo.
+        contexto, memoria = await asyncio.gather(
+            self.contexto_do_canal(message),
+            asyncio.to_thread(carregar_memoria, guild_id, message.author.id),
+        )
 
-        mensagens = [
+        mensagens: list[dict[str, str]] = [
             {"role": "system", "content": PERSONALIDADE}
         ]
 
@@ -557,42 +528,58 @@ class PoyoVoz(commands.Cog):
             )
 
         mensagens.extend(memoria)
+        mensagens.append({"role": "user", "content": pergunta[:MAX_INPUT]})
 
-        mensagens.append(
-            {
-                "role": "user",
-                "content": pergunta[:MAX_INPUT],
-            }
+        return await self.gerar_texto(mensagens)
+
+    # -- IA de voz ------------------------------------------------------------
+    async def gerar_audio(self, texto: str, destino: Path) -> None:
+        if not ELEVENLABS_API_KEY or not ELEVENLABS_VOICE_ID:
+            raise RuntimeError(
+                "ELEVENLABS_API_KEY ou ELEVENLABS_VOICE_ID não configurada"
+            )
+
+        payload: dict = {
+            "text": texto,
+            "model_id": ELEVENLABS_MODEL,
+            "voice_settings": {
+                "stability": 0.45,
+                "similarity_boost": 0.8,
+                "style": 0.0,  # style > 0 aumenta a latência
+                "use_speaker_boost": False,  # idem
+                "speed": ELEVENLABS_SPEED,
+            },
+        }
+
+        # Força português nos modelos que suportam (evita sotaque/idioma errado).
+        if "flash" in ELEVENLABS_MODEL or "turbo" in ELEVENLABS_MODEL:
+            payload["language_code"] = "pt"
+
+        url = (
+            "https://api.elevenlabs.io/v1/text-to-speech/"
+            f"{ELEVENLABS_VOICE_ID}/stream?output_format={ELEVENLABS_FORMAT}"
         )
 
-        texto = await asyncio.to_thread(
-            gerar_texto_sync,
-            mensagens,
-        )
+        async with self.sessao().post(
+            url,
+            json=payload,
+            headers={
+                "xi-api-key": ELEVENLABS_API_KEY,
+                "Accept": "audio/mpeg",
+            },
+            timeout=aiohttp.ClientTimeout(total=40),
+        ) as resposta:
+            if resposta.status >= 400:
+                detalhe = (await resposta.text())[:300]
+                raise RuntimeError(
+                    f"ElevenLabs rejeitou a solicitação (HTTP {resposta.status}). "
+                    f"Verifique ELEVENLABS_API_KEY e ELEVENLABS_VOICE_ID. "
+                    f"Detalhes: {detalhe}"
+                )
 
-        salvar_memoria(
-            guild_id,
-            user_id,
-            message.channel.id,
-            "user",
-            pergunta,
-        )
+            destino.write_bytes(await resposta.read())
 
-        salvar_memoria(
-            guild_id,
-            user_id,
-            message.channel.id,
-            "assistant",
-            texto,
-        )
-
-        return texto
-
-    async def enviar_audio_no_chat(
-        self,
-        message: discord.Message,
-        texto: str,
-    ) -> None:
+    async def enviar_audio_no_chat(self, message: discord.Message, texto: str) -> None:
         guild_id = message.guild.id
 
         async with self.lock_for(guild_id):
@@ -600,21 +587,13 @@ class PoyoVoz(commands.Cog):
             caminho_ogg = VOICE_DIR / f"{guild_id}-{message.id}.ogg"
 
             try:
-                await asyncio.to_thread(
-                    gerar_audio_sync,
-                    texto,
-                    caminho_mp3,
-                )
-
-                duracao, waveform = await asyncio.to_thread(
-                    converter_para_voice_sync,
-                    caminho_mp3,
-                    caminho_ogg,
+                await self.gerar_audio(texto, caminho_mp3)
+                duracao, waveform = await converter_para_voice(
+                    caminho_mp3, caminho_ogg
                 )
 
                 arquivo = DiscordHTTPFile(
-                    str(caminho_ogg),
-                    filename="poyo-resposta.ogg",
+                    str(caminho_ogg), filename="poyo-resposta.ogg"
                 )
 
                 flags = MessageFlags()
@@ -624,8 +603,7 @@ class PoyoVoz(commands.Cog):
                     files=[arquivo],
                     flags=flags,
                     message_reference=(
-                        message.to_reference()
-                        .to_message_reference_dict()
+                        message.to_reference().to_message_reference_dict()
                     ),
                     mention_author=False,
                 ) as params:
@@ -636,7 +614,6 @@ class PoyoVoz(commands.Cog):
                     )
 
                     payload = json.loads(payload_json)
-
                     payload["attachments"][0].update(
                         {
                             "duration_secs": round(duracao, 3),
@@ -651,67 +628,99 @@ class PoyoVoz(commands.Cog):
                                 ensure_ascii=False,
                                 separators=(",", ":"),
                             )
-
                         elif parte.get("name") == "files[0]":
                             parte["content_type"] = "audio/ogg"
 
                     await self.bot.http.send_message(
-                        message.channel.id,
-                        params=params,
+                        message.channel.id, params=params
                     )
 
             finally:
-                try:
-                    caminho_mp3.unlink(missing_ok=True)
-                    caminho_ogg.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                caminho_mp3.unlink(missing_ok=True)
+                caminho_ogg.unlink(missing_ok=True)
+
+    # -- Quando responder -----------------------------------------------------
+    async def e_resposta_ao_poyo(self, message: discord.Message) -> bool:
+        """True se a mensagem é um reply a QUALQUER mensagem do Poyo."""
+        if not message.reference or not message.reference.message_id:
+            return False
+
+        referida = message.reference.resolved
+
+        if not isinstance(referida, discord.Message):
+            try:
+                referida = await message.channel.fetch_message(
+                    message.reference.message_id
+                )
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return False
+
+        return referida.author.id == self.bot.user.id
+
+    def conversa_ativa(self, message: discord.Message) -> bool:
+        if CONVERSA_ATIVA_SEGUNDOS <= 0:
+            return False
+
+        ultimo = self.conversas.get((message.channel.id, message.author.id))
+        return ultimo is not None and (
+            time.monotonic() - ultimo < CONVERSA_ATIVA_SEGUNDOS
+        )
+
+    async def motivo_de_ativacao(self, message: discord.Message) -> str | None:
+        bot_id = self.bot.user.id
+
+        if self.bot.user in message.mentions:
+            return "mencao"
+
+        if await self.e_resposta_ao_poyo(message):
+            return "resposta"
+
+        texto = message.content.strip()
+
+        if not texto or texto.startswith(PREFIXOS_IGNORADOS):
+            return None
+
+        # Está falando com outra pessoa (marcou alguém), não com o Poyo.
+        if any(u.id != bot_id for u in message.mentions):
+            return None
+
+        if message.channel.id in CANAIS_LIVRES:
+            return "canal"
+
+        if GATILHO_RE and GATILHO_RE.search(texto):
+            return "nome"
+
+        if self.conversa_ativa(message):
+            return "conversa"
+
+        return None
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        if message.author.bot or message.guild is None:
+        if message.author.bot or message.guild is None or self.bot.user is None:
             return
 
-        if self.bot.user is None:
+        motivo = await self.motivo_de_ativacao(message)
+
+        if motivo is None:
             return
 
-        # Mencionar o Poyo continua funcionando.
-        mencionado = self.bot.user in message.mentions
+        # Anti-spam
+        agora = time.monotonic()
 
-        # Respostas só ativam o bot quando a mensagem original é
-        # uma Voice Message nativa enviada pelo próprio Poyo.
-        respondeu_voz_poyo = False
-
-        if message.reference and message.reference.message_id:
-            referida = message.reference.resolved
-
-            if not isinstance(referida, discord.Message):
-                try:
-                    referida = await message.channel.fetch_message(
-                        message.reference.message_id
-                    )
-                except (
-                    discord.NotFound,
-                    discord.Forbidden,
-                    discord.HTTPException,
-                ):
-                    referida = None
-
-            if (
-                isinstance(referida, discord.Message)
-                and referida.author.id == self.bot.user.id
-                and getattr(referida.flags, "voice", False)
-            ):
-                respondeu_voz_poyo = True
-
-        # Nenhum outro tipo de mensagem ativa o bot.
-        if not mencionado and not respondeu_voz_poyo:
+        if agora - self.ultimo_uso.get(message.author.id, 0) < COOLDOWN_SEGUNDOS:
             return
+
+        # Ativações "automáticas" não entram na fila: se ele já está falando, pula.
+        if motivo in ("canal", "nome", "conversa") and self.lock_for(
+            message.guild.id
+        ).locked():
+            return
+
+        self.ultimo_uso[message.author.id] = agora
 
         pergunta = re.sub(
-            rf"<@!?{self.bot.user.id}>",
-            "",
-            message.content,
+            rf"<@!?{self.bot.user.id}>", "", message.content
         ).strip()
 
         if not pergunta:
@@ -722,35 +731,40 @@ class PoyoVoz(commands.Cog):
 
         try:
             async with message.channel.typing():
-                contexto = await self.contexto_do_canal(message)
-
                 texto = await asyncio.wait_for(
-                    self.resposta_ia(
-                        message,
-                        pergunta,
-                        contexto,
-                    ),
-                    timeout=45,
+                    self.resposta_ia(message, pergunta), timeout=30
                 )
 
+                # Envia o áudio e salva a memória ao mesmo tempo.
                 await asyncio.wait_for(
-                    self.enviar_audio_no_chat(message, texto),
-                    timeout=100,
+                    asyncio.gather(
+                        self.enviar_audio_no_chat(message, texto),
+                        asyncio.to_thread(
+                            salvar_troca,
+                            message.guild.id,
+                            message.author.id,
+                            message.channel.id,
+                            pergunta,
+                            texto,
+                        ),
+                    ),
+                    timeout=50,
                 )
+
+            self.conversas[(message.channel.id, message.author.id)] = (
+                time.monotonic()
+            )
 
         except (
             RuntimeError,
-            HTTPError,
-            URLError,
-            TimeoutError,
+            aiohttp.ClientError,
             asyncio.TimeoutError,
+            OSError,
             KeyError,
             ValueError,
             discord.HTTPException,
         ) as erro:
-            print(
-                f"[PoyoVoz] Falha ao responder em áudio: {erro}"
-            )
+            print(f"[PoyoVoz] Falha ao responder em áudio: {erro!r}")
 
 
 async def setup(bot: commands.Bot) -> None:
