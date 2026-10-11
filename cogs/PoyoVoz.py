@@ -207,50 +207,26 @@ class PoyoVoz(commands.Cog):
         salvar_memoria(guild_id, user_id, message.channel.id, "assistant", texto)
         return texto
 
-    async def falar_no_canal(self, message: discord.Message, texto: str) -> bool:
-        voz = getattr(message.author, "voice", None)
-        canal = voz.channel if voz is not None else None
-        if canal is None and message.guild.voice_client is not None:
-            canal = message.guild.voice_client.channel
-        if canal is None:
-            print("[PoyoVoz] Áudio ignorado: o usuário não está em um canal de voz.")
-            return False
+    async def enviar_audio_no_chat(
+        self,
+        message: discord.Message,
+        texto: str,
+    ) -> None:
+        """Gera um MP3 e envia o áudio como anexo no canal de texto."""
         guild_id = message.guild.id
         async with self.lock_for(guild_id):
             caminho = VOICE_DIR / f"{guild_id}-{message.id}.mp3"
             try:
                 await asyncio.to_thread(gerar_audio_sync, texto, caminho)
-                cliente = message.guild.voice_client
-                if cliente is None:
-                    cliente = await canal.connect()
-                elif cliente.channel != canal:
-                    await cliente.move_to(canal)
-                if cliente.is_playing():
-                    cliente.stop()
-                terminou = asyncio.Event()
-                erro: list[Exception] = []
-
-                def depois(reproducao_error: Exception | None) -> None:
-                    if reproducao_error:
-                        erro.append(reproducao_error)
-                    self.bot.loop.call_soon_threadsafe(terminou.set)
-
-                cliente.play(discord.FFmpegPCMAudio(str(caminho)), after=depois)
-                await asyncio.wait_for(terminou.wait(), timeout=90)
-                if erro:
-                    raise erro[0]
-                return True
+                await message.reply(
+                    file=discord.File(str(caminho), filename="poyo-resposta.mp3"),
+                    mention_author=False,
+                )
             finally:
                 try:
                     caminho.unlink(missing_ok=True)
                 except OSError:
                     pass
-                cliente = message.guild.voice_client
-                if cliente and not cliente.is_playing():
-                    try:
-                        await cliente.disconnect(force=True)
-                    except (discord.ClientException, discord.HTTPException):
-                        pass
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -285,7 +261,9 @@ class PoyoVoz(commands.Cog):
             texto = await asyncio.wait_for(
                 self.resposta_ia(message, pergunta), timeout=45
             )
-            await asyncio.wait_for(self.falar_no_canal(message, texto), timeout=100)
+            await asyncio.wait_for(
+                self.enviar_audio_no_chat(message, texto), timeout=100
+            )
         except (RuntimeError, HTTPError, URLError, TimeoutError, asyncio.TimeoutError, KeyError, ValueError) as erro:
             # A Poyo é uma bot de voz: falhas ficam no console e não viram
             # uma resposta textual no canal.
