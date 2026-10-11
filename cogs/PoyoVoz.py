@@ -25,9 +25,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Chaves e IDs ficam somente no .env.
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
-ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
-ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2").strip()
+FISH_API_KEY = os.getenv("FISH_API_KEY", "").strip()
+FISH_VOICE_ID = os.getenv("FISH_VOICE_ID", "").strip()
+FISH_MODEL = os.getenv("FISH_MODEL", "s2.1-pro-free").strip()
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "").strip()
 NVIDIA_MODEL = os.getenv(
     "NVIDIA_MODEL",
@@ -45,7 +45,9 @@ VOICE_DIR.mkdir(parents=True, exist_ok=True)
 MAX_INPUT = 1800
 MAX_REPLY = 1300
 MEMORY_MESSAGES = 24
+MAX_CHANNEL_CONTEXT = 3200
 TRIGGER_RE = re.compile(r"\b(?:oi|olá|ola|eai|e aí|ei)\s+poyo\b", re.IGNORECASE)
+NOME_POYO_RE = re.compile(r"\bpoyo\b", re.IGNORECASE)
 
 PERSONALIDADE = """
 Você é Poyo, uma presença fofa, engraçada, meio tímida e muito desenrolada quando
@@ -275,26 +277,33 @@ def gerar_texto_sync(mensagens: list[dict[str, str]]) -> str:
 
 
 def gerar_audio_sync(texto: str, destino: Path) -> None:
-    if not ELEVENLABS_API_KEY or not ELEVENLABS_VOICE_ID:
-        raise RuntimeError("ELEVENLABS_API_KEY ou ELEVENLABS_VOICE_ID não configurada")
+    if not FISH_API_KEY or not FISH_VOICE_ID:
+        raise RuntimeError("FISH_API_KEY ou FISH_VOICE_ID não configurada")
     payload = {
         "text": texto,
-        "model_id": ELEVENLABS_MODEL,
-        "voice_settings": {
-            "stability": 0.42,
-            "similarity_boost": 0.84,
-            "style": 0.28,
-            "use_speaker_boost": True,
+        "reference_id": FISH_VOICE_ID,
+        "temperature": 0.7,
+        "top_p": 0.7,
+        "prosody": {
+            "speed": 1,
+            "volume": 0,
+            "normalize_loudness": True,
         },
+        "chunk_length": 300,
+        "normalize": True,
+        "format": "mp3",
+        "sample_rate": 44100,
+        "mp3_bitrate": 128,
+        "latency": "normal",
     }
     corpo = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     pedido = Request(
-        "https://api.elevenlabs.io/v1/text-to-speech/"
-        f"{ELEVENLABS_VOICE_ID}?output_format=mp3_44100_128",
+        "https://api.fish.audio/v1/tts",
         data=corpo,
         headers={
-            "xi-api-key": ELEVENLABS_API_KEY,
+            "Authorization": f"Bearer {FISH_API_KEY}",
             "Content-Type": "application/json",
+            "model": FISH_MODEL,
             "Accept": "audio/mpeg",
         },
         method="POST",
@@ -308,9 +317,9 @@ def gerar_audio_sync(texto: str, destino: Path) -> None:
         except OSError:
             detalhe = "sem detalhes"
         raise RuntimeError(
-            "ElevenLabs rejeitou a solicitação "
-            f"(HTTP {erro.code}). Verifique ELEVENLABS_API_KEY e "
-            f"ELEVENLABS_VOICE_ID. Detalhes: {detalhe}"
+            "Fish Audio rejeitou a solicitação "
+            f"(HTTP {erro.code}). Verifique FISH_API_KEY e "
+            f"FISH_VOICE_ID. Detalhes: {detalhe}"
         ) from erro
 
 
@@ -376,18 +385,62 @@ class PoyoVoz(commands.Cog):
             "[PoyoVoz] Configuração: "
             f"NVIDIA NIM={'ok' if NVIDIA_API_KEY else 'ausente'} | "
             f"Modelo={NVIDIA_MODEL} | "
-            f"ElevenLabs chave={'ok' if ELEVENLABS_API_KEY else 'ausente'} | "
-            f"Voice ID={'ok' if ELEVENLABS_VOICE_ID else 'ausente'}"
+            f"Fish Audio chave={'ok' if FISH_API_KEY else 'ausente'} | "
+            f"Voice ID={'ok' if FISH_VOICE_ID else 'ausente'} | "
+            f"Modelo de voz={FISH_MODEL}"
         )
 
     def lock_for(self, guild_id: int) -> asyncio.Lock:
         return self.locks.setdefault(guild_id, asyncio.Lock())
 
-    async def resposta_ia(self, message: discord.Message, pergunta: str) -> str:
+    async def contexto_do_canal(self, message: discord.Message) -> str:
+        """Lê as mensagens recentes para a Poyo entrar naturalmente na conversa."""
+        linhas: list[str] = []
+        try:
+            historico = message.channel.history(
+                limit=10,
+                before=message,
+                oldest_first=True,
+            )
+            async for anterior in historico:
+                conteudo = anterior.content.strip()
+                if not conteudo:
+                    if anterior.attachments:
+                        conteudo = "[mensagem com áudio ou anexo]"
+                    else:
+                        continue
+                nome = getattr(anterior.author, "display_name", anterior.author.name)
+                linhas.append(f"{nome}: {conteudo[:420]}")
+        except (discord.Forbidden, discord.HTTPException):
+            return ""
+
+        return "\n".join(linhas)[-MAX_CHANNEL_CONTEXT:]
+
+    async def resposta_ia(
+        self,
+        message: discord.Message,
+        pergunta: str,
+        contexto: str,
+    ) -> str:
         guild_id = message.guild.id if message.guild else 0
         user_id = message.author.id
         memoria = carregar_memoria(guild_id, user_id)
         mensagens = [{"role": "system", "content": PERSONALIDADE}]
+        if contexto:
+            mensagens.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "Contexto recente do canal (use para entender a resenha, "
+                        "referências, memes e o assunto atual):\n"
+                        f"{contexto}\n\n"
+                        "Entre na conversa quando fizer sentido. Se alguém fizer "
+                        "uma frase clássica, meme ou referência, tente reconhecer "
+                        "e responder à referência em vez de tratar como texto aleatório. "
+                        "Não mencione que recebeu este contexto."
+                    ),
+                }
+            )
         mensagens.extend(memoria)
         mensagens.append({"role": "user", "content": pergunta[:MAX_INPUT]})
         texto = await asyncio.to_thread(gerar_texto_sync, mensagens)
@@ -426,6 +479,8 @@ class PoyoVoz(commands.Cog):
                 with handle_message_parameters(
                     files=[arquivo],
                     flags=flags,
+                    message_reference=message.to_reference().to_message_reference_dict(),
+                    mention_author=False,
                 ) as params:
                     payload_json = next(
                         parte["value"]
@@ -468,6 +523,7 @@ class PoyoVoz(commands.Cog):
             return
 
         mencionado = self.bot.user in message.mentions
+        falou_nome = bool(NOME_POYO_RE.search(message.content))
         saudacao = bool(TRIGGER_RE.search(message.content))
         respondeu_poyo = False
         if message.reference and message.reference.message_id:
@@ -479,19 +535,30 @@ class PoyoVoz(commands.Cog):
                     referida = None
             respondeu_poyo = isinstance(referida, discord.Message) and referida.author.id == self.bot.user.id
 
-        if not (mencionado or saudacao or respondeu_poyo):
+        if not (mencionado or falou_nome or saudacao or respondeu_poyo):
             return
         if message.content.startswith((",", "/")) and not mencionado:
             return
 
         pergunta = re.sub(rf"<@!?{self.bot.user.id}>", "", message.content).strip()
+        pergunta = NOME_POYO_RE.sub("", pergunta).strip()
         pergunta = TRIGGER_RE.sub("", pergunta).strip(" ,!?\n")
         if not pergunta:
-            pergunta = "Alguém chamou por mim. Responda de um jeito animado e pergunte como a pessoa está."
+            if respondeu_poyo and not message.content.strip():
+                pergunta = (
+                    "A pessoa respondeu à minha mensagem de áudio. Continue a conversa "
+                    "considerando o contexto recente e responda de forma natural."
+                )
+            else:
+                pergunta = (
+                    "Alguém chamou por mim. Entre na conversa de forma natural, "
+                    "considerando o que as pessoas estavam falando."
+                )
 
         try:
+            contexto = await self.contexto_do_canal(message)
             texto = await asyncio.wait_for(
-                self.resposta_ia(message, pergunta), timeout=45
+                self.resposta_ia(message, pergunta, contexto), timeout=45
             )
             await asyncio.wait_for(
                 self.enviar_audio_no_chat(message, texto), timeout=100
