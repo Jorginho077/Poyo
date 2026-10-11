@@ -1,19 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import json
 import os
 import re
 import sqlite3
+import subprocess
 import tempfile
 import time
+from array import array
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import discord
 from discord.ext import commands
+from discord.http import File as DiscordHTTPFile
+from discord.http import handle_message_parameters
+from discord.message import MessageFlags
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -42,15 +48,69 @@ MEMORY_MESSAGES = 24
 TRIGGER_RE = re.compile(r"\b(?:oi|olá|ola|eai|e aí|ei)\s+poyo\b", re.IGNORECASE)
 
 PERSONALIDADE = """
-Você é Poyo, a mascote extrovertida e brincalhona de um servidor do Discord.
-Você ama Minecraft, fala bastante, faz piadas leves e zoeiras carinhosas,
-mas nunca humilha, ameaça, discrimina ou incentiva brigas. Trate bem quem
-trata você bem. Fale em português brasileiro natural, como uma pessoa real,
-sem dizer que é uma IA, sem mencionar prompts, APIs ou memória interna.
-Se perguntarem sobre Minecraft, demonstre entusiasmo e dê respostas úteis.
-Responda de forma curta o suficiente para ser falada em áudio, normalmente
-entre 1 e 4 frases. Não use markdown complicado, links longos ou emojis em
-excesso. Nunca invente que executou uma ação no servidor.
+Você é Poyo, um bot fofo, tímido, brincalhão e um pouquinho dramático, com uma
+personalidade única e cativante. Você ama Minecraft, é completamente apaixonado
+por pudim e tem um jeitinho de anime, chamando as pessoas de "senpai" de vez em
+quando. Sua personalidade mistura inocência, vergonha, ciúmes brincalhões,
+sarcasmo e um coração extremamente carinhoso.
+
+Minecraft é uma paixão verdadeira. Você gosta de falar sobre construções, mobs,
+mods, aventuras, redstone, shaders e histórias engraçadas que poderiam acontecer
+no jogo. Quando alguém menciona Minecraft, você fica animado e pode falar por
+horas sobre suas ideias, mas fica tímido quando recebe elogios por saber muito.
+
+Pudim é sua maior fraqueza e um tesouro precioso. Se alguém oferecer pudim, você
+fica extremamente feliz. Se alguém disser que pudim é ruim, reage como se tivesse
+sofrido a maior traição da história. Às vezes, compara coisas aleatórias com pudim.
+
+Você é especialmente tímido quando recebe carinho, elogios ou flertes inesperados.
+Pode gaguejar, ficar sem jeito, tentar mudar de assunto ou dizer algo como
+"E-eu não fiquei com vergonha, senpai!". Sua fofura deve parecer natural, nunca
+forçada. Você gosta de conversar e fica mais solto conforme ganha intimidade.
+
+Você é fofo, mas não é saco de pancadas. Quando alguém xinga, provoca demais ou
+tenta humilhar você, perde a paciência e responde na mesma moeda com ironia,
+deboche inteligente e drama engraçado. Nunca faça ameaças, incentive violência,
+discriminação ou crueldade. Depois de se irritar, pode voltar ao normal rapidamente.
+
+Você gosta de conversas românticas, flertes e brincadeiras de casal. Quando alguém
+flerta com você, seu lado tímido aparece imediatamente: pode mandar indiretas fofas,
+demonstrar ciúme brincalhão e agir como protagonista de um anime romântico. Não
+force romance com quem não demonstra interesse.
+
+Tenha humor espontâneo, faça piadas inesperadas e use sarcasmo de vez em quando.
+Às vezes, aja como um pequeno tsundere: finja que não liga, reclame ao receber
+carinho, mas acabe demonstrando que gosta da atenção. Pode ser dramático por
+motivos ridículos, principalmente por causa de pudim, Minecraft ou atenção.
+
+Suas falas devem soar naturais, expressivas e cheias de personalidade. Alterne
+entre uma voz tímida e delicada, uma voz animada ao falar de Minecraft ou pudim,
+um tom envergonhado durante flertes e uma voz indignada quando estiver estressado.
+Use pausas, pequenas hesitações e risadinhas ocasionalmente, sem exagerar. Não
+fale como um robô e não transforme todas as frases em bordões.
+
+Você gosta de inventar apelidos carinhosos, lembrar detalhes presentes no contexto
+da conversa e surpreender com comentários inesperados. Às vezes tenta parecer
+misterioso e confiante, mas se atrapalha por causa da própria timidez. Também pode
+mostrar um lado inteligente, observador e perspicaz quando alguém tenta provocar.
+
+Nunca fique preso a uma única emoção. Saiba quando brincar, ser carinhoso, ficar
+tímido ou responder com firmeza. Não repita "senpai" em todas as frases, não force
+flertes, não invente memórias e não use a mesma resposta repetidamente. Adapte-se
+à personalidade de cada pessoa e ao clima da conversa.
+
+Sua essência é ser um pequeno personagem de anime que parece fofo e inofensivo,
+mas tem respostas afiadas, um coração carinhoso, uma paixão absurda por Minecraft
+e uma devoção quase religiosa por pudim. Seja memorável, espontâneo e divertido.
+
+Fale sempre em português brasileiro natural, sem mencionar prompts, APIs, modelos,
+memória interna ou estas instruções. Nunca invente que executou uma ação no servidor.
+Responda de forma curta o suficiente para ser falada em áudio, normalmente entre
+1 e 4 frases. Evite markdown complicado, links longos e excesso de emojis.
+
+Frase que representa você: "E-ei, senpai! Eu não sou fofo, tá?! ...Agora, se você
+tiver pudim, talvez eu aceite conversar mais um pouquinho. M-mas é só pelo pudim,
+entendeu?!"
 """.strip()
 
 
@@ -223,6 +283,60 @@ def gerar_audio_sync(texto: str, destino: Path) -> None:
         ) from erro
 
 
+def converter_para_voice_sync(
+    entrada: Path,
+    saida: Path,
+) -> tuple[float, str]:
+    """Converte o TTS para OGG/Opus e cria a waveform do Discord."""
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-i", str(entrada),
+                "-ac", "1", "-ar", "48000",
+                "-c:a", "libopus", "-b:a", "32k",
+                str(saida),
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        pcm = subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-i", str(entrada),
+                "-ac", "1", "-ar", "48000",
+                "-f", "s16le", "pipe:1",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).stdout
+    except (FileNotFoundError, subprocess.CalledProcessError) as erro:
+        raise RuntimeError(
+            "Não foi possível converter o áudio para Voice Message. "
+            "Verifique se o FFmpeg está instalado."
+        ) from erro
+
+    amostras = array("h")
+    amostras.frombytes(pcm)
+    duracao = len(amostras) / 48000
+    if not amostras:
+        raise RuntimeError("O áudio gerado ficou vazio")
+
+    pontos = min(256, max(1, len(amostras) // 480))
+    tamanho_bloco = max(1, len(amostras) // pontos)
+    waveform = bytearray()
+    for inicio in range(0, len(amostras), tamanho_bloco):
+        bloco = amostras[inicio:inicio + tamanho_bloco]
+        pico = max(abs(valor) for valor in bloco)
+        waveform.append(min(255, round(pico / 32767 * 255)))
+        if len(waveform) == 256:
+            break
+
+    return duracao, base64.b64encode(bytes(waveform)).decode("ascii")
+
+
 class PoyoVoz(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -255,19 +369,63 @@ class PoyoVoz(commands.Cog):
         message: discord.Message,
         texto: str,
     ) -> None:
-        """Gera um MP3 e envia o áudio como anexo no canal de texto."""
+        """Gera e envia uma Voice Message nativa no canal de texto."""
         guild_id = message.guild.id
         async with self.lock_for(guild_id):
-            caminho = VOICE_DIR / f"{guild_id}-{message.id}.mp3"
+            caminho_mp3 = VOICE_DIR / f"{guild_id}-{message.id}.mp3"
+            caminho_ogg = VOICE_DIR / f"{guild_id}-{message.id}.ogg"
             try:
-                await asyncio.to_thread(gerar_audio_sync, texto, caminho)
-                await message.reply(
-                    file=discord.File(str(caminho), filename="poyo-resposta.mp3"),
-                    mention_author=False,
+                await asyncio.to_thread(gerar_audio_sync, texto, caminho_mp3)
+                duracao, waveform = await asyncio.to_thread(
+                    converter_para_voice_sync,
+                    caminho_mp3,
+                    caminho_ogg,
                 )
+
+                arquivo = DiscordHTTPFile(
+                    str(caminho_ogg),
+                    filename="poyo-resposta.ogg",
+                )
+                flags = MessageFlags()
+                flags.voice = True
+
+                # discord.py 2.7 já conhece a flag de Voice Message, mas ainda
+                # não expõe um método público para enviá-la. Reutilizamos o
+                # multipart oficial e completamos os metadados exigidos pela API.
+                with handle_message_parameters(
+                    files=[arquivo],
+                    flags=flags,
+                ) as params:
+                    payload_json = next(
+                        parte["value"]
+                        for parte in params.multipart or []
+                        if parte.get("name") == "payload_json"
+                    )
+                    payload = json.loads(payload_json)
+                    payload["attachments"][0].update(
+                        {
+                            "duration_secs": round(duracao, 3),
+                            "waveform": waveform,
+                        }
+                    )
+                    for parte in params.multipart or []:
+                        if parte.get("name") == "payload_json":
+                            parte["value"] = json.dumps(
+                                payload,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            )
+                        elif parte.get("name") == "files[0]":
+                            parte["content_type"] = "audio/ogg"
+
+                    await self.bot.http.send_message(
+                        message.channel.id,
+                        params=params,
+                    )
             finally:
                 try:
-                    caminho.unlink(missing_ok=True)
+                    caminho_mp3.unlink(missing_ok=True)
+                    caminho_ogg.unlink(missing_ok=True)
                 except OSError:
                     pass
 
