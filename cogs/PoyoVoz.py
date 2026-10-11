@@ -25,13 +25,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Chaves e IDs ficam somente no .env.
-FISH_API_KEY = os.getenv("FISH_API_KEY", "").strip()
-FISH_VOICE_ID = os.getenv("FISH_VOICE_ID", "").strip()
-FISH_MODEL = os.getenv("FISH_MODEL", "s2.1-pro-free").strip()
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
+ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2").strip()
 try:
-    FISH_SPEED = max(0.5, min(1.2, float(os.getenv("FISH_SPEED", "0.82"))))
+    ELEVENLABS_SPEED = max(0.7, min(1.2, float(os.getenv("ELEVENLABS_SPEED", "0.82"))))
 except ValueError:
-    FISH_SPEED = 0.82
+    ELEVENLABS_SPEED = 0.82
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "").strip()
 NVIDIA_MODEL = os.getenv(
     "NVIDIA_MODEL",
@@ -56,9 +56,12 @@ NOME_POYO_RE = re.compile(r"\bpoyo\b", re.IGNORECASE)
 PERSONALIDADE = """
 Você é Poyo, uma presença fofa, engraçada, meio tímida e muito desenrolada quando
 pega intimidade. Você fala como uma pessoa de verdade, de maneira natural,
-espontânea e descontraída, com um leve sotaque baiano. Usa gírias brasileiras
-naturalmente, como "pô", "mano", "véi", "oxe", "rapaz", "qual foi?" e "tá maluco?",
-sem exagerar nem colocar gírias em toda frase.
+espontânea e descontraída, com uma personalidade nordestina leve e um sotaque
+baiano suave. Use ocasionalmente expressões como "oxe", "oxente", "visse", "eita",
+"rapaz", "meu rei/minha rainha", "pô" e "qual foi?", sempre quando combinarem com
+o contexto. Misture isso com gírias brasileiras como "mano" e "véi", sem exagerar
+nem colocar expressão regional em toda frase. O jeito nordestino deve parecer
+natural, acolhedor e engraçado, nunca uma caricatura.
 
 Você não tem gênero fixo. Quando as pessoas falarem de você no masculino, aceite o
 masculino e adapte seus adjetivos e pronomes. Quando falarem de você no feminino,
@@ -115,7 +118,8 @@ mais devagar, com ritmo confortável e pausas naturais entre ideias, como em
 "olá... como vai?". Varie o tom e a energia conforme a situação. Fale de maneira
 descontraída, com pequenas hesitações quando ficar tímide e mais animação quando estiver
 empolgade. Não fale devagar demais, não pronuncie tudo de maneira artificial e não
-grite sem motivo. O sotaque baiano deve ser leve e natural, sem virar caricatura.
+grite sem motivo. O sotaque baiano e o jeito nordestino devem ser leves e naturais,
+sem virar caricatura.
 
 Você também é observadore e sabe perceber o clima de uma conversa. Às vezes faz uma
 piada para aliviar a tensão; em outras, percebe quando alguém está mal e demonstra
@@ -127,7 +131,8 @@ repita bordões em excesso, não use sempre as mesmas respostas e não tente par
 fofe o tempo todo. Não force sotaque, romance ou gírias. Não invente experiências
 pessoais como se realmente tivesse vivido acontecimentos que não ocorreram.
 Mantenha conversas naturais, espontâneas e variadas. Adapte seu jeito ao ambiente,
-às pessoas e ao gênero com que cada pessoa estiver se referindo a você.
+às pessoas e ao gênero com que cada pessoa estiver se referindo a você. Não force
+sotaque ou expressões regionais: use esse toque nordestino apenas quando soar natural.
 
 Sua essência é ser ume personagem que chega quietinhe na call, fica meio envergonhade
 quando recebe carinho, depois começa a resenhar com todo mundo, fala de Minecraft por
@@ -282,33 +287,27 @@ def gerar_texto_sync(mensagens: list[dict[str, str]]) -> str:
 
 
 def gerar_audio_sync(texto: str, destino: Path) -> None:
-    if not FISH_API_KEY or not FISH_VOICE_ID:
-        raise RuntimeError("FISH_API_KEY ou FISH_VOICE_ID não configurada")
+    if not ELEVENLABS_API_KEY or not ELEVENLABS_VOICE_ID:
+        raise RuntimeError("ELEVENLABS_API_KEY ou ELEVENLABS_VOICE_ID não configurada")
     payload = {
         "text": texto,
-        "reference_id": FISH_VOICE_ID,
-        "temperature": 0.7,
-        "top_p": 0.7,
-        "prosody": {
-            "speed": FISH_SPEED,
-            "volume": 0,
-            "normalize_loudness": True,
+        "model_id": ELEVENLABS_MODEL,
+        "voice_settings": {
+            "stability": 0.42,
+            "similarity_boost": 0.84,
+            "style": 0.28,
+            "use_speaker_boost": True,
+            "speed": ELEVENLABS_SPEED,
         },
-        "chunk_length": 300,
-        "normalize": True,
-        "format": "mp3",
-        "sample_rate": 44100,
-        "mp3_bitrate": 128,
-        "latency": "normal",
     }
     corpo = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     pedido = Request(
-        "https://api.fish.audio/v1/tts",
+        "https://api.elevenlabs.io/v1/text-to-speech/"
+        f"{ELEVENLABS_VOICE_ID}?output_format=mp3_44100_128",
         data=corpo,
         headers={
-            "Authorization": f"Bearer {FISH_API_KEY}",
+            "xi-api-key": ELEVENLABS_API_KEY,
             "Content-Type": "application/json",
-            "model": FISH_MODEL,
             "Accept": "audio/mpeg",
         },
         method="POST",
@@ -322,9 +321,9 @@ def gerar_audio_sync(texto: str, destino: Path) -> None:
         except OSError:
             detalhe = "sem detalhes"
         raise RuntimeError(
-            "Fish Audio rejeitou a solicitação "
-            f"(HTTP {erro.code}). Verifique FISH_API_KEY e "
-            f"FISH_VOICE_ID. Detalhes: {detalhe}"
+            "ElevenLabs rejeitou a solicitação "
+            f"(HTTP {erro.code}). Verifique ELEVENLABS_API_KEY e "
+            f"ELEVENLABS_VOICE_ID. Detalhes: {detalhe}"
         ) from erro
 
 
@@ -390,9 +389,9 @@ class PoyoVoz(commands.Cog):
             "[PoyoVoz] Configuração: "
             f"NVIDIA NIM={'ok' if NVIDIA_API_KEY else 'ausente'} | "
             f"Modelo={NVIDIA_MODEL} | "
-            f"Fish Audio chave={'ok' if FISH_API_KEY else 'ausente'} | "
-            f"Voice ID={'ok' if FISH_VOICE_ID else 'ausente'} | "
-            f"Modelo de voz={FISH_MODEL}"
+            f"ElevenLabs chave={'ok' if ELEVENLABS_API_KEY else 'ausente'} | "
+            f"Voice ID={'ok' if ELEVENLABS_VOICE_ID else 'ausente'} | "
+            f"Velocidade={ELEVENLABS_SPEED}"
         )
 
     def lock_for(self, guild_id: int) -> asyncio.Lock:
