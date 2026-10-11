@@ -35,7 +35,7 @@ try:
         0.7, min(1.2, float(os.getenv("ELEVENLABS_SPEED", "0.82")))
     )
 except ValueError:
-    ELEVENLABS_SPEED = 0.82
+    ELEVENLABS_SPEED = 1.00
 
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "").strip()
 NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "openai/gpt-oss-20b").strip()
