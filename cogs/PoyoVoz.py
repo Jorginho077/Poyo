@@ -22,9 +22,15 @@ load_dotenv()
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
 ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2").strip()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
-GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "").strip()
+NVIDIA_MODEL = os.getenv(
+    "NVIDIA_MODEL",
+    "openai/gpt-oss-20b",
+).strip()
+NVIDIA_API_BASE = os.getenv(
+    "NVIDIA_API_BASE",
+    "https://integrate.api.nvidia.com/v1",
+).rstrip("/")
 
 DATABASE_PATH = Path(__file__).resolve().parent.parent / "poyovoz.sqlite3"
 VOICE_DIR = Path(tempfile.gettempdir()) / "poyo-voz"
@@ -123,47 +129,57 @@ def post_json(url: str, payload: dict, headers: dict[str, str], timeout: int = 4
         except OSError:
             detalhe = "sem detalhes"
         raise RuntimeError(
-            f"Gemini rejeitou a solicitação (HTTP {erro.code}). Detalhes: {detalhe}"
+            f"NVIDIA NIM rejeitou a solicitação (HTTP {erro.code}). Detalhes: {detalhe}"
         ) from erro
 
 
 def gerar_texto_sync(mensagens: list[dict[str, str]]) -> str:
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY não configurada")
-
-    sistema = ""
-    conteudos: list[dict] = []
-    for mensagem in mensagens:
-        papel = mensagem["role"]
-        texto = mensagem["content"]
-        if papel == "system":
-            sistema = texto
-            continue
-        conteudos.append(
-            {
-                "role": "model" if papel == "assistant" else "user",
-                "parts": [{"text": texto}],
-            }
-        )
+    if not NVIDIA_API_KEY:
+        raise RuntimeError("NVIDIA_API_KEY não configurada")
 
     payload = {
-        "systemInstruction": {"parts": [{"text": sistema}]},
-        "contents": conteudos,
-        "generationConfig": {
-            "temperature": 0.9,
-            "topP": 0.95,
-            "maxOutputTokens": 260,
-        },
+        "model": NVIDIA_MODEL,
+        "messages": mensagens,
+        "temperature": 0.9,
+        "top_p": 0.95,
+        "max_tokens": 260,
+        "stream": False,
     }
-    resposta = post_json(
-        f"{GEMINI_API_BASE}/models/{GEMINI_MODEL}:generateContent",
-        payload,
-        {
-            "x-goog-api-key": GEMINI_API_KEY,
-            "Content-Type": "application/json",
-        },
-    )
-    texto = resposta["candidates"][0]["content"]["parts"][0]["text"].strip()
+    url = f"{NVIDIA_API_BASE}/chat/completions"
+    cabecalhos = {
+        "Authorization": f"Bearer {NVIDIA_API_KEY}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+    resposta = None
+    for tentativa in range(3):
+        try:
+            resposta = post_json(url, payload, cabecalhos)
+            break
+        except RuntimeError as erro:
+            erro_texto = str(erro)
+            temporario = "(HTTP 503)" in erro_texto or "(HTTP 429)" in erro_texto
+            if not temporario or tentativa == 2:
+                raise
+
+            espera = 2 ** (tentativa + 1)
+            print(
+                f"[PoyoVoz] NVIDIA NIM indisponível ou limitado; "
+                f"nova tentativa em {espera}s ({tentativa + 1}/2)."
+            )
+            time.sleep(espera)
+
+    if resposta is None:
+        raise RuntimeError("NVIDIA NIM não retornou uma resposta")
+
+    try:
+        texto = resposta["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, AttributeError) as erro:
+        raise RuntimeError(
+            f"Resposta inesperada da NVIDIA NIM: {resposta!r}"
+        ) from erro
+
     return texto[:MAX_REPLY]
 
 
@@ -213,7 +229,8 @@ class PoyoVoz(commands.Cog):
         self.locks: dict[int, asyncio.Lock] = {}
         print(
             "[PoyoVoz] Configuração: "
-            f"Gemini={'ok' if GEMINI_API_KEY else 'ausente'} | "
+            f"NVIDIA NIM={'ok' if NVIDIA_API_KEY else 'ausente'} | "
+            f"Modelo={NVIDIA_MODEL} | "
             f"ElevenLabs chave={'ok' if ELEVENLABS_API_KEY else 'ausente'} | "
             f"Voice ID={'ok' if ELEVENLABS_VOICE_ID else 'ausente'}"
         )
