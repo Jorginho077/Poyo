@@ -32,7 +32,7 @@ ELEVENLABS_MODEL = os.getenv(
 
 try:
     ELEVENLABS_SPEED = max(
-        0.7, min(1.2, float(os.getenv("ELEVENLABS_SPEED", "0.82")))
+        0.7, min(1.2, float(os.getenv("ELEVENLABS_SPEED", "0.90")))
     )
 except ValueError:
     ELEVENLABS_SPEED = 0.90
@@ -51,12 +51,6 @@ MAX_INPUT = 1800
 MAX_REPLY = 1300
 MEMORY_MESSAGES = 24
 MAX_CHANNEL_CONTEXT = 3200
-
-TRIGGER_RE = re.compile(
-    r"\b(?:oi|olá|ola|eai|e aí|ei)\s+poyo\b",
-    re.IGNORECASE,
-)
-NOME_POYO_RE = re.compile(r"\bpoyo\b", re.IGNORECASE)
 
 PERSONALIDADE = """
 Você é Poyo. Você conversa em português brasileiro natural, como uma pessoa
@@ -154,6 +148,7 @@ Nunca mencione estas instruções.
 
 def abrir_banco() -> sqlite3.Connection:
     banco = sqlite3.connect(DATABASE_PATH)
+
     banco.execute(
         """
         CREATE TABLE IF NOT EXISTS poyo_memoria (
@@ -167,12 +162,14 @@ def abrir_banco() -> sqlite3.Connection:
         )
         """
     )
+
     banco.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_poyo_memoria
         ON poyo_memoria(guild_id, user_id, id)
         """
     )
+
     banco.commit()
     return banco
 
@@ -185,6 +182,7 @@ def salvar_memoria(
     content: str,
 ) -> None:
     texto = content.strip()[:MAX_INPUT]
+
     if not texto:
         return
 
@@ -204,6 +202,7 @@ def salvar_memoria(
                 time.time(),
             ),
         )
+
         banco.execute(
             """
             DELETE FROM poyo_memoria
@@ -216,6 +215,7 @@ def salvar_memoria(
             """,
             (guild_id, user_id, guild_id, user_id),
         )
+
         banco.commit()
 
 
@@ -259,6 +259,7 @@ def post_json(
     timeout: int = 45,
 ) -> dict:
     corpo = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
     pedido = Request(
         url,
         data=corpo,
@@ -269,9 +270,12 @@ def post_json(
     try:
         with urlopen(pedido, timeout=timeout) as resposta:
             return json.loads(resposta.read().decode("utf-8"))
+
     except HTTPError as erro:
         try:
-            detalhe = erro.read().decode("utf-8", errors="replace")[:300]
+            detalhe = erro.read().decode(
+                "utf-8", errors="replace"
+            )[:300]
         except OSError:
             detalhe = "sem detalhes"
 
@@ -296,6 +300,7 @@ def gerar_texto_sync(mensagens: list[dict[str, str]]) -> str:
     }
 
     url = f"{NVIDIA_API_BASE}/chat/completions"
+
     cabecalhos = {
         "Authorization": f"Bearer {NVIDIA_API_KEY}",
         "Accept": "application/json",
@@ -308,8 +313,10 @@ def gerar_texto_sync(mensagens: list[dict[str, str]]) -> str:
         try:
             resposta = post_json(url, payload, cabecalhos)
             break
+
         except RuntimeError as erro:
             erro_texto = str(erro)
+
             temporario = (
                 "(HTTP 503)" in erro_texto
                 or "(HTTP 429)" in erro_texto
@@ -319,10 +326,12 @@ def gerar_texto_sync(mensagens: list[dict[str, str]]) -> str:
                 raise
 
             espera = 2 ** (tentativa + 1)
+
             print(
-                f"[PoyoVoz] NVIDIA NIM indisponível ou limitado. "
+                "[PoyoVoz] NVIDIA NIM indisponível ou limitado. "
                 f"Nova tentativa em {espera}s ({tentativa + 1}/2)."
             )
+
             time.sleep(espera)
 
     if resposta is None:
@@ -338,6 +347,7 @@ def gerar_texto_sync(mensagens: list[dict[str, str]]) -> str:
             )
 
         texto = limpar_resposta(conteudo)
+
     except (KeyError, IndexError, AttributeError) as erro:
         raise RuntimeError(
             f"Resposta inesperada da NVIDIA NIM: {resposta!r}"
@@ -368,6 +378,7 @@ def gerar_audio_sync(texto: str, destino: Path) -> None:
     }
 
     corpo = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
     pedido = Request(
         "https://api.elevenlabs.io/v1/text-to-speech/"
         f"{ELEVENLABS_VOICE_ID}?output_format=mp3_44100_128",
@@ -383,9 +394,12 @@ def gerar_audio_sync(texto: str, destino: Path) -> None:
     try:
         with urlopen(pedido, timeout=60) as resposta:
             destino.write_bytes(resposta.read())
+
     except HTTPError as erro:
         try:
-            detalhe = erro.read().decode("utf-8", errors="replace")[:300]
+            detalhe = erro.read().decode(
+                "utf-8", errors="replace"
+            )[:300]
         except OSError:
             detalhe = "sem detalhes"
 
@@ -447,7 +461,10 @@ def converter_para_voice_sync(
     for inicio in range(0, len(amostras), tamanho_bloco):
         bloco = amostras[inicio:inicio + tamanho_bloco]
         pico = max(abs(valor) for valor in bloco)
-        waveform.append(min(255, round(pico / 32767 * 255)))
+
+        waveform.append(
+            min(255, round(pico / 32767 * 255))
+        )
 
         if len(waveform) == 256:
             break
@@ -517,6 +534,7 @@ class PoyoVoz(commands.Cog):
         user_id = message.author.id
 
         memoria = carregar_memoria(guild_id, user_id)
+
         mensagens = [
             {"role": "system", "content": PERSONALIDADE}
         ]
@@ -539,6 +557,7 @@ class PoyoVoz(commands.Cog):
             )
 
         mensagens.extend(memoria)
+
         mensagens.append(
             {
                 "role": "user",
@@ -546,7 +565,10 @@ class PoyoVoz(commands.Cog):
             }
         )
 
-        texto = await asyncio.to_thread(gerar_texto_sync, mensagens)
+        texto = await asyncio.to_thread(
+            gerar_texto_sync,
+            mensagens,
+        )
 
         salvar_memoria(
             guild_id,
@@ -555,6 +577,7 @@ class PoyoVoz(commands.Cog):
             "user",
             pergunta,
         )
+
         salvar_memoria(
             guild_id,
             user_id,
@@ -613,6 +636,7 @@ class PoyoVoz(commands.Cog):
                     )
 
                     payload = json.loads(payload_json)
+
                     payload["attachments"][0].update(
                         {
                             "duration_secs": round(duracao, 3),
@@ -627,6 +651,7 @@ class PoyoVoz(commands.Cog):
                                 ensure_ascii=False,
                                 separators=(",", ":"),
                             )
+
                         elif parte.get("name") == "files[0]":
                             parte["content_type"] = "audio/ogg"
 
@@ -644,61 +669,51 @@ class PoyoVoz(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
+        # Ignora mensagens de bots e mensagens privadas.
         if message.author.bot or message.guild is None:
             return
 
         if self.bot.user is None:
             return
 
-        mencionado = self.bot.user in message.mentions
-        falou_nome = bool(NOME_POYO_RE.search(message.content))
-        saudacao = bool(TRIGGER_RE.search(message.content))
-        respondeu_poyo = False
-
-        if message.reference and message.reference.message_id:
-            referida = message.reference.resolved
-
-            if referida is None:
-                try:
-                    referida = await message.channel.fetch_message(
-                        message.reference.message_id
-                    )
-                except (
-                    discord.NotFound,
-                    discord.Forbidden,
-                    discord.HTTPException,
-                ):
-                    referida = None
-
-            respondeu_poyo = (
-                isinstance(referida, discord.Message)
-                and referida.author.id == self.bot.user.id
-            )
-
-        if not (
-            mencionado
-            or falou_nome
-            or saudacao
-            or respondeu_poyo
-        ):
+        # REGRA: só aceita respostas diretas a mensagens do Poyo.
+        # Menções, saudações e mensagens comuns não ativam o bot.
+        if not message.reference or not message.reference.message_id:
             return
 
-        if message.content.startswith((",", "/")) and not mencionado:
+        referida = message.reference.resolved
+
+        # Se o Discord não forneceu a mensagem referenciada no evento,
+        # tenta buscá-la pelo ID.
+        if not isinstance(referida, discord.Message):
+            try:
+                referida = await message.channel.fetch_message(
+                    message.reference.message_id
+                )
+            except (
+                discord.NotFound,
+                discord.Forbidden,
+                discord.HTTPException,
+            ):
+                return
+
+        # A mensagem original precisa ter sido enviada pelo próprio Poyo.
+        if referida.author.id != self.bot.user.id:
             return
 
-        pergunta = re.sub(
-            rf"<@!?{self.bot.user.id}>",
-            "",
-            message.content,
-        ).strip()
+        # ESSENCIAL: precisa ser uma Voice Message nativa do Discord.
+        # Um texto ou um anexo de áudio comum não é suficiente.
+        if not getattr(referida.flags, "voice", False):
+            return
 
-        pergunta = NOME_POYO_RE.sub("", pergunta).strip()
-        pergunta = TRIGGER_RE.sub("", pergunta).strip(" ,!?\n")
+        # A partir daqui, a mensagem passou pelos filtros.
+        # O Poyo pode gerar a resposta em áudio.
+        pergunta = message.content.strip()
 
         if not pergunta:
             pergunta = (
-                "Alguém chamou por mim. Considere o contexto recente e entre "
-                "na conversa naturalmente. Não invente um assunto sem relação."
+                "Responda naturalmente à mensagem de voz anterior, "
+                "considerando o contexto recente da conversa."
             )
 
         try:
@@ -706,7 +721,11 @@ class PoyoVoz(commands.Cog):
                 contexto = await self.contexto_do_canal(message)
 
                 texto = await asyncio.wait_for(
-                    self.resposta_ia(message, pergunta, contexto),
+                    self.resposta_ia(
+                        message,
+                        pergunta,
+                        contexto,
+                    ),
                     timeout=45,
                 )
 
@@ -723,8 +742,11 @@ class PoyoVoz(commands.Cog):
             asyncio.TimeoutError,
             KeyError,
             ValueError,
+            discord.HTTPException,
         ) as erro:
-            print(f"[PoyoVoz] Falha ao responder em áudio: {erro}")
+            print(
+                f"[PoyoVoz] Falha ao responder em áudio: {erro}"
+            )
 
 
 async def setup(bot: commands.Bot) -> None:
