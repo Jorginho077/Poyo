@@ -392,7 +392,7 @@ class PainelSkin(discord.ui.LayoutView):
 
 class SkinView(discord.ui.LayoutView):
     def __init__(self, skin: dict, imagem_url: Optional[str] = None) -> None:
-        super().__init__(timeout=None)
+        super().__init__(timeout=300)
         self.skin = skin
         self.imagem_url = imagem_url or skin["imagem"]
         self.curtidas: set[int] = set()
@@ -437,17 +437,20 @@ class SkinView(discord.ui.LayoutView):
         )
 
     async def curtir(self, interaction: discord.Interaction) -> None:
+        try:
+            await interaction.response.defer()
+        except (discord.NotFound, discord.HTTPException):
+            return
+
         async with self.lock:
             if interaction.user.id in self.curtidas:
-                await interaction.response.defer()
                 return
             self.curtidas.add(interaction.user.id)
             self.montar()
-            await interaction.response.defer()
             try:
                 await interaction.message.edit(view=self)
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                return
+                pass
 
 
 class Avatar(commands.Cog):
@@ -526,6 +529,7 @@ class Avatar(commands.Cog):
     )
     @commands.guild_only()
     @commands.bot_has_permissions(send_messages=True, read_message_history=True)
+    @commands.cooldown(1, 30, commands.BucketType.user)
     async def avatar_roblox(self, ctx: commands.Context, *, nome: str) -> None:
         await self._enviar_skin(ctx, nome, buscar_roblox)
 
@@ -540,6 +544,7 @@ class Avatar(commands.Cog):
     )
     @commands.guild_only()
     @commands.bot_has_permissions(send_messages=True, read_message_history=True)
+    @commands.cooldown(1, 30, commands.BucketType.user)
     async def avatar_minecraft(self, ctx: commands.Context, *, nome: str) -> None:
         await self._enviar_skin(ctx, nome, buscar_minecraft)
 
