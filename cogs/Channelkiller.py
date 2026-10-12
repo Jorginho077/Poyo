@@ -355,7 +355,7 @@ class ChannelKiller(commands.Cog):
         arquivo = await baixar_banner()
         view = ChannelKillerPanel(self, config, MOD_BANNER_ATTACHMENT if arquivo is not None else None)
         if isinstance(target, discord.Interaction):
-            await target.response.send_message(view=view, file=arquivo, ephemeral=True)
+            await target.response.send_message(view=view, file=arquivo, ephemeral=False)
         else:
             await target.reply(view=view, file=arquivo, mention_author=False)
 
