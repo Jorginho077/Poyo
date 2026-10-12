@@ -2,6 +2,8 @@
 # painel de configuracao: ,pmconfig (caixa de selecao minimalista)
 import asyncio
 import logging
+import traceback
+from pathlib import Path
 
 import discord
 from discord import app_commands
@@ -61,10 +63,13 @@ async def _responder(
     if view is None:
         view = _cartao(*blocos)
     if ctx.interaction is not None:
-        if ctx.interaction.response.is_done():
-            await ctx.interaction.followup.send(view=view, ephemeral=ephemeral)
-        else:
-            await ctx.interaction.response.send_message(view=view, ephemeral=ephemeral)
+        try:
+            if ctx.interaction.response.is_done():
+                await ctx.interaction.followup.send(view=view, ephemeral=ephemeral)
+            else:
+                await ctx.interaction.response.send_message(view=view, ephemeral=ephemeral)
+        except discord.NotFound:   # interacao expirou: manda no canal mesmo
+            await ctx.channel.send(view=view, allowed_mentions=NO_MENTIONS)
     else:
         await ctx.send(view=view, allowed_mentions=NO_MENTIONS)
 
@@ -383,6 +388,26 @@ class Musica(commands.Cog, name="Musica"):
     )
     @app_commands.describe(busca="Nome da música ou link (SoundCloud, Bandcamp, mp3, rádio)")
     async def tocar(self, ctx: commands.Context, *, busca: str) -> None:
+        # entrar no canal de voz leva mais que os 3s do slash: avisa o discord logo
+        if ctx.interaction is not None and not ctx.interaction.response.is_done():
+            await ctx.defer()
+        try:
+            await self._tocar(ctx, busca)
+        except commands.CommandError:
+            raise
+        except Exception as e:
+            # em vez do aviso generico, mostra o erro de verdade (e onde foi)
+            log.exception("erro inesperado no tocar")
+            quadro = traceback.extract_tb(e.__traceback__)[-1]
+            onde = f"{Path(quadro.filename).name}:{quadro.lineno}"
+            await _responder(
+                ctx,
+                "## Erro ao tocar",
+                f"`{type(e).__name__}: {e}`",
+                f"-# em `{onde}` · me manda esse texto que eu corrijo",
+            )
+
+    async def _tocar(self, ctx: commands.Context, busca: str) -> None:
         if not await self._mesmo_canal(ctx):
             return
         if not await self._pre_checagem(ctx):
@@ -397,7 +422,6 @@ class Musica(commands.Cog, name="Musica"):
             async with ctx.typing():
                 await self._buscar_e_enfileirar(ctx, busca, cfg)
         else:
-            await ctx.defer()
             await self._buscar_e_enfileirar(ctx, busca, cfg)
 
     async def _buscar_e_enfileirar(self, ctx: commands.Context, busca: str, cfg: dict) -> None:
@@ -422,14 +446,17 @@ class Musica(commands.Cog, name="Musica"):
         player.volume = cfg["volume"] / 100
         await player.adicionar(faixas)
 
-        if player.atual is not None and len(faixas) == 1:
+        if len(faixas) == 1:
             faixa = faixas[0]
             emoji = EMOJI_FONTE.get(faixa.fonte, "🎵")
-            await _responder(
-                ctx,
-                f"## {emoji} Na fila",
-                f"**{faixa.titulo}** · `{faixa.duracao_txt}` · posição **{len(player.fila)}**",
-            )
+            if player.atual is not None:
+                await _responder(
+                    ctx,
+                    f"## {emoji} Na fila",
+                    f"**{faixa.titulo}** · `{faixa.duracao_txt}` · posição **{len(player.fila)}**",
+                )
+            else:
+                await _responder(ctx, f"## {emoji} Já vai tocar", f"**{faixa.titulo}** · `{faixa.duracao_txt}`")
         elif len(faixas) > 1:
             await _responder(ctx, f"## 🎶 Playlist adicionada", f"**{len(faixas)} faixas** entraram na fila.")
 
@@ -562,7 +589,8 @@ class Musica(commands.Cog, name="Musica"):
     )
     @commands.has_permissions(manage_guild=True)
     async def pmconfig_diagnostico(self, ctx: commands.Context) -> None:
-        if ctx.interaction is not None:
+        # o bot.py ja responde (defer) todo slash antes do comando rodar
+        if ctx.interaction is not None and not ctx.interaction.response.is_done():
             await ctx.defer(ephemeral=True)
         view = await self.gerar_diagnostico(ctx.guild, ctx.channel, ctx.author)
         await _responder(ctx, view=view, ephemeral=True)
