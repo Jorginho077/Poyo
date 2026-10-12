@@ -12,6 +12,14 @@ from discord.ext import commands, tasks
 
 DB_PATH = Path(__file__).with_name("chanelkiller.sqlite3")
 DURATION_RE = re.compile(r"(\d+)\s*([smhd])", re.I)
+UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+EMOJI_INICIO = "<:axolote:1556443018557661234>"
+EMOJI_FINAL = "<a:emoji_481:1556442987691647068>"
+MOD_BANNER_URL = (
+    "https://raw.githubusercontent.com/"
+    "Jorginho077/Poyo/main/assets/Tumblr-l-67143811701311.gif"
+)
 
 
 def parse_duration(value: str) -> int:
@@ -19,10 +27,7 @@ def parse_duration(value: str) -> int:
     parts = list(DURATION_RE.finditer(value))
     if not parts or "".join(p.group(0).replace(" ", "") for p in parts) != re.sub(r"\s+", "", value):
         raise ValueError("Use formatos como 3h 1m, 30m ou 1d.")
-    seconds = sum(
-        int(p.group(1)) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[p.group(2).lower()]
-        for p in parts
-    )
+    seconds = sum(int(p.group(1)) * UNITS[p.group(2).lower()] for p in parts)
     if not 60 <= seconds <= 365 * 86400:
         raise ValueError("O intervalo deve ser entre 1 minuto e 365 dias.")
     return seconds
@@ -37,6 +42,25 @@ def format_duration(seconds: int) -> str:
     return " ".join(result) or "0s"
 
 
+def make_container(
+    title: str,
+    description: str,
+    buttons: list[discord.ui.Button] | None = None,
+    timeout: float | None = 900,
+) -> discord.ui.LayoutView:
+    view = discord.ui.LayoutView(timeout=timeout)
+    container = discord.ui.Container()
+    container.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(MOD_BANNER_URL)))
+    container.add_item(
+        discord.ui.TextDisplay(f"{EMOJI_INICIO}  **{title}**  {EMOJI_FINAL}\n\n{description}")
+    )
+    if buttons:
+        container.add_item(discord.ui.ActionRow(*buttons))
+    container.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(MOD_BANNER_URL)))
+    view.add_item(container)
+    return view
+
+
 class ChannelKillerConfig:
     def __init__(self, owner_id: int, guild_id: int, channel_id=None,
                  interval=None, active=False, next_run=0.0):
@@ -48,11 +72,40 @@ class ChannelKillerConfig:
         self.next_run = next_run
 
 
-class ChannelKillerPanel(discord.ui.View):
+class ChannelKillerPanel(discord.ui.LayoutView):
     def __init__(self, cog: "ChannelKiller", config: ChannelKillerConfig):
         super().__init__(timeout=900)
         self.cog = cog
         self.config = config
+
+        canal = discord.ui.Button(label="Canal", style=discord.ButtonStyle.secondary)
+        tempo = discord.ui.Button(label="Tempo", style=discord.ButtonStyle.secondary)
+        ativar = discord.ui.Button(label="Ativar", style=discord.ButtonStyle.success)
+        desativar = discord.ui.Button(label="Desativar", style=discord.ButtonStyle.danger)
+        canal.callback = self.set_channel
+        tempo.callback = self.set_time
+        ativar.callback = self.activate
+        desativar.callback = self.deactivate
+
+        container = discord.ui.Container()
+        container.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(MOD_BANNER_URL)))
+        container.add_item(discord.ui.TextDisplay(self.panel_text()))
+        container.add_item(discord.ui.ActionRow(canal, tempo, ativar, desativar))
+        container.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(MOD_BANNER_URL)))
+        self.add_item(container)
+
+    def panel_text(self) -> str:
+        channel = f"<#{self.config.channel_id}>" if self.config.channel_id else "Não selecionado"
+        interval = format_duration(self.config.interval) if self.config.interval else "Não definido"
+        status = "Ativo" if self.config.active else "Inativo"
+        return (
+            f"{EMOJI_INICIO}  **CHANNEL KILLER**  {EMOJI_FINAL}\n\n"
+            f"Canal: {channel}\n"
+            f"Intervalo: {interval}\n"
+            f"Status: {status}\n\n"
+            "A recriação apaga as mensagens antigas e altera o ID do canal. "
+            "Links, threads e integrações podem ser afetados."
+        )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.config.owner_id:
@@ -61,15 +114,15 @@ class ChannelKillerPanel(discord.ui.View):
             )
             return False
         if interaction.guild_id != self.config.guild_id:
-            await interaction.response.send_message("Este painel pertence a outro servidor.", ephemeral=True)
+            await interaction.response.send_message(
+                "Este painel pertence a outro servidor.", ephemeral=True
+            )
             return False
         return True
 
-    @discord.ui.button(label="Canal", style=discord.ButtonStyle.secondary)
-    async def set_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def set_channel(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(
-            "Mencione o canal de texto desejado nesta conversa em até 60 segundos.",
-            ephemeral=True,
+            "Mencione o canal de texto desejado no chat em até 60 segundos.", ephemeral=True
         )
 
         def check(message: discord.Message) -> bool:
@@ -93,72 +146,64 @@ class ChannelKillerPanel(discord.ui.View):
 
         self.config.channel_id = channel.id
         await self.cog.save_config(self.config)
-        await interaction.followup.send(f"Canal definido: {channel.mention}", ephemeral=True)
+        await interaction.followup.send(
+            view=make_container("Canal definido", f"Canal selecionado: {channel.mention}"),
+            ephemeral=True,
+        )
 
-    @discord.ui.button(label="Tempo", style=discord.ButtonStyle.secondary)
-    async def set_time(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def set_time(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_modal(ChannelKillerDurationModal(self.cog, self.config))
 
-    @discord.ui.button(label="Ativar", style=discord.ButtonStyle.success)
-    async def activate(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def activate(self, interaction: discord.Interaction) -> None:
         if not self.config.channel_id:
-            await interaction.response.send_message("Escolha um canal primeiro.", ephemeral=True)
+            await interaction.response.send_message(
+                view=make_container("Configuração incompleta", "Escolha um canal primeiro."), ephemeral=True
+            )
             return
         if not self.config.interval:
-            await interaction.response.send_message("Defina o intervalo primeiro.", ephemeral=True)
+            await interaction.response.send_message(
+                view=make_container("Configuração incompleta", "Defina o intervalo primeiro."), ephemeral=True
+            )
             return
 
         guild = interaction.guild
         channel = guild.get_channel(self.config.channel_id) if guild else None
         if not isinstance(channel, discord.TextChannel):
-            await interaction.response.send_message("O canal configurado não existe mais.", ephemeral=True)
-            return
-        if not channel.permissions_for(guild.me).manage_channels:
             await interaction.response.send_message(
-                "Preciso da permissão Gerenciar canais.", ephemeral=True
+                view=make_container("Canal inválido", "O canal configurado não existe mais."), ephemeral=True
+            )
+            return
+        if guild.me is None or not channel.permissions_for(guild.me).manage_channels:
+            await interaction.response.send_message(
+                view=make_container("Permissão necessária", "Preciso da permissão **Gerenciar canais**."),
+                ephemeral=True,
             )
             return
 
+        confirm_view = ChannelKillerConfirmView(self.cog, self.config)
         await interaction.response.send_message(
-            f"Confirme para recriar {channel.mention} a cada "
-            f"{format_duration(self.config.interval)}. As mensagens antigas serão perdidas "
-            "e o ID do canal mudará.",
-            view=ChannelKillerConfirmView(self.cog, self.config),
+            view=make_container(
+                "Confirmar ativação",
+                f"Confirme para recriar {channel.mention} a cada **{format_duration(self.config.interval)}**. "
+                "As mensagens antigas serão perdidas e o ID do canal mudará.",
+                [confirm_view.confirm_button, confirm_view.cancel_button],
+                timeout=60,
+            ),
             ephemeral=True,
         )
 
-    @discord.ui.button(label="Desativar", style=discord.ButtonStyle.danger)
-    async def deactivate(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def deactivate(self, interaction: discord.Interaction) -> None:
         self.config.active = False
         self.config.next_run = 0
         await self.cog.save_config(self.config)
-        await interaction.response.send_message("Rotina desativada. A configuração foi mantida.", ephemeral=True)
-
-    def make_embed(self) -> discord.Embed:
-        channel = f"<#{self.config.channel_id}>" if self.config.channel_id else "Não selecionado"
-        interval = format_duration(self.config.interval) if self.config.interval else "Não definido"
-        status = "Ativo" if self.config.active else "Inativo"
-        return discord.Embed(
-            title="CHANNEL KILLER",
-            description=(
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"Canal: {channel}\n"
-                f"Intervalo: {interval}\n"
-                f"Status: {status}\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                "A recriação exclui as mensagens antigas. Links, threads e integrações "
-                "podem ser afetados."
-            ),
-            color=discord.Color.dark_grey(),
+        await interaction.response.send_message(
+            view=make_container("Rotina desativada", "A configuração foi mantida."), ephemeral=True
         )
 
 
 class ChannelKillerDurationModal(discord.ui.Modal, title="Definir intervalo"):
     interval = discord.ui.TextInput(
-        label="Intervalo",
-        placeholder="Ex.: 3h 1m ou 1d",
-        required=True,
-        max_length=40,
+        label="Intervalo", placeholder="Ex.: 3h 1m ou 1d", required=True, max_length=40
     )
 
     def __init__(self, cog: "ChannelKiller", config: ChannelKillerConfig):
@@ -170,43 +215,50 @@ class ChannelKillerDurationModal(discord.ui.Modal, title="Definir intervalo"):
         try:
             seconds = parse_duration(str(self.interval))
         except ValueError as exc:
-            await interaction.response.send_message(str(exc), ephemeral=True)
+            await interaction.response.send_message(
+                view=make_container("Tempo inválido", str(exc)), ephemeral=True
+            )
             return
         self.config.interval = seconds
         await self.cog.save_config(self.config)
         await interaction.response.send_message(
-            f"Intervalo salvo: {format_duration(seconds)}.", ephemeral=True
+            view=make_container("Intervalo salvo", f"Novo intervalo: **{format_duration(seconds)}**."),
+            ephemeral=True,
         )
 
 
-class ChannelKillerConfirmView(discord.ui.View):
+class ChannelKillerConfirmView:
     def __init__(self, cog: "ChannelKiller", config: ChannelKillerConfig):
-        super().__init__(timeout=60)
         self.cog = cog
         self.config = config
+        self.confirm_button = discord.ui.Button(label="Confirmar", style=discord.ButtonStyle.danger)
+        self.cancel_button = discord.ui.Button(label="Cancelar", style=discord.ButtonStyle.secondary)
+        self.confirm_button.callback = self.confirm
+        self.cancel_button.callback = self.cancel
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+    async def confirm(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.config.owner_id:
             await interaction.response.send_message("Somente quem abriu o painel pode confirmar.", ephemeral=True)
-            return False
-        return True
-
-    @discord.ui.button(label="Confirmar", style=discord.ButtonStyle.danger)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+            return
         self.config.active = True
         self.config.next_run = time.time() + self.config.interval
         await self.cog.save_config(self.config)
         await interaction.response.send_message(
-            f"Ativado. A primeira recriação ocorrerá em {format_duration(self.config.interval)}. "
-            "A configuração continuará salva após reiniciar o bot.",
+            view=make_container(
+                "Channel Killer ativado",
+                f"A primeira recriação ocorrerá em **{format_duration(self.config.interval)}**. "
+                "A configuração continuará salva após reiniciar o bot.",
+            ),
             ephemeral=True,
         )
-        self.stop()
 
-    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("Operação cancelada.", ephemeral=True)
-        self.stop()
+    async def cancel(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.config.owner_id:
+            await interaction.response.send_message("Somente quem abriu o painel pode cancelar.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            view=make_container("Operação cancelada", "A rotina não foi ativada."), ephemeral=True
+        )
 
 
 class ChannelKiller(commands.Cog):
@@ -267,9 +319,11 @@ class ChannelKiller(commands.Cog):
         if guild is None:
             message = "Use este comando em um servidor."
             if isinstance(target, discord.Interaction):
-                await target.response.send_message(message, ephemeral=True)
+                await target.response.send_message(
+                    view=make_container("Servidor necessário", message), ephemeral=True
+                )
             else:
-                await target.reply(message, mention_author=False)
+                await target.reply(view=make_container("Servidor necessário", message), mention_author=False)
             return
 
         key = (guild.id, user.id)
@@ -277,9 +331,9 @@ class ChannelKiller(commands.Cog):
         await self.save_config(config)
         view = ChannelKillerPanel(self, config)
         if isinstance(target, discord.Interaction):
-            await target.response.send_message(embed=view.make_embed(), view=view, ephemeral=True)
+            await target.response.send_message(view=view, ephemeral=True)
         else:
-            await target.reply(embed=view.make_embed(), view=view, mention_author=False)
+            await target.reply(view=view, mention_author=False)
 
     @app_commands.command(name="channelkiller", description="Abre o painel do Channel Killer.")
     async def channelkiller_slash(self, interaction: discord.Interaction):
@@ -310,19 +364,15 @@ class ChannelKiller(commands.Cog):
                     await self.save_config(config)
                     continue
 
-                replacement = await channel.clone(
-                    reason="ChannelKiller: recriação periódica configurada"
-                )
+                replacement = await channel.clone(reason="ChannelKiller: recriação periódica configurada")
                 await replacement.edit(
                     category=channel.category,
                     position=channel.position,
                     reason="ChannelKiller: preservar categoria e posição",
                 )
-
                 config.channel_id = replacement.id
                 config.next_run = time.time() + config.interval
                 await self.save_config(config)
-
                 await channel.delete(reason="ChannelKiller: remover canal antigo e mensagens")
             except (discord.Forbidden, discord.HTTPException):
                 config.active = False
