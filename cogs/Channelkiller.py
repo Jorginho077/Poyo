@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import re
 import sqlite3
 import time
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 import discord
 from discord import app_commands
@@ -20,6 +22,21 @@ MOD_BANNER_URL = (
     "https://raw.githubusercontent.com/"
     "Jorginho077/Poyo/main/assets/Tumblr-l-67143811701311.gif"
 )
+MOD_BANNER_ATTACHMENT = "attachment://poyo-mod-banner.gif"
+
+
+def _baixar_banner_sync() -> bytes:
+    pedido = Request(MOD_BANNER_URL, headers={"User-Agent": "Poyo-Discord-Bot/1.0"})
+    with urlopen(pedido, timeout=20) as resposta:
+        return resposta.read()
+
+
+async def baixar_banner() -> discord.File | None:
+    try:
+        dados = await asyncio.to_thread(_baixar_banner_sync)
+        return discord.File(io.BytesIO(dados), filename="poyo-mod-banner.gif")
+    except (OSError, TimeoutError, ValueError):
+        return None
 
 
 def parse_duration(value: str) -> int:
@@ -73,7 +90,7 @@ class ChannelKillerConfig:
 
 
 class ChannelKillerPanel(discord.ui.LayoutView):
-    def __init__(self, cog: "ChannelKiller", config: ChannelKillerConfig):
+    def __init__(self, cog: "ChannelKiller", config: ChannelKillerConfig, mostrar_banner: bool = True):
         super().__init__(timeout=900)
         self.cog = cog
         self.config = config
@@ -146,49 +163,34 @@ class ChannelKillerPanel(discord.ui.LayoutView):
 
         self.config.channel_id = channel.id
         await self.cog.save_config(self.config)
-        await interaction.followup.send(
-            view=make_container("Canal definido", f"Canal selecionado: {channel.mention}"),
-            ephemeral=True,
-        )
+        await self.cog.atualizar_painel_mensagem(interaction.message, self.config)
+        await interaction.followup.send(f"Canal definido: {channel.mention}.", ephemeral=True)
 
     async def set_time(self, interaction: discord.Interaction) -> None:
-        await interaction.response.send_modal(ChannelKillerDurationModal(self.cog, self.config))
+        await interaction.response.send_modal(ChannelKillerDurationModal(self.cog, self.config, interaction.message))
 
     async def activate(self, interaction: discord.Interaction) -> None:
         if not self.config.channel_id:
-            await interaction.response.send_message(
-                view=make_container("Configuração incompleta", "Escolha um canal primeiro."), ephemeral=True
-            )
+            await interaction.response.send_message("Escolha um canal primeiro.", ephemeral=True)
             return
         if not self.config.interval:
-            await interaction.response.send_message(
-                view=make_container("Configuração incompleta", "Defina o intervalo primeiro."), ephemeral=True
-            )
+            await interaction.response.send_message("Defina o intervalo primeiro.", ephemeral=True)
             return
 
         guild = interaction.guild
         channel = guild.get_channel(self.config.channel_id) if guild else None
         if not isinstance(channel, discord.TextChannel):
-            await interaction.response.send_message(
-                view=make_container("Canal inválido", "O canal configurado não existe mais."), ephemeral=True
-            )
+            await interaction.response.send_message("O canal configurado não existe mais.", ephemeral=True)
             return
         if guild.me is None or not channel.permissions_for(guild.me).manage_channels:
-            await interaction.response.send_message(
-                view=make_container("Permissão necessária", "Preciso da permissão **Gerenciar canais**."),
-                ephemeral=True,
-            )
+            await interaction.response.send_message("Preciso da permissão **Gerenciar canais**.", ephemeral=True)
             return
 
-        confirm_view = ChannelKillerConfirmView(self.cog, self.config)
+        confirm_view = ChannelKillerConfirmView(self.cog, self.config, interaction.message)
         await interaction.response.send_message(
-            view=make_container(
-                "Confirmar ativação",
-                f"Confirme para recriar {channel.mention} a cada **{format_duration(self.config.interval)}**. "
-                "As mensagens antigas serão perdidas e o ID do canal mudará.",
-                [confirm_view.confirm_button, confirm_view.cancel_button],
-                timeout=60,
-            ),
+            f"Confirme para recriar {channel.mention} a cada **{format_duration(self.config.interval)}**. "
+            "As mensagens antigas serão perdidas e o ID do canal mudará.",
+            view=confirm_view,
             ephemeral=True,
         )
 
@@ -196,9 +198,8 @@ class ChannelKillerPanel(discord.ui.LayoutView):
         self.config.active = False
         self.config.next_run = 0
         await self.cog.save_config(self.config)
-        await interaction.response.send_message(
-            view=make_container("Rotina desativada", "A configuração foi mantida."), ephemeral=True
-        )
+        await self.cog.atualizar_painel_mensagem(interaction.message, self.config)
+        await interaction.response.send_message("Rotina desativada. A configuração foi mantida.", ephemeral=True)
 
 
 class ChannelKillerDurationModal(discord.ui.Modal, title="Definir intervalo"):
@@ -206,35 +207,36 @@ class ChannelKillerDurationModal(discord.ui.Modal, title="Definir intervalo"):
         label="Intervalo", placeholder="Ex.: 3h 1m ou 1d", required=True, max_length=40
     )
 
-    def __init__(self, cog: "ChannelKiller", config: ChannelKillerConfig):
+    def __init__(self, cog: "ChannelKiller", config: ChannelKillerConfig, panel_message=None):
         super().__init__()
         self.cog = cog
         self.config = config
+        self.panel_message = panel_message
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
             seconds = parse_duration(str(self.interval))
         except ValueError as exc:
-            await interaction.response.send_message(
-                view=make_container("Tempo inválido", str(exc)), ephemeral=True
-            )
+            await interaction.response.send_message(str(exc), ephemeral=True)
             return
         self.config.interval = seconds
         await self.cog.save_config(self.config)
-        await interaction.response.send_message(
-            view=make_container("Intervalo salvo", f"Novo intervalo: **{format_duration(seconds)}**."),
-            ephemeral=True,
-        )
+        await self.cog.atualizar_painel_mensagem(self.panel_message, self.config)
+        await interaction.response.send_message(f"Intervalo definido: **{format_duration(seconds)}**.", ephemeral=True)
 
 
-class ChannelKillerConfirmView:
-    def __init__(self, cog: "ChannelKiller", config: ChannelKillerConfig):
+class ChannelKillerConfirmView(discord.ui.View):
+    def __init__(self, cog: "ChannelKiller", config: ChannelKillerConfig, panel_message=None):
+        super().__init__(timeout=60)
         self.cog = cog
         self.config = config
+        self.panel_message = panel_message
         self.confirm_button = discord.ui.Button(label="Confirmar", style=discord.ButtonStyle.danger)
         self.cancel_button = discord.ui.Button(label="Cancelar", style=discord.ButtonStyle.secondary)
         self.confirm_button.callback = self.confirm
         self.cancel_button.callback = self.cancel
+        self.add_item(self.confirm_button)
+        self.add_item(self.cancel_button)
 
     async def confirm(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.config.owner_id:
@@ -244,21 +246,16 @@ class ChannelKillerConfirmView:
         self.config.next_run = time.time() + self.config.interval
         await self.cog.save_config(self.config)
         await interaction.response.send_message(
-            view=make_container(
-                "Channel Killer ativado",
-                f"A primeira recriação ocorrerá em **{format_duration(self.config.interval)}**. "
-                "A configuração continuará salva após reiniciar o bot.",
-            ),
+            f"Channel Killer ativado. A primeira recriação ocorrerá em **{format_duration(self.config.interval)}**.",
             ephemeral=True,
         )
+        await self.cog.atualizar_painel_mensagem(self.panel_message, self.config)
 
     async def cancel(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.config.owner_id:
             await interaction.response.send_message("Somente quem abriu o painel pode cancelar.", ephemeral=True)
             return
-        await interaction.response.send_message(
-            view=make_container("Operação cancelada", "A rotina não foi ativada."), ephemeral=True
-        )
+        await interaction.response.send_message("Operação cancelada. A rotina não foi ativada.", ephemeral=True)
 
 
 class ChannelKiller(commands.Cog):
@@ -310,6 +307,19 @@ class ChannelKiller(commands.Cog):
         self.worker.cancel()
         self.db.close()
 
+    async def atualizar_painel_mensagem(self, mensagem, config: ChannelKillerConfig) -> None:
+        if mensagem is None:
+            return
+        arquivo = await baixar_banner()
+        try:
+            view = ChannelKillerPanel(self, config, mostrar_banner=arquivo is not None)
+            if arquivo is not None:
+                await mensagem.edit(view=view, attachments=[arquivo])
+            else:
+                await mensagem.edit(view=view, attachments=[])
+        except (discord.HTTPException, discord.NotFound):
+            pass
+
     async def open_panel(self, target):
         if isinstance(target, discord.Interaction):
             guild, user = target.guild, target.user
@@ -330,10 +340,13 @@ class ChannelKiller(commands.Cog):
         config = self.configs.get(key) or ChannelKillerConfig(user.id, guild.id)
         await self.save_config(config)
         view = ChannelKillerPanel(self, config)
+        arquivo = await baixar_banner()
+        if arquivo is None:
+            view = ChannelKillerPanel(self, config, mostrar_banner=False)
         if isinstance(target, discord.Interaction):
-            await target.response.send_message(view=view, ephemeral=True)
+            await target.response.send_message(view=view, file=arquivo, ephemeral=True)
         else:
-            await target.reply(view=view, mention_author=False)
+            await target.reply(view=view, file=arquivo, mention_author=False)
 
     @app_commands.command(name="channelkiller", description="Abre o painel do Channel Killer.")
     async def channelkiller_slash(self, interaction: discord.Interaction):
