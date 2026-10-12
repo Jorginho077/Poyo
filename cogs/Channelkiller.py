@@ -64,16 +64,19 @@ def make_container(
     description: str,
     buttons: list[discord.ui.Button] | None = None,
     timeout: float | None = 900,
+    banner_url: str | None = None,
 ) -> discord.ui.LayoutView:
     view = discord.ui.LayoutView(timeout=timeout)
     container = discord.ui.Container()
-    container.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(MOD_BANNER_URL)))
+    if banner_url:
+        container.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(banner_url)))
     container.add_item(
         discord.ui.TextDisplay(f"{EMOJI_INICIO}  **{title}**  {EMOJI_FINAL}\n\n{description}")
     )
     if buttons:
         container.add_item(discord.ui.ActionRow(*buttons))
-    container.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(MOD_BANNER_URL)))
+    if banner_url:
+        container.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(banner_url)))
     view.add_item(container)
     return view
 
@@ -90,10 +93,11 @@ class ChannelKillerConfig:
 
 
 class ChannelKillerPanel(discord.ui.LayoutView):
-    def __init__(self, cog: "ChannelKiller", config: ChannelKillerConfig, mostrar_banner: bool = True):
+    def __init__(self, cog: "ChannelKiller", config: ChannelKillerConfig, banner_url: str | None = MOD_BANNER_ATTACHMENT):
         super().__init__(timeout=900)
         self.cog = cog
         self.config = config
+        self.banner_url = banner_url
 
         canal = discord.ui.Button(label="Canal", style=discord.ButtonStyle.secondary)
         tempo = discord.ui.Button(label="Tempo", style=discord.ButtonStyle.secondary)
@@ -105,10 +109,12 @@ class ChannelKillerPanel(discord.ui.LayoutView):
         desativar.callback = self.deactivate
 
         container = discord.ui.Container()
-        container.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(MOD_BANNER_URL)))
+        if self.banner_url:
+            container.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(self.banner_url)))
         container.add_item(discord.ui.TextDisplay(self.panel_text()))
         container.add_item(discord.ui.ActionRow(canal, tempo, ativar, desativar))
-        container.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(MOD_BANNER_URL)))
+        if self.banner_url:
+            container.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(self.banner_url)))
         self.add_item(container)
 
     def panel_text(self) -> str:
@@ -157,6 +163,11 @@ class ChannelKillerPanel(discord.ui.LayoutView):
             return
 
         channel = message.channel_mentions[0] if message.channel_mentions else None
+        try:
+            await message.delete()
+        except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+            pass
+
         if not isinstance(channel, discord.TextChannel) or channel.guild.id != self.config.guild_id:
             await interaction.followup.send("Mencione um canal de texto válido.", ephemeral=True)
             return
@@ -312,7 +323,7 @@ class ChannelKiller(commands.Cog):
             return
         arquivo = await baixar_banner()
         try:
-            view = ChannelKillerPanel(self, config, mostrar_banner=arquivo is not None)
+            view = ChannelKillerPanel(self, config, MOD_BANNER_ATTACHMENT if arquivo is not None else None)
             if arquivo is not None:
                 await mensagem.edit(view=view, attachments=[arquivo])
             else:
@@ -329,20 +340,20 @@ class ChannelKiller(commands.Cog):
         if guild is None:
             message = "Use este comando em um servidor."
             if isinstance(target, discord.Interaction):
-                await target.response.send_message(
-                    view=make_container("Servidor necessário", message), ephemeral=True
-                )
+                arquivo = await baixar_banner()
+                view = make_container("Servidor necessário", message, banner_url=MOD_BANNER_ATTACHMENT if arquivo else None)
+                await target.response.send_message(view=view, file=arquivo, ephemeral=True)
             else:
-                await target.reply(view=make_container("Servidor necessário", message), mention_author=False)
+                arquivo = await baixar_banner()
+                view = make_container("Servidor necessário", message, banner_url=MOD_BANNER_ATTACHMENT if arquivo else None)
+                await target.reply(view=view, file=arquivo, mention_author=False)
             return
 
         key = (guild.id, user.id)
         config = self.configs.get(key) or ChannelKillerConfig(user.id, guild.id)
         await self.save_config(config)
-        view = ChannelKillerPanel(self, config)
         arquivo = await baixar_banner()
-        if arquivo is None:
-            view = ChannelKillerPanel(self, config, mostrar_banner=False)
+        view = ChannelKillerPanel(self, config, MOD_BANNER_ATTACHMENT if arquivo is not None else None)
         if isinstance(target, discord.Interaction):
             await target.response.send_message(view=view, file=arquivo, ephemeral=True)
         else:
