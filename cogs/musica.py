@@ -32,12 +32,11 @@ EMOJI_FONTE = {
 
 def _cartao(*blocos: str) -> discord.ui.LayoutView:
     """Container V2 simples, no estilo do bot."""
-    return discord.ui.LayoutView(
-        discord.ui.Container(
-            *(discord.ui.TextDisplay(b) for b in blocos),
-        ),
-        timeout=None,
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(
+        discord.ui.Container(*(discord.ui.TextDisplay(b) for b in blocos))
     )
+    return view
 
 
 async def _responder(
@@ -460,18 +459,23 @@ class Musica(commands.Cog, name="Musica"):
         },
     )
     @commands.has_permissions(manage_guild=True)
-    async def pmconfig_dj(self, ctx: commands.Context, cargo: discord.Role | str) -> None:
-        if isinstance(cargo, str):
-            if cargo.lower() in ("off", "desligar", "nenhum"):
-                self.config.definir(ctx.guild.id, "dj_role", None)
-                await _responder(ctx, "🎧 Cargo de DJ **desligado**. Qualquer pessoa pode controlar a música.")
-                return
-            raise commands.BadArgument("cargo inválido")
-        self.config.definir(ctx.guild.id, "dj_role", cargo.id)
-        await _responder(
-            ctx,
-            f"🎧 Cargo de DJ definido: {cargo.mention}",
-        )
+    async def pmconfig_dj(self, ctx: commands.Context, *, cargo: str) -> None:
+        # texto livre pra funcionar tanto no comando de prefixo quanto no
+        # slash: tenta ler como "off" primeiro, senão resolve como cargo
+        # (menção, ID ou nome) com o conversor normal do discord.py
+        if cargo.strip().lower() in ("off", "desligar", "nenhum"):
+            self.config.definir(ctx.guild.id, "dj_role", None)
+            await _responder(ctx, "🎧 Cargo de DJ **desligado**. Qualquer pessoa pode controlar a música.")
+            return
+
+        try:
+            papel = await commands.RoleConverter().convert(ctx, cargo.strip())
+        except commands.RoleNotFound:
+            await _responder(ctx, "Não achei esse cargo. Mencione o cargo (@cargo) ou escreva `off`.")
+            return
+
+        self.config.definir(ctx.guild.id, "dj_role", papel.id)
+        await _responder(ctx, f"🎧 Cargo de DJ definido: {papel.mention}")
 
     # sair do canal quando ficar sozinho
     @commands.Cog.listener()

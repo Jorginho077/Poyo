@@ -85,13 +85,18 @@ def _extrair(query: str, cfg: dict) -> list[Faixa]:
             # qualquer outro http: tratamos como stream/radio ou pagina generica
             fonte = "radio"
     else:
-        # texto livre: tenta soundcloud primeiro, depois bandcamp
+        # texto livre: o Bandcamp não tem busca por nome no yt-dlp, só
+        # link direto de faixa/álbum — então a busca por nome só passa
+        # pelo SoundCloud mesmo.
         if cfg.get("soundcloud", True):
             alvo = f"scsearch1:{query}"
             fonte = "soundcloud"
         elif cfg.get("bandcamp", True):
-            alvo = f"bandcamp1:{query}"
-            fonte = "bandcamp"
+            raise FonteDesligada(
+                "O Bandcamp não tem busca por nome — manda o link direto "
+                "da música ou do álbum. Ou ligue o SoundCloud pra buscar "
+                "por nome."
+            )
         else:
             raise FonteDesligada(
                 "SoundCloud e Bandcamp estão desligados. "
@@ -102,9 +107,6 @@ def _extrair(query: str, cfg: dict) -> list[Faixa]:
         with yt_dlp.YoutubeDL(opcoes) as ydl:
             info = ydl.extract_info(alvo, download=False)
     except yt_dlp.utils.DownloadError as e:
-        # se a busca principal falhar em texto livre, tenta a outra fonte
-        if not re.match(r"https?://", query) and fonte == "soundcloud" and cfg.get("bandcamp", True):
-            return _extrair_texto_bandcamp(query)
         log.info("extracao falhou para %r: %s", alvo, e)
         raise NadaEncontrado(query) from e
 
@@ -134,32 +136,6 @@ def _extrair(query: str, cfg: dict) -> list[Faixa]:
             )
         )
 
-    if not faixas:
-        raise NadaEncontrado(query)
-    return faixas
-
-
-def _extrair_texto_bandcamp(query: str) -> list[Faixa]:
-    opcoes = dict(_YDL_BASE)
-    try:
-        with yt_dlp.YoutubeDL(opcoes) as ydl:
-            info = ydl.extract_info(f"bandcamp1:{query}", download=False)
-    except yt_dlp.utils.DownloadError as e:
-        raise NadaEncontrado(query) from e
-    entradas = (info or {}).get("entries") or []
-    faixas = []
-    for entrada in entradas:
-        if entrada and entrada.get("url"):
-            faixas.append(
-                Faixa(
-                    titulo=entrada.get("title") or "Sem título",
-                    url_stream=entrada["url"],
-                    url_pagina=entrada.get("webpage_url"),
-                    duracao=entrada.get("duration"),
-                    autor=entrada.get("uploader") or entrada.get("artist"),
-                    fonte="bandcamp",
-                )
-            )
     if not faixas:
         raise NadaEncontrado(query)
     return faixas
