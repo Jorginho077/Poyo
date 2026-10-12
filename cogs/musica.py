@@ -7,6 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from . import _musica_diag as diag
 from ._musica_config import ConfigMusica
 from ._musica_fontes import (
     Faixa,
@@ -36,6 +37,18 @@ def _cartao(*blocos: str) -> discord.ui.LayoutView:
     view.add_item(
         discord.ui.Container(*(discord.ui.TextDisplay(b) for b in blocos))
     )
+    return view
+
+
+def _cartao_blocos(blocos: list[str]) -> discord.ui.LayoutView:
+    """Container V2 com os blocos separados por linhas finas."""
+    itens = []
+    for i, bloco in enumerate(blocos):
+        if i:
+            itens.append(discord.ui.Separator())
+        itens.append(discord.ui.TextDisplay(bloco))
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(discord.ui.Container(*itens))
     return view
 
 
@@ -95,6 +108,12 @@ class PainelMusicaSelect(discord.ui.Select):
                 emoji=marca(cfg["modo_247"]),
             ),
             discord.SelectOption(
+                label="Diagnóstico",
+                value="diagnostico",
+                description="Ver as permissões e pacotes que o Poyo precisa",
+                emoji="🩺",
+            ),
+            discord.SelectOption(
                 label="Cargo de DJ",
                 value="dj_role",
                 description="Definir ou remover o cargo que controla a música",
@@ -110,6 +129,14 @@ class PainelMusicaSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         escolha = self.values[0]
+
+        if escolha == "diagnostico":
+            await interaction.response.defer(ephemeral=True)
+            view = await self.cog.gerar_diagnostico(
+                interaction.guild, interaction.channel, interaction.user
+            )
+            await interaction.followup.send(view=view, ephemeral=True)
+            return
 
         if escolha == "dj_role":
             await interaction.response.send_message(
@@ -145,6 +172,12 @@ def painel_musica_view(cog: "Musica", guild_id: int) -> discord.ui.LayoutView:
     def estado(ligado: bool) -> str:
         return "ligado" if ligado else "desligado"
 
+    faltando = [i.nome for i in diag.pacotes(rapido=True) if not i.ok]
+    pacotes_txt = (
+        "Pacotes: ✅ todos instalados"
+        if not faltando
+        else f"Pacotes: ❌ faltando **{', '.join(faltando)}** · escolha Diagnóstico"
+    )
     dj = f"<@&{cfg['dj_role']}>" if cfg["dj_role"] else "desligado"
     modo = "Slash (`/`)" if cfg["modo_slash"] else "Prefixo (`,`)"
     resumo = (
@@ -153,7 +186,8 @@ def painel_musica_view(cog: "Musica", guild_id: int) -> discord.ui.LayoutView:
         f"-# SoundCloud: **{estado(cfg['soundcloud'])}** · "
         f"Bandcamp: **{estado(cfg['bandcamp'])}**\n"
         f"-# 24/7: **{estado(cfg['modo_247'])}** · DJ: **{dj}** · "
-        f"Volume: **{cfg['volume']}%**"
+        f"Volume: **{cfg['volume']}%**\n"
+        f"-# {pacotes_txt}"
     )
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(discord.ui.Container(discord.ui.TextDisplay(resumo)))
@@ -220,6 +254,55 @@ class Musica(commands.Cog, name="Musica"):
         except discord.HTTPException:
             pass
 
+    async def aviso_erro(self, guild_id: int, texto: str) -> None:
+        canal = await self._canal_aviso(guild_id)
+        if canal is None:
+            return
+        try:
+            await canal.send(
+                view=_cartao("## Não consegui tocar", texto, "-# Use `,pmconfig` e escolha **Diagnóstico**."),
+                allowed_mentions=NO_MENTIONS,
+            )
+        except discord.HTTPException:
+            pass
+
+    async def gerar_diagnostico(self, guild: discord.Guild, canal_texto, membro) -> discord.ui.LayoutView:
+        itens = await diag.pacotes_async()
+        voz = getattr(getattr(membro, "voice", None), "channel", None)
+        client_id = self.bot.user.id if self.bot.user else None
+        return _cartao_blocos(diag.relatorio(guild, canal_texto, voz, itens, client_id))
+
+    async def _pre_checagem(self, ctx: commands.Context) -> bool:
+        """Confere pacotes e permissoes ANTES de tentar tocar e diz exatamente o que falta."""
+        problemas: list[str] = []
+        for item in diag.problemas_pacotes():
+            problemas.append(f"📦 **{item.nome}** ({item.detalhe}) — {item.ajuda}")
+
+        me = ctx.guild.me
+        canal_voz = ctx.author.voice.channel
+        falta_voz = diag.faltam_na_voz(canal_voz, me)
+        if falta_voz:
+            problemas.append(f"🔊 Em {canal_voz.mention} falta: **{', '.join(falta_voz)}**")
+        obrig, _ = diag.faltam_no_texto(ctx.channel, me)
+        # anexar arquivos / emojis externos so enfeitam os cartoes: aparecem no diagnostico, nao travam
+        essenciais = [n for n in obrig if n in ("Ver canal", "Enviar mensagens")]
+        if essenciais:
+            problemas.append(f"💬 Em {ctx.channel.mention} falta: **{', '.join(essenciais)}**")
+
+        if not problemas:
+            return True
+        log.warning("musica bloqueada em %s: %s", ctx.guild.id, problemas)
+        try:
+            await _responder(
+                ctx,
+                "## Ainda não consigo tocar",
+                "\n".join(problemas),
+                "-# Use `,pmconfig` e escolha **Diagnóstico** pra ver tudo.",
+            )
+        except discord.HTTPException as e:   # sem permissao nem pra avisar aqui
+            log.warning("nao consegui avisar no canal %s: %s", ctx.channel.id, e)
+        return False
+
     def _e_dj_ou_staff(self, ctx: commands.Context) -> bool:
         cfg = self._cfg(ctx)
         if not cfg["dj_role"]:
@@ -248,9 +331,25 @@ class Musica(commands.Cog, name="Musica"):
             if voz.channel != canal:
                 await voz.move_to(canal)
             return voz
-        except (discord.ClientException, asyncio.TimeoutError, discord.HTTPException) as e:
+        except RuntimeError as e:   # falta PyNaCl ou davey
+            log.error("pacote de voz faltando: %s", e)
+            await _responder(
+                ctx, "## Falta um pacote de voz", f"`{e}`",
+                "-# Use `,pmconfig` e escolha **Diagnóstico** pra ver o que instalar.",
+            )
+            return None
+        except discord.Forbidden as e:
+            log.warning("sem permissao pra entrar em %s: %s", canal.id, e)
+            falta = ", ".join(diag.faltam_na_voz(canal, ctx.guild.me)) or "Conectar e Falar"
+            await _responder(ctx, "## Sem permissão", f"Não consegui entrar em {canal.mention}. Falta: **{falta}**.")
+            return None
+        except asyncio.TimeoutError:
+            log.warning("tempo esgotado ao conectar em %s", canal.id)
+            await _responder(ctx, "A conexão de voz demorou demais. Tente de novo em instantes.")
+            return None
+        except (discord.ClientException, discord.HTTPException) as e:
             log.warning("falha ao conectar no canal de voz: %s", e)
-            await _responder(ctx, "Não consegui entrar no canal de voz. Confira minhas permissões.")
+            await _responder(ctx, "## Não consegui entrar no canal de voz", f"`{e}`")
             return None
 
     # ------------------------------------------------------------ checks
@@ -285,6 +384,8 @@ class Musica(commands.Cog, name="Musica"):
     @app_commands.describe(busca="Nome da música ou link (SoundCloud, Bandcamp, mp3, rádio)")
     async def tocar(self, ctx: commands.Context, *, busca: str) -> None:
         if not await self._mesmo_canal(ctx):
+            return
+        if not await self._pre_checagem(ctx):
             return
         if await self._conectar(ctx) is None:
             return
@@ -448,6 +549,23 @@ class Musica(commands.Cog, name="Musica"):
     @commands.has_permissions(manage_guild=True)
     async def pmconfig(self, ctx: commands.Context) -> None:
         await _responder(ctx, view=painel_musica_view(self, ctx.guild.id))
+
+    @pmconfig.command(
+        name="diagnostico",
+        description="Mostra as permissões e os pacotes que o Poyo precisa pra tocar.",
+        aliases=("diag", "status", "checar"),
+        extras={
+            "categoria": "Música",
+            "uso": ",pmconfig diagnostico",
+            "descricao": "Confere pacotes instalados e permissões nos canais de texto e voz.",
+        },
+    )
+    @commands.has_permissions(manage_guild=True)
+    async def pmconfig_diagnostico(self, ctx: commands.Context) -> None:
+        if ctx.interaction is not None:
+            await ctx.defer(ephemeral=True)
+        view = await self.gerar_diagnostico(ctx.guild, ctx.channel, ctx.author)
+        await _responder(ctx, view=view, ephemeral=True)
 
     @pmconfig.command(
         name="dj",

@@ -67,10 +67,18 @@ class PlayerGuild:
                 await self.cog.aviso_falha(self.guild_id, self.atual)
                 continue
 
-            voz.play(
-                fonte,
-                after=lambda e: bot.loop.call_soon_threadsafe(self._evento_proxima.set),
-            )
+            try:
+                voz.play(
+                    fonte,
+                    after=lambda e: bot.loop.call_soon_threadsafe(self._evento_proxima.set),
+                )
+            except (discord.DiscordException, RuntimeError) as e:
+                log.error("nao consegui iniciar a reproducao: %s", e)
+                await self.cog.aviso_erro(self.guild_id, f"`{e}`")
+                self.atual = None
+                self.fila.clear()
+                await self._desconectar()
+                return
             await self.cog.aviso_tocando(self.guild_id, self.atual)
             await self._evento_proxima.wait()
 
