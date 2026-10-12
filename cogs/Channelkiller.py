@@ -120,7 +120,7 @@ class ChannelKillerPanel(discord.ui.LayoutView):
     def panel_text(self) -> str:
         channel = f"<#{self.config.channel_id}>" if self.config.channel_id else "Não selecionado"
         interval = format_duration(self.config.interval) if self.config.interval else "Não definido"
-        status = "Ativo" if self.config.active else "Inativo"
+        status = "Ativado" if self.config.active else "Desativado"
         return (
             f"{EMOJI_INICIO}  **CHANNEL KILLER**  {EMOJI_FINAL}\n\n"
             f"Canal: {channel}\n"
