@@ -1,18 +1,10 @@
 from __future__ import annotations
-
-import asyncio
-import io
-import json
-import re
-import sqlite3
-from dataclasses import dataclass
-from html import unescape
+import asyncio, io, json, sqlite3
 from pathlib import Path
 from typing import Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
-
 import discord
 from discord.ext import commands
 
@@ -24,530 +16,167 @@ except ModuleNotFoundError:
             pedido = Request(url, headers={"User-Agent": "Poyo-Discord-Bot/1.0"})
             with urlopen(pedido, timeout=20) as resposta:
                 return resposta.read()
+        return discord.File(io.BytesIO(await asyncio.to_thread(baixar)), filename=nome)
 
-        dados = await asyncio.to_thread(baixar)
-        return discord.File(io.BytesIO(dados), filename=nome)
-
-
-BANNER_URL = (
-    "https://raw.githubusercontent.com/"
-    "Jorginho077/Poyo/main/assets/Tumblr-l-67143811701311.gif"
-)
-PAINEL_BANNER_ATTACHMENT = "attachment://poyo-skinview-banner.gif"
 ROBLOX_LOGO_ID = 1509476102890979409
 MINECRAFT_LOGO_ID = 1509476073904148582
 DATABASE_PATH = Path(__file__).resolve().parent.parent / "avatar.sqlite3"
 
-
-@dataclass
-class ConfiguracaoSkin:
-    canal_id: Optional[int] = None
-    ativo: bool = False
-    painel: Optional[discord.Message] = None
-
-
-async def requisicao_json(
-    metodo: str,
-    url: str,
-    dados: Optional[dict] = None,
-) -> dict:
-    corpo = None
-    cabecalhos = {"User-Agent": "Poyo-Discord-Bot/1.0"}
-
-    if dados is not None:
-        corpo = json.dumps(dados).encode("utf-8")
-        cabecalhos["Content-Type"] = "application/json"
-
-    def solicitar() -> dict:
-        pedido = Request(
-            url,
-            data=corpo,
-            headers=cabecalhos,
-            method=metodo,
-        )
-        with urlopen(pedido, timeout=15) as resposta:
-            return json.loads(resposta.read().decode("utf-8"))
-
+async def requisicao_json(metodo: str, url: str, dados: Optional[dict] = None) -> dict:
+    corpo = json.dumps(dados).encode() if dados is not None else None
+    headers = {"User-Agent": "Poyo-Discord-Bot/1.0"}
+    if dados is not None: headers["Content-Type"] = "application/json"
+    def solicitar():
+        with urlopen(Request(url, data=corpo, headers=headers, method=metodo), timeout=15) as r:
+            return json.loads(r.read().decode("utf-8"))
     return await asyncio.to_thread(solicitar)
-
 
 async def buscar_roblox(nome: str) -> Optional[dict]:
     try:
-        resultado = await requisicao_json(
-            "POST",
-            "https://users.roblox.com/v1/usernames/users",
-            {"usernames": [nome], "excludeBannedUsers": False},
-        )
-    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError):
+        data = await requisicao_json("POST", "https://users.roblox.com/v1/usernames/users",
+                                     {"usernames": [nome], "excludeBannedUsers": False})
+        if not data.get("data"): return None
+        u = data["data"][0]; uid = int(u["id"])
+        thumb = await requisicao_json("GET", f"https://thumbnails.roblox.com/v1/users/avatar?userIds={uid}&size=720x720&format=Png&isCircular=false")
+        if not thumb.get("data") or not thumb["data"][0].get("imageUrl"): return None
+        real = str(u.get("name", nome))
+        return {"plataforma":"Roblox","nome":real,"exibicao":str(u.get("displayName",real)),
+                "imagem":str(thumb["data"][0]["imageUrl"]),
+                "perfil":f"https://www.roblox.com/users/{uid}/profile","logo_id":ROBLOX_LOGO_ID}
+    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError, KeyError, ValueError):
         return None
-
-    usuarios = resultado.get("data", [])
-    if not usuarios:
-        return None
-
-    usuario = usuarios[0]
-    user_id = int(usuario["id"])
-    try:
-        miniatura = await requisicao_json(
-            "GET",
-            "https://thumbnails.roblox.com/v1/users/avatar"
-            f"?userIds={user_id}&size=720x720&format=Png&isCircular=false",
-        )
-    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError):
-        return None
-
-    dados_miniatura = miniatura.get("data", [])
-    if not dados_miniatura or not dados_miniatura[0].get("imageUrl"):
-        return None
-
-    nome_usuario = str(usuario.get("name", nome))
-    return {
-        "plataforma": "Roblox",
-        "nome": nome_usuario,
-        "exibicao": str(usuario.get("displayName", nome_usuario)),
-        "imagem": str(dados_miniatura[0]["imageUrl"]),
-        "perfil": f"https://www.roblox.com/users/{user_id}/profile",
-        "logo_id": ROBLOX_LOGO_ID,
-    }
-
-
-async def obter_render_namemc(perfil_url: str) -> Optional[str]:
-    """Localiza no perfil do NameMC a URL do render 3D usado por ele."""
-    def baixar_pagina() -> str:
-        pedido = Request(
-            perfil_url,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (compatible; Poyo-Discord-Bot/1.0)"
-                )
-            },
-        )
-        with urlopen(pedido, timeout=15) as resposta:
-            return resposta.read().decode("utf-8", errors="replace")
-
-    try:
-        pagina = await asyncio.to_thread(baixar_pagina)
-    except (HTTPError, URLError, TimeoutError, OSError):
-        return None
-
-    pagina = unescape(pagina).replace("\\/", "/")
-    urls = re.findall(
-        r"https?://(?:render\.namemc\.com|s\.namemc\.com)/[^\"'<>\s]+",
-        pagina,
-        flags=re.IGNORECASE,
-    )
-    renderizadores = [
-        url.rstrip(".,);]")
-        for url in urls
-        if "/3d/" in url.lower()
-        and ("body" in url.lower() or "skin" in url.lower())
-    ]
-    return renderizadores[0] if renderizadores else None
-
 
 async def buscar_minecraft(nome: str) -> Optional[dict]:
     try:
-        perfil = await requisicao_json(
-            "GET",
-            f"https://api.mojang.com/users/profiles/minecraft/{quote(nome)}",
-        )
+        perfil = await requisicao_json("GET", f"https://api.mojang.com/users/profiles/minecraft/{quote(nome)}")
     except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError):
         return None
-
-    uuid = perfil.get("id")
-    nome_real = perfil.get("name")
-    if not uuid or not nome_real:
-        return None
-
-    perfil_url = f"https://namemc.com/profile/{quote(nome_real)}"
-    # Render pronto, com pose de caminhada, capa, camadas da skin e detecção
-    # automática dos braços Alex (slim) ou Steve (classic). O bot não altera
-    # a imagem: apenas baixa o PNG e o envia como anexo.
-    imagem = (
-        f"https://skinrender.dev/render/{uuid}/body"
-        "?pose=walk&frame=0.25&size=832&capeAngle=25"
-    )
-    imagem_fallback = (
-        f"https://mc-api.io/render/FULL/{quote(nome_real)}"
-        "/JAVA?size=832"
-    )
-    return {
-        "plataforma": "Minecraft",
-        "nome": str(nome_real),
-        "exibicao": str(nome_real),
-        "imagem": imagem,
-        "imagem_fallback": imagem_fallback,
-        "perfil": perfil_url,
-        "logo_id": MINECRAFT_LOGO_ID,
-    }
-
+    uuid, real = perfil.get("id"), perfil.get("name")
+    if not uuid or not real: return None
+    return {"plataforma":"Minecraft","nome":str(real),"exibicao":str(real),
+            "imagem":f"https://skinrender.dev/render/{uuid}/body?pose=walk&frame=0.25&size=832&capeAngle=25",
+            "imagem_fallback":f"https://mc-api.io/render/FULL/{quote(str(real))}/JAVA?size=832",
+            "perfil":f"https://namemc.com/profile/{quote(str(real))}","logo_id":MINECRAFT_LOGO_ID}
 
 async def buscar_skin(entrada: str) -> Optional[dict]:
-    valor = entrada.strip().lstrip("@")
-    minusculo = valor.lower()
-
-    if minusculo.startswith(("minecraft:", "mine:", "mc:")):
-        return await buscar_minecraft(valor.split(":", 1)[1].strip())
-
-    if minusculo.startswith(("roblox:", "rbx:")):
-        return await buscar_roblox(valor.split(":", 1)[1].strip())
-
-    # Sem prefixo, tenta Roblox primeiro e Minecraft em seguida.
-    resultado = await buscar_roblox(valor)
-    return resultado if resultado is not None else await buscar_minecraft(valor)
-
+    valor=entrada.strip().lstrip("@"); low=valor.lower()
+    if low.startswith(("minecraft:","mine:","mc:")): return await buscar_minecraft(valor.split(":",1)[1].strip())
+    if low.startswith(("roblox:","rbx:")): return await buscar_roblox(valor.split(":",1)[1].strip())
+    result=await buscar_roblox(valor)
+    return result if result is not None else await buscar_minecraft(valor)
 
 def texto_curtidas(total: int) -> str:
     return f"{total} {'Curtida' if total == 1 else 'Curtidas'}"
 
+def preparar_banco() -> None:
+    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(DATABASE_PATH) as db:
+        db.execute("""CREATE TABLE IF NOT EXISTS skinview_posts(
+            message_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL, guild_id INTEGER NOT NULL,
+            skin_json TEXT NOT NULL, imagem_url TEXT NOT NULL, curtidas_json TEXT NOT NULL DEFAULT '[]')""")
 
-def preparar_banco_skinview() -> None:
-    with sqlite3.connect(DATABASE_PATH) as banco:
-        banco.execute(
-            """
-            CREATE TABLE IF NOT EXISTS skinview_config (
-                guild_id INTEGER PRIMARY KEY,
-                canal_id INTEGER,
-                ativo INTEGER NOT NULL DEFAULT 0
-            )
-            """
-        )
+def carregar_posts():
+    with sqlite3.connect(DATABASE_PATH) as db:
+        return db.execute("SELECT message_id, skin_json, imagem_url, curtidas_json FROM skinview_posts").fetchall()
 
+def salvar_post(message_id, channel_id, guild_id, skin, imagem_url, curtidas):
+    with sqlite3.connect(DATABASE_PATH) as db:
+        db.execute("""INSERT INTO skinview_posts VALUES(?,?,?,?,?,?)
+        ON CONFLICT(message_id) DO UPDATE SET skin_json=excluded.skin_json,
+        imagem_url=excluded.imagem_url, curtidas_json=excluded.curtidas_json""",
+        (message_id,channel_id,guild_id,json.dumps(skin),imagem_url,json.dumps(sorted(curtidas))))
 
-def carregar_configuracoes_skinview() -> dict[int, ConfiguracaoSkin]:
-    configuracoes: dict[int, ConfiguracaoSkin] = {}
-    with sqlite3.connect(DATABASE_PATH) as banco:
-        for guild_id, canal_id, ativo in banco.execute(
-            "SELECT guild_id, canal_id, ativo FROM skinview_config"
-        ):
-            configuracoes[int(guild_id)] = ConfiguracaoSkin(
-                canal_id=int(canal_id) if canal_id is not None else None,
-                ativo=bool(ativo),
-            )
-    return configuracoes
-
-
-def salvar_configuracao_skinview(guild_id: int, config: ConfiguracaoSkin) -> None:
-    with sqlite3.connect(DATABASE_PATH) as banco:
-        banco.execute(
-            """
-            INSERT INTO skinview_config (guild_id, canal_id, ativo)
-            VALUES (?, ?, ?)
-            ON CONFLICT(guild_id) DO UPDATE SET
-                canal_id = excluded.canal_id,
-                ativo = excluded.ativo
-            """,
-            (guild_id, config.canal_id, int(config.ativo)),
-        )
-
-
-class PainelSkin(discord.ui.LayoutView):
-    def __init__(
-        self,
-        config: ConfiguracaoSkin,
-        autor_id: int,
-        banner_url: str = PAINEL_BANNER_ATTACHMENT,
-    ) -> None:
-        super().__init__(timeout=None)
-        self.config = config
-        self.autor_id = autor_id
-
-        canal = (
-            f"<#{config.canal_id}>"
-            if config.canal_id is not None
-            else "não definido"
-        )
-        estado = "ativado" if config.ativo else "desativado"
-
-        selecionar = discord.ui.Button(
-            label="Canal",
-            style=discord.ButtonStyle.primary,
-            custom_id=f"skinview:canal:{autor_id}",
-        )
-        ativar = discord.ui.Button(
-            label="Ativar",
-            style=discord.ButtonStyle.success,
-            custom_id=f"skinview:ativar:{autor_id}",
-        )
-        selecionar.callback = self.selecionar_canal
-        ativar.callback = self.ativar
-
-        self.add_item(
-            discord.ui.Container(
-                discord.ui.MediaGallery(discord.MediaGalleryItem(banner_url)),
-                discord.ui.TextDisplay(
-                    "## Skin View\n\n"
-                    f"Canal: {canal}\n"
-                    f"Status: {estado}\n\n"
-                    "Escolha o canal e clique em **Ativar**."
-                ),
-                discord.ui.ActionRow(selecionar, ativar),
-                discord.ui.MediaGallery(discord.MediaGalleryItem(banner_url)),
-            )
-        )
-
-    async def autorizado(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self.autor_id:
-            return True
-        await interaction.response.send_message(
-            "Somente quem abriu este painel pode configurá-lo.",
-            ephemeral=True,
-        )
-        return False
-
-    async def selecionar_canal(self, interaction: discord.Interaction) -> None:
-        if not await self.autorizado(interaction):
-            return
-
-        await interaction.response.send_message(
-            "Mencione o canal em que as skins serão enviadas.",
-            ephemeral=True,
-        )
-        if interaction.guild is None or interaction.channel is None:
-            return
-
-        def conferir(mensagem: discord.Message) -> bool:
-            return (
-                mensagem.author.id == self.autor_id
-                and mensagem.guild is not None
-                and mensagem.guild.id == interaction.guild.id
-                and mensagem.channel.id == interaction.channel.id
-            )
-
-        try:
-            mensagem = await interaction.client.wait_for(
-                "message", timeout=120, check=conferir
-            )
-        except asyncio.TimeoutError:
-            await interaction.followup.send(
-                "Tempo esgotado. Clique em Canal para tentar novamente.",
-                ephemeral=True,
-            )
-            return
-
-        try:
-            await mensagem.delete()
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            pass
-
-        if not mensagem.channel_mentions:
-            await interaction.followup.send(
-                "Não encontrei uma menção de canal.", ephemeral=True
-            )
-            return
-
-        canal = mensagem.channel_mentions[0]
-        if not isinstance(canal, discord.TextChannel):
-            await interaction.followup.send(
-                "Escolha um canal de texto.", ephemeral=True
-            )
-            return
-
-        bot_membro = interaction.guild.me
-        if bot_membro is None:
-            return
-        permissoes = canal.permissions_for(bot_membro)
-        if not permissoes.view_channel or not permissoes.send_messages:
-            await interaction.followup.send(
-                "Não consigo ver ou enviar mensagens nesse canal.",
-                ephemeral=True,
-            )
-            return
-
-        self.config.canal_id = canal.id
-        self.config.ativo = False
-        salvar_configuracao_skinview(interaction.guild.id, self.config)
-        await interaction.followup.send(
-            f"Canal definido: {canal.mention}", ephemeral=True
-        )
-        await self.atualizar()
-
-    async def ativar(self, interaction: discord.Interaction) -> None:
-        if not await self.autorizado(interaction):
-            return
-        if self.config.canal_id is None:
-            await interaction.response.send_message(
-                "Escolha um canal antes de ativar.", ephemeral=True
-            )
-            return
-
-        self.config.ativo = True
-        salvar_configuracao_skinview(interaction.guild.id, self.config)
-        await interaction.response.send_message(
-            f"Skin View ativado em <#{self.config.canal_id}>.",
-            ephemeral=True,
-        )
-        await self.atualizar()
-
-    async def atualizar(self) -> None:
-        if self.config.painel is None:
-            return
-        try:
-            await self.config.painel.edit(
-                view=PainelSkin(self.config, self.autor_id)
-            )
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            pass
-
+def salvar_curtidas(message_id, curtidas):
+    with sqlite3.connect(DATABASE_PATH) as db:
+        db.execute("UPDATE skinview_posts SET curtidas_json=? WHERE message_id=?",
+                   (json.dumps(sorted(curtidas)),message_id))
 
 class SkinView(discord.ui.LayoutView):
-    def __init__(self, skin: dict, imagem_url: Optional[str] = None) -> None:
-        super().__init__(timeout=300)
-        self.skin = skin
-        self.imagem_url = imagem_url or skin["imagem"]
-        self.curtidas: set[int] = set()
-        self.lock = asyncio.Lock()
-        self.montar()
+    def __init__(self, skin: dict, imagem_url: str, curtidas=None):
+        super().__init__(timeout=None)
+        self.skin=skin; self.imagem_url=imagem_url; self.curtidas=set(curtidas or [])
+        self.lock=asyncio.Lock(); self.montar()
 
-    def montar(self) -> None:
+    def montar(self):
         self.clear_items()
-        logo = discord.PartialEmoji(
-            name=("RobloxLogo" if self.skin["plataforma"] == "Roblox" else "minecraftlogopng2"),
-            id=self.skin["logo_id"],
-        )
-        perfil = discord.ui.Button(
-            emoji=logo,
-            style=discord.ButtonStyle.link,
-            url=self.skin["perfil"],
-        )
-        coracao = discord.ui.Button(
-            emoji="🤍",
-            style=discord.ButtonStyle.secondary,
-            custom_id=f"skinview:curtir:{self.skin['plataforma']}:{self.skin['nome']}",
-        )
-        coracao.callback = self.curtir
+        logo=discord.PartialEmoji(name="RobloxLogo" if self.skin["plataforma"]=="Roblox" else "minecraftlogopng2",
+                                  id=int(self.skin["logo_id"]))
+        perfil=discord.ui.Button(emoji=logo,style=discord.ButtonStyle.link,url=self.skin["perfil"])
+        like=discord.ui.Button(emoji="🤍",style=discord.ButtonStyle.secondary,
+                               custom_id=f"skinview:curtir:{self.skin['plataforma']}:{self.skin['nome']}")
+        like.callback=self.curtir
+        self.add_item(discord.ui.Container(
+            discord.ui.Section(discord.ui.TextDisplay(
+                f"## [{self.skin['exibicao']}]({self.skin['perfil']})\n`@{self.skin['nome']}` - {texto_curtidas(len(self.curtidas))}"),
+                accessory=perfil),
+            discord.ui.Separator(),discord.ui.MediaGallery(discord.MediaGalleryItem(self.imagem_url)),
+            discord.ui.Separator(),discord.ui.ActionRow(like)))
 
-        self.add_item(
-            discord.ui.Container(
-                discord.ui.Section(
-                    discord.ui.TextDisplay(
-                        f"## [{self.skin['exibicao']}]({self.skin['perfil']})\n"
-                        f"`@{self.skin['nome']}` - "
-                        f"{texto_curtidas(len(self.curtidas))}"
-                    ),
-                    accessory=perfil,
-                ),
-                discord.ui.Separator(),
-                discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(self.imagem_url)
-                ),
-                discord.ui.Separator(),
-                discord.ui.ActionRow(coracao),
-            )
-        )
-
-    async def curtir(self, interaction: discord.Interaction) -> None:
-        try:
-            await interaction.response.defer()
-        except (discord.NotFound, discord.HTTPException):
-            return
-
+    async def curtir(self, interaction: discord.Interaction):
+        if interaction.message is None:
+            await interaction.response.send_message("Não consegui localizar esta publicação. Execute o comando novamente.",ephemeral=True); return
         async with self.lock:
             if interaction.user.id in self.curtidas:
-                return
-            self.curtidas.add(interaction.user.id)
-            self.montar()
+                await interaction.response.send_message("Você já curtiu esta skin.",ephemeral=True); return
+            self.curtidas.add(interaction.user.id); self.montar()
             try:
-                await interaction.message.edit(view=self)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                pass
-
+                await interaction.response.edit_message(view=self)
+                salvar_curtidas(interaction.message.id,self.curtidas)
+            except (discord.NotFound,discord.Forbidden,discord.HTTPException):
+                self.curtidas.discard(interaction.user.id)
+                try: await interaction.followup.send("Não consegui atualizar a curtida. Tente novamente.",ephemeral=True)
+                except (discord.NotFound,discord.HTTPException): pass
 
 class Avatar(commands.Cog):
-    def __init__(self, bot: commands.Bot) -> None:
-        self.bot = bot
-        preparar_banco_skinview()
-        self.configuracoes = carregar_configuracoes_skinview()
+    def __init__(self,bot:commands.Bot):
+        self.bot=bot; preparar_banco()
+        # Registra novamente as views persistentes das publicações antigas.
+        for mid, skin_json, imagem_url, likes_json in carregar_posts():
+            try:
+                self.bot.add_view(SkinView(json.loads(skin_json),imagem_url,set(json.loads(likes_json))),message_id=int(mid))
+            except (ValueError,TypeError,KeyError,discord.HTTPException):
+                continue
 
-    async def _enviar_skin(
-        self,
-        ctx: commands.Context,
-        nome: str,
-        buscar: callable,
-    ) -> None:
-        if ctx.interaction is not None and not ctx.interaction.response.is_done():
-            await ctx.defer()
-
-        async def avisar(texto: str) -> None:
-            if ctx.interaction is not None:
-                await ctx.send(texto, ephemeral=True)
-            else:
-                await ctx.send(texto, delete_after=10)
-
+    async def _enviar_skin(self,ctx:commands.Context,nome:str,buscar):
+        if ctx.interaction is not None and not ctx.interaction.response.is_done(): await ctx.defer()
+        async def avisar(texto):
+            if ctx.interaction is not None: await ctx.send(texto,ephemeral=True)
+            else: await ctx.send(texto,delete_after=10)
         if ctx.message is not None:
-            try:
-                await ctx.message.delete()
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                pass
-
-        try:
-            resultado = await asyncio.wait_for(
-                buscar(nome.strip().lstrip("@")), timeout=25
-            )
+            try: await ctx.message.delete()
+            except (discord.NotFound,discord.Forbidden,discord.HTTPException): pass
+        try: resultado=await asyncio.wait_for(buscar(nome.strip().lstrip("@")),timeout=25)
         except asyncio.TimeoutError:
-            await avisar("A consulta do Minecraft demorou demais. Tente novamente.")
-            return
+            await avisar("A consulta demorou demais. Tente novamente."); return
         if resultado is None:
-            await avisar("Não encontrei esse usuário nessa plataforma.")
-            return
-
-        arquivo = None
-        imagem_url = resultado["imagem"]
-        urls_imagem = [
-            resultado["imagem"],
-            resultado.get("imagem_fallback"),
-        ]
-        for url in urls_imagem:
-            if not url:
-                continue
+            await avisar("Não encontrei esse usuário nessa plataforma."); return
+        arquivo=None; imagem_url=resultado["imagem"]
+        for url in (resultado["imagem"],resultado.get("imagem_fallback")):
+            if not url: continue
             try:
-                arquivo = await asyncio.wait_for(
-                    baixar_arquivo(url, "poyo-avatar.png"), timeout=30
-                )
-                imagem_url = "attachment://poyo-avatar.png"
-                break
-            except (OSError, TimeoutError, asyncio.TimeoutError, discord.HTTPException):
-                continue
-
+                arquivo=await asyncio.wait_for(baixar_arquivo(url,"poyo-avatar.png"),timeout=30)
+                imagem_url="attachment://poyo-avatar.png"; break
+            except (OSError,TimeoutError,asyncio.TimeoutError,discord.HTTPException): continue
         if arquivo is None:
-            await avisar("Não consegui baixar a imagem desse avatar agora. Tente novamente.")
-            return
+            await avisar("Não consegui baixar a imagem desse avatar agora. Tente novamente."); return
+        view=SkinView(resultado,imagem_url)
+        try: msg=await ctx.send(view=view,file=arquivo)
+        except (discord.Forbidden,discord.HTTPException):
+            await avisar("Não consegui enviar o cartão da skin. Verifique as permissões do bot."); return
+        if msg.guild is not None: salvar_post(msg.id,msg.channel.id,msg.guild.id,resultado,imagem_url,view.curtidas)
 
-        await ctx.send(
-            view=SkinView(resultado, imagem_url),
-            file=arquivo,
-        )
-
-    @commands.hybrid_command(
-        name="avatar_roblox",
-        description="Mostra o avatar de um usuário do Roblox.",
-        extras={
-            "categoria": "Utilidades",
-            "uso": ",avatar_roblox nome",
-            "descricao": "Mostra o avatar de um usuário do Roblox.",
-        },
-    )
+    @commands.hybrid_command(name="avatar_roblox",description="Mostra o avatar de um usuário do Roblox.",
+        extras={"categoria":"Utilidades","uso":",avatar_roblox nome","descricao":"Mostra o avatar de um usuário do Roblox."})
     @commands.guild_only()
-    @commands.bot_has_permissions(send_messages=True, read_message_history=True)
-    @commands.cooldown(1, 30, commands.BucketType.user)
-    async def avatar_roblox(self, ctx: commands.Context, *, nome: str) -> None:
-        await self._enviar_skin(ctx, nome, buscar_roblox)
+    @commands.bot_has_permissions(send_messages=True,read_message_history=True)
+    @commands.cooldown(1,30,commands.BucketType.user)
+    async def avatar_roblox(self,ctx:commands.Context,*,nome:str): await self._enviar_skin(ctx,nome,buscar_roblox)
 
-    @commands.hybrid_command(
-        name="avatar_minecraft",
-        description="Mostra a skin de um usuário do Minecraft.",
-        extras={
-            "categoria": "Utilidades",
-            "uso": ",avatar_minecraft nome",
-            "descricao": "Mostra a skin de um usuário do Minecraft.",
-        },
-    )
+    @commands.hybrid_command(name="avatar_minecraft",description="Mostra a skin de um usuário do Minecraft.",
+        extras={"categoria":"Utilidades","uso":",avatar_minecraft nome","descricao":"Mostra a skin de um usuário do Minecraft."})
     @commands.guild_only()
-    @commands.bot_has_permissions(send_messages=True, read_message_history=True)
-    @commands.cooldown(1, 30, commands.BucketType.user)
-    async def avatar_minecraft(self, ctx: commands.Context, *, nome: str) -> None:
-        await self._enviar_skin(ctx, nome, buscar_minecraft)
+    @commands.bot_has_permissions(send_messages=True,read_message_history=True)
+    @commands.cooldown(1,30,commands.BucketType.user)
+    async def avatar_minecraft(self,ctx:commands.Context,*,nome:str): await self._enviar_skin(ctx,nome,buscar_minecraft)
 
-
-async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(Avatar(bot))
+async def setup(bot:commands.Bot): await bot.add_cog(Avatar(bot))
