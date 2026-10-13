@@ -86,10 +86,14 @@ def salvar_post(message_id, channel_id, guild_id, skin, imagem_url, curtidas):
         imagem_url=excluded.imagem_url, curtidas_json=excluded.curtidas_json""",
         (message_id,channel_id,guild_id,json.dumps(skin),imagem_url,json.dumps(sorted(curtidas))))
 
-def salvar_curtidas(message_id, curtidas):
-    with sqlite3.connect(DATABASE_PATH) as db:
-        db.execute("UPDATE skinview_posts SET curtidas_json=? WHERE message_id=?",
-                   (json.dumps(sorted(curtidas)),message_id))
+def salvar_curtidas_bg(message_id, curtidas):
+    """Non-blocking database write - run in background"""
+    try:
+        with sqlite3.connect(DATABASE_PATH) as db:
+            db.execute("UPDATE skinview_posts SET curtidas_json=? WHERE message_id=?",
+                       (json.dumps(sorted(curtidas)), message_id))
+    except Exception:
+        pass
 
 class SkinView(discord.ui.LayoutView):
     def __init__(self, skin: dict, imagem_url: str, curtidas=None):
@@ -113,24 +117,36 @@ class SkinView(discord.ui.LayoutView):
             discord.ui.Separator(),discord.ui.ActionRow(like)))
 
     async def curtir(self, interaction: discord.Interaction):
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+        
         if interaction.message is None:
-            await interaction.response.send_message("Não consegui localizar esta publicação. Execute o comando novamente.",ephemeral=True); return
+            await interaction.followup.send("Não consegui localizar esta publicação. Execute o comando novamente.",ephemeral=True)
+            return
+        
         async with self.lock:
             if interaction.user.id in self.curtidas:
-                await interaction.response.send_message("Você já curtiu esta skin.",ephemeral=True); return
-            self.curtidas.add(interaction.user.id); self.montar()
+                await interaction.followup.send("Você já curtiu esta skin.",ephemeral=True)
+                return
+            
+            self.curtidas.add(interaction.user.id)
+            self.montar()
+            
             try:
                 await interaction.response.edit_message(view=self)
-                salvar_curtidas(interaction.message.id,self.curtidas)
-            except (discord.NotFound,discord.Forbidden,discord.HTTPException):
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 self.curtidas.discard(interaction.user.id)
-                try: await interaction.followup.send("Não consegui atualizar a curtida. Tente novamente.",ephemeral=True)
-                except (discord.NotFound,discord.HTTPException): pass
+                await interaction.followup.send("Não consegui atualizar a curtida. Tente novamente.",ephemeral=True)
+                return
+        
+        if interaction.message is not None:
+            interaction.client.loop.create_task(
+                asyncio.to_thread(salvar_curtidas_bg, interaction.message.id, self.curtidas)
+            )
 
 class Avatar(commands.Cog):
     def __init__(self,bot:commands.Bot):
         self.bot=bot; preparar_banco()
-        # Registra novamente as views persistentes das publicações antigas.
         for mid, skin_json, imagem_url, likes_json in carregar_posts():
             try:
                 self.bot.add_view(SkinView(json.loads(skin_json),imagem_url,set(json.loads(likes_json))),message_id=int(mid))
