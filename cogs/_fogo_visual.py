@@ -96,9 +96,18 @@ COR_LENDARIO = discord.Colour.from_rgb(247, 202, 113)
 
 def container(*itens: discord.ui.Item, cor=COR_POYO, midia=None):
     """Uma caixa unificada com a arte original do Poyo e cor de estado."""
-    nome = midia or (GELO_NOME if cor == COR_FRIO else ENFEITE_NOME)
+    # Imagem por estado: gelo (frio), nada (neutro/avisos), aurora (festa).
+    # Cartões que ainda esperam o fogo acender passam midia=ESPERA_NOME.
+    if midia:
+        nome = midia
+    elif cor == COR_FRIO:
+        nome = GELO_NOME
+    elif cor == COR_NEUTRA:
+        nome = None
+    else:
+        nome = ENFEITE_NOME
     conteudo = []
-    if (ASSETS / nome).is_file():
+    if nome and (ASSETS / nome).is_file():
         conteudo.extend([
             discord.ui.MediaGallery(discord.MediaGalleryItem(
                 f"attachment://{nome}", description="Poyo, nosso axolotezinho, em uma animação original.")),
@@ -199,6 +208,7 @@ def cartao_fogo_criado(a: str, b: str) -> CartaoFogo:
             "Quando os dois clicarem, a sequência começa."
         ),
         cor=COR_FOGO,
+        midia=ESPERA_NOME,
     )
 
 

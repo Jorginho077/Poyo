@@ -65,7 +65,12 @@ class ConviteView(visual.CartaoFogo):
         recusar.callback = self._recusar
 
         blocos = visual.texto_convite(f"<@{de_id}>", f"<@{para_id}>")
-        super().__init__(*blocos, botoes=[aceitar, recusar], cor=visual.COR_POYO)
+        super().__init__(
+            *blocos,
+            botoes=[aceitar, recusar],
+            cor=visual.COR_POYO,
+            midia=visual.ESPERA_NOME,
+        )
 
     async def _so_convidado(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.para_id:
@@ -391,7 +396,7 @@ class NomeModal(discord.ui.Modal, title="Nome do Fogo"):
             return
         await interaction.followup.send(
             f"Sugestão enviada em {canal.mention}. "
-            f"Aguarde <@{parceiro}> aceitar. 🔥",
+            f"Aguarde <@{parceiro}> aceitar. {visual.EMOJI_FOGO}",
             ephemeral=True,
         )
 
@@ -1100,7 +1105,11 @@ class Fogo(commands.Cog):
                 estado = "ainda não começou"
             else:
                 estado = visual.dias(f["sequencia"])
-            hoje_ok = "✅ aceso hoje" if db.dia_completo(f) else "⏳ falta acender hoje"
+            hoje_ok = (
+                f"{visual.EMOJI_FOGO} aceso hoje"
+                if db.dia_completo(f)
+                else f"{visual.EMOJI_ESPERA} falta acender hoje"
+            )
             linhas.append(
                 f"{visual.EMOJI_FOGO} {alvo.mention} + <@{parceiro}>{nome}\n"
                 f"-# Sequência: {estado}  ·  {hoje_ok}"
