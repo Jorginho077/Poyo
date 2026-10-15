@@ -4,10 +4,11 @@
 #   ,pvip                          posta o painel no canal atual
 #   ,pvip atualizar                reedita os paineis ja postados
 #   ,pvipconfig                    abre o painel de config (la tem o alternador Slash / ,)
+#   imagens: igual o ticket - no painel de config tem o 📎 (o bot pede a imagem no chat), ou:
 #   ,pvipconfig topo               anexe uma imagem (ou responda uma) = banner do painel
 #   ,pvipconfig fim                anexe uma imagem = decoracao de baixo (padrao: gif de lacinhos)
 #   ,pvipconfig imagem <vip>       anexe uma imagem = banner do cartao daquele VIP
-#   (qualquer um deles aceita "remover" no lugar da imagem)
+#   (os tres aceitam tambem um link, "nenhum" (sem imagem) ou "padrao" no lugar do anexo)
 #   ,pvipconfig ajuda              como mudar TODOS os textos (painel e cada VIP)
 #   ,pvipconfig texto <campo> ...  muda um texto do painel (titulo, descricao, info, menu, botao...)
 #   ,pvipconfig vip <vip> <campo> ...  muda nome, descricao, resumo, perms, emoji ou cargo de um VIP
@@ -18,12 +19,14 @@
 # o botao "Adquirir VIP" abre o ticket de Pagamentos.
 #
 # >>> pra colocar os textos do seu amigo: edite so o dicionario VIPS aqui embaixo <<<
+import asyncio
 import copy
 import json
 import logging
 import os
 import re
 import unicodedata
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -41,7 +44,6 @@ log = logging.getLogger("bot.vip")
 
 NO_MENTIONS = discord.AllowedMentions.none()
 ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
-IMG_DIR = ASSETS_DIR / "vip"                      # imagens enviadas pelo admin
 STATE_FILE = Path(os.getenv("VIP_STATE_FILE", "vip_state.json"))
 CONFIG_FILE = Path(os.getenv("VIP_CONFIG_FILE", "vip_config.json"))   # textos editados pelo admin
 
@@ -229,83 +231,140 @@ def aplicar_vip(gid, key: str, campo: str, valor: str):
     return None, f"`{campo}` de **{get_cfg(gid)['vips'][key]['nome']}** atualizado"
 
 
-# ---------------------------------------------------------------- imagens
+# ---------------------------------------------------------------- imagens (mesmo sistema do ticket)
+#
+# cada imagem (topo, fim e uma por VIP) guarda um valor por servidor:
+#   None = padrao | "" = sem imagem | link http(s) | "arquivo:<nome>" = upload do admin
+# o upload fica em assets/custom com nome novo a cada envio (assim o discord
+# nao reaproveita a imagem antiga do cache)
 
 GIF_FILE = ASSETS_DIR / "gif.gif"            # decoracao padrao de baixo (lacinhos)
 if not GIF_FILE.is_file():
     GIF_FILE = ASSETS_DIR / "Tumblr-l-67143811701311.gif"
 GIF_NAME = "gif.gif"
-IMG_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+CUSTOM_DIR = ASSETS_DIR / "custom"
+FILE_PREFIX = "arquivo:"
+IMG_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 MAX_IMG_BYTES = 8 * 1024 * 1024
 REMOVER = {"remover", "remove", "tirar", "apagar", "limpar", "padrao", "padrão", "reset"}
 
 
-def _img_path(chave: str) -> Optional[Path]:
-    for ext in IMG_EXTS:
-        p = IMG_DIR / f"{chave}{ext}"
-        if p.is_file():
-            return p
+def _custom_path(valor) -> Optional[Path]:
+    # valor "arquivo:xxx" -> caminho no disco (so se o arquivo ainda existir)
+    if isinstance(valor, str) and valor.startswith(FILE_PREFIX):
+        nome = Path(valor[len(FILE_PREFIX):]).name   # .name = nao deixa sair da pasta
+        path = CUSTOM_DIR / nome
+        return path if path.is_file() else None
     return None
 
 
-def _midia(vip: Optional[str] = None):
+async def save_image(guild_id, chave: str, attachment: discord.Attachment):
+    """baixa o anexo, guarda em assets/custom e devolve (valor, erro)"""
+    ext = Path(attachment.filename).suffix.lower()
+    if ext not in IMG_EXTS:
+        return None, "Mande uma imagem ou gif (png, jpg, gif ou webp)."
+    if attachment.size > MAX_IMG_BYTES:
+        return None, f"Arquivo grande demais (máximo {MAX_IMG_BYTES // 1024 // 1024} MB)."
+    try:
+        dados = await attachment.read()
+    except discord.HTTPException:
+        return None, "Não consegui baixar o arquivo, tenta de novo."
+    CUSTOM_DIR.mkdir(parents=True, exist_ok=True)
+    nome = f"{guild_id}_{chave}_{int(datetime.now().timestamp())}{ext}"
+    try:
+        (CUSTOM_DIR / nome).write_bytes(dados)
+    except OSError as e:
+        log.warning("nao consegui salvar a imagem %s: %s", nome, e)
+        return None, "Não consegui salvar o arquivo no servidor."
+    _limpar_arquivos(guild_id, chave, manter=nome)     # apaga as versoes antigas
+    return FILE_PREFIX + nome, None
+
+
+def _limpar_arquivos(guild_id, chave: str, manter: Optional[str] = None):
+    for velho in CUSTOM_DIR.glob(f"{guild_id}_{chave}_*"):
+        if velho.name != manter:
+            try:
+                velho.unlink()
+            except OSError:
+                pass
+
+
+def _get_img(gid, chave: str):
+    if gid is None:
+        return None
+    return _store["guilds"].get(str(gid), {}).get("imagens", {}).get(chave)
+
+
+def _set_img(gid, chave: str, valor):
+    g = _store["guilds"].setdefault(str(gid), {})
+    if valor is None:
+        g.get("imagens", {}).pop(chave, None)
+    else:
+        g.setdefault("imagens", {})[chave] = valor
+    _salvar_cfg()
+
+
+def _status_img(valor, padrao: str) -> str:
+    if valor is None:
+        return f"— {padrao}"
+    if valor == "":
+        return "sem imagem"
+    if valor.startswith(FILE_PREFIX):
+        return "✅ enviada" if _custom_path(valor) else "⚠️ arquivo sumiu"
+    return "🔗 link"
+
+
+def _midia(gid, vip: Optional[str] = None):
     # (url do topo, url do fim, arquivos) - File so vale pra um envio, entao monta de novo toda vez
-    arquivos, topo, fim = [], None, None
-    pedidos = ([f"vip_{vip}"] if vip else []) + ["topo"]   # imagem do VIP > imagem do painel
-    for chave in pedidos:
-        p = _img_path(chave)
-        if p is not None:
-            arquivos.append(discord.File(p, filename=p.name))
-            topo = f"attachment://{p.name}"
-            break
-    p = _img_path("fim")
-    if p is not None:
-        arquivos.append(discord.File(p, filename=p.name))
-        fim = f"attachment://{p.name}"
-    elif GIF_FILE.is_file():
-        arquivos.append(discord.File(GIF_FILE, filename=GIF_NAME))
-        fim = f"attachment://{GIF_NAME}"
+    arquivos, usados = [], set()
+
+    def url(valor):
+        if isinstance(valor, str) and valor.startswith(FILE_PREFIX):
+            path = _custom_path(valor)
+            if path is None:
+                return None                      # o arquivo foi apagado do disco
+            if path.name not in usados:
+                usados.add(path.name)
+                arquivos.append(discord.File(path, filename=path.name))
+            return f"attachment://{path.name}"
+        return valor or None
+
+    do_vip = _get_img(gid, f"card_{vip}") if vip else None
+    topo = url(do_vip if do_vip is not None else _get_img(gid, "topo"))   # a do VIP vence a do topo
+    f = _get_img(gid, "fim")
+    if f is None:                                # padrao: gif de lacinhos
+        fim = None
+        if GIF_FILE.is_file():
+            arquivos.append(discord.File(GIF_FILE, filename=GIF_NAME))
+            fim = f"attachment://{GIF_NAME}"
+    else:
+        fim = url(f)
     return topo, fim, arquivos
 
 
-async def _salvar_img(chave: str, anexo: discord.Attachment):
-    """grava a imagem em assets/vip/<chave>.<ext> -> (caminho, erro)"""
-    ext = Path(anexo.filename).suffix.lower()
-    if ext not in IMG_EXTS:
-        return None, "Mande uma imagem ou gif (png, jpg, gif ou webp)."
-    if anexo.size > MAX_IMG_BYTES:
-        return None, f"Arquivo grande demais (máximo {MAX_IMG_BYTES // 1024 // 1024} MB)."
-    try:
-        dados = await anexo.read()
-    except discord.HTTPException:
-        return None, "Não consegui baixar o arquivo, tenta de novo."
-    destino = IMG_DIR / f"{chave}{ext}"
-    try:
-        IMG_DIR.mkdir(parents=True, exist_ok=True)
-        destino.write_bytes(dados)
-    except OSError as e:
-        log.warning("nao consegui salvar %s: %s", destino, e)
-        return None, "Não consegui salvar o arquivo na pasta assets."
-    for outra in IMG_DIR.glob(f"{chave}.*"):    # so uma versao por vez
-        if outra != destino:
-            try:
-                outra.unlink()
-            except OSError:
-                pass
-    return destino, None
-
-
-def _remover_img(chave: str) -> bool:
-    achou = False
-    for ext in IMG_EXTS:
-        p = IMG_DIR / f"{chave}{ext}"
-        if p.is_file():
-            try:
-                p.unlink()
-                achou = True
-            except OSError as e:
-                log.warning("nao consegui apagar %s: %s", p, e)
-    return achou
+async def aplicar_imagem(gid, chave: str, anexo: Optional[discord.Attachment] = None, valor: str = ""):
+    """salva uma imagem (anexo, link, 'nenhum' ou 'padrao') -> (erro, mensagem de ok)"""
+    if anexo is not None:
+        novo, erro = await save_image(gid, f"vip_{chave}", anexo)
+        if erro:
+            return erro, None
+        _set_img(gid, chave, novo)
+        return None, "imagem salva"
+    t = (valor or "").strip()
+    baixo = t.lower()
+    if baixo in REMOVER:
+        _set_img(gid, chave, None)
+        _limpar_arquivos(gid, f"vip_{chave}")
+        return None, "voltou ao padrão"
+    if baixo in VAZIO:
+        _set_img(gid, chave, "")
+        _limpar_arquivos(gid, f"vip_{chave}")
+        return None, "agora sem imagem"
+    if re.fullmatch(r"https?://\S+", t):
+        _set_img(gid, chave, t)
+        _limpar_arquivos(gid, f"vip_{chave}")
+        return None, "link salvo"
+    return "Anexe uma imagem, mande um link (https://...) ou use `nenhum` / `padrao`.", None
 
 
 # ---------------------------------------------------------------- emojis
@@ -444,7 +503,7 @@ def build_detalhe(guild: discord.Guild, key: str):
     else:
         topo_txt = discord.ui.TextDisplay(cab)
 
-    topo, fim, arquivos = _midia(vip=key)
+    topo, fim, arquivos = _midia(guild.id if guild is not None else None, vip=key)
     itens = []
     if topo:
         itens += [discord.ui.MediaGallery(discord.MediaGalleryItem(topo)), discord.ui.Separator()]
@@ -468,7 +527,7 @@ def build_detalhe(guild: discord.Guild, key: str):
 def build_panel_view(guild: Optional[discord.Guild] = None):
     """painel inteiro num container so -> (view, arquivos)"""
     c = get_cfg(guild.id if guild is not None else None)
-    topo, fim, arquivos = _midia()
+    topo, fim, arquivos = _midia(guild.id if guild is not None else None)
     pix = _pix()
     itens = []
     if topo:
@@ -674,6 +733,10 @@ def _texto_ajuda() -> str:
         "`perms`: uma por linha (ou separadas por `|`)\n"
         "Ex.: `,pvipconfig vip elite perms Enviar imagens | Usar emojis externos`\n"
         "Ex.: `,pvipconfig vip elite emoji poyo_pix` · `,pvipconfig vip elite cargo @Elite`\n\n"
+        "**Imagens**\n"
+        "`,pvipconfig topo` + anexo (ou `topo <link>`) · `fim` · `imagem <vip>`\n"
+        "`topo nenhum` tira a imagem · `topo padrao` volta ao original\n"
+        "-# no painel (menu 📎) o bot pede a imagem no chat, igual o ticket\n\n"
         "Sem o valor, mostra o atual. Com `padrao` no lugar, volta ao original.\n"
         "Tudo atualiza os painéis já postados na hora."
     )
@@ -696,21 +759,14 @@ def _texto_ver(gid) -> str:
 
 
 def _texto_imagens(gid) -> str:
-    def marca(chave, padrao="padrão"):
-        return "✅ enviada" if _img_path(chave) else f"— {padrao}"
-
+    c = get_cfg(gid)
     linhas = [
-        f"{MARCA} **topo** · {marca('topo', 'sem imagem')}",
-        f"{MARCA} **fim** · {marca('fim', 'gif de lacinhos')}",
+        f"{MARCA} **Topo do painel** · {_status_img(_get_img(gid, 'topo'), 'sem imagem')}",
+        f"{MARCA} **Final do painel** · {_status_img(_get_img(gid, 'fim'), 'gif de lacinhos')}",
     ]
-    for key in get_cfg(gid)["vips"]:
-        linhas.append(f"{MARCA} **imagem {key}** · {marca(f'vip_{key}', 'usa a do topo')}")
-    return (
-        "\n".join(linhas)
-        + "\n\n`,pvipconfig topo` + anexe a imagem (ou responda uma imagem com o comando)\n"
-        "`,pvipconfig fim` · `,pvipconfig imagem elite`\n"
-        "Pra voltar ao padrão: `,pvipconfig topo remover`"
-    )
+    for key, v in c["vips"].items():
+        linhas.append(f"{MARCA} **{v['nome']}** · {_status_img(_get_img(gid, f'card_{key}'), 'usa a do topo')}")
+    return "\n".join(linhas)
 
 
 def _no_modo(texto: str, gid) -> str:
@@ -718,12 +774,22 @@ def _no_modo(texto: str, gid) -> str:
     return texto.replace(",pvip", f"{_p(gid)}pvip")
 
 
+def _rotulo_img(gid, chave: str) -> str:
+    if chave == "topo":
+        return "o topo do painel"
+    if chave == "fim":
+        return "o final do painel"
+    nome = get_cfg(gid)["vips"].get(chave.removeprefix("card_"), {}).get("nome", chave)
+    return f"o cartão do {nome}"
+
+
 class PainelConfig(discord.ui.LayoutView):
-    """painel de config: modo slash/prefixo, textos, imagens (so admin, so quem abriu)"""
+    """painel de config: modo slash/prefixo, imagens, textos (so admin, so quem abriu)"""
 
     def __init__(self, guild: discord.Guild, author_id: int):
         super().__init__(timeout=600)
         self.guild, self.author_id = guild, author_id
+        self.sent, self.notice = None, ""
         self.render()
 
     def render(self):
@@ -733,9 +799,12 @@ class PainelConfig(discord.ui.LayoutView):
         corpo = (
             "## Configurar painel VIP\n"
             f"-# Modo de comandos: **{modo}**\n\n"
-            + _no_modo(_texto_imagens(gid), gid)
-            + f"\n\n-# Textos: `{_p(gid)}pvipconfig ajuda` · atuais: `{_p(gid)}pvipconfig ver`"
+            f"**Imagens**\n{_texto_imagens(gid)}\n"
+            "-# escolha 📎 no menu e mande a imagem no chat\n\n"
+            f"-# Textos: `{_p(gid)}pvipconfig ajuda` · atuais: `{_p(gid)}pvipconfig ver`"
         )
+        if self.notice:
+            corpo += f"\n\n{self.notice}"
         self.add_item(discord.ui.Container(discord.ui.TextDisplay(corpo)))
         self.add_item(discord.ui.ActionRow(PainelSelect(self)))
 
@@ -757,22 +826,32 @@ class PainelConfig(discord.ui.LayoutView):
 class PainelSelect(discord.ui.Select):
     def __init__(self, painel: PainelConfig):
         self.painel = painel
-        slash = get_modo_slash(painel.guild.id)
-        super().__init__(
-            placeholder="Toque em uma opção…",
-            options=[
-                discord.SelectOption(
-                    label="Modo Slash", value="modo_slash", emoji="✅" if slash else "⬜",
-                    description="Usar comandos / em vez de comandos com ,",
-                ),
-                discord.SelectOption(label="Textos atuais", value="ver", emoji="📝",
-                                     description="Ver tudo que está valendo agora"),
-                discord.SelectOption(label="Como mudar os textos", value="ajuda", emoji="💬",
-                                     description="Comandos pra editar o painel e cada VIP"),
-                discord.SelectOption(label="Atualizar painéis", value="atualizar", emoji="🔄",
-                                     description="Reedita os painéis já postados"),
-            ],
-        )
+        gid = painel.guild.id
+        slash = get_modo_slash(gid)
+        opcoes = [
+            discord.SelectOption(
+                label="Modo Slash", value="modo_slash", emoji="✅" if slash else "⬜",
+                description="Usar comandos / em vez de comandos com ,",
+            ),
+            discord.SelectOption(label="Imagem do topo", value="img_topo", emoji="📎",
+                                 description="Banner de cima do painel"),
+            discord.SelectOption(label="Imagem do final", value="img_fim", emoji="📎",
+                                 description="Decoração de baixo (padrão: lacinhos)"),
+        ]
+        for key, v in get_cfg(gid)["vips"].items():
+            opcoes.append(discord.SelectOption(
+                label=f"Imagem do {v['nome']}"[:100], value=f"img_card_{key}", emoji="📎",
+                description="Banner só do cartão desse VIP",
+            ))
+        opcoes += [
+            discord.SelectOption(label="Textos atuais", value="ver", emoji="📝",
+                                 description="Ver tudo que está valendo agora"),
+            discord.SelectOption(label="Como mudar os textos", value="ajuda", emoji="💬",
+                                 description="Comandos pra editar o painel e cada VIP"),
+            discord.SelectOption(label="Atualizar painéis", value="atualizar", emoji="🔄",
+                                 description="Reedita os painéis já postados"),
+        ]
+        super().__init__(placeholder="Toque em uma opção…", options=opcoes[:25])
 
     async def callback(self, interaction: discord.Interaction):
         escolha, guild = self.values[0], interaction.guild
@@ -790,6 +869,9 @@ class PainelSelect(discord.ui.Select):
                 view=Card(f"Modo Slash {'ligado' if novo else 'desligado'}", msg), ephemeral=True
             )
             return
+        if escolha.startswith("img_"):
+            await self._upload(interaction, escolha[4:])
+            return
         if escolha == "atualizar":
             n = await refresh_panels(guild)
             await interaction.response.send_message(
@@ -800,6 +882,53 @@ class PainelSelect(discord.ui.Select):
         view = discord.ui.LayoutView(timeout=None)
         view.add_item(discord.ui.Container(discord.ui.TextDisplay(_no_modo(texto, guild.id))))
         await interaction.response.send_message(view=view, ephemeral=True, allowed_mentions=NO_MENTIONS)
+
+    async def _upload(self, interaction: discord.Interaction, chave: str):
+        # igual o 📎 do ticket: o admin manda a imagem no chat e o bot guarda
+        guild = interaction.guild
+        if interaction.channel is None:
+            await interaction.response.send_message(
+                view=Card("Não consegui ver este canal", "Tente de novo."), ephemeral=True
+            )
+            return
+        await interaction.response.send_message(
+            view=Card(
+                "📎 Mande a imagem agora",
+                f"Envie **neste canal** uma imagem ou gif (png, jpg, gif, webp) pra {_rotulo_img(guild.id, chave)} "
+                "nos próximos 60 segundos.\n-# Pra cancelar é só esperar.",
+            ),
+            ephemeral=True,
+        )
+
+        def ok(m):
+            return (
+                m.author.id == interaction.user.id and m.channel.id == interaction.channel.id
+                and any(Path(a.filename).suffix.lower() in IMG_EXTS for a in m.attachments)
+            )
+
+        try:
+            msg = await interaction.client.wait_for("message", check=ok, timeout=60)
+        except asyncio.TimeoutError:
+            await interaction.followup.send(
+                view=Card("⏱️ Tempo esgotado", "Escolha a opção 📎 de novo."), ephemeral=True
+            )
+            return
+        anexo = next(a for a in msg.attachments if Path(a.filename).suffix.lower() in IMG_EXTS)
+        erro, _ = await aplicar_imagem(guild.id, chave, anexo)
+        if erro:
+            await interaction.followup.send(view=Card("⚠️ Não salvei", erro), ephemeral=True)
+            return
+        try:                      # a mensagem com a imagem some do chat (a copia fica guardada no bot)
+            await msg.delete()
+        except discord.HTTPException:
+            pass
+        n = await refresh_panels(guild)
+        self.painel.notice = f"✅ Imagem salva · {n} painel(is) atualizado(s)" if n else "✅ Imagem salva"
+        self.painel.render()
+        try:
+            await self.painel.sent.edit(view=self.painel)
+        except (discord.HTTPException, AttributeError):
+            pass
 
 
 # ---------------------------------------------------------------- cog
@@ -888,46 +1017,39 @@ class Vip(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     async def pvipconfig(self, ctx):
-        await ctx.send(view=PainelConfig(ctx.guild, ctx.author.id), allowed_mentions=NO_MENTIONS)
+        view = PainelConfig(ctx.guild, ctx.author.id)
+        view.sent = await ctx.send(view=view, allowed_mentions=NO_MENTIONS)
 
     # ---- imagens
 
     async def _definir_imagem(self, ctx, chave: str, rotulo: str, acao: Optional[str], arquivo):
-        if acao and acao.lower() in REMOVER:
-            tinha = _remover_img(chave)
-            n = await refresh_panels(ctx.guild)
-            await _aviso(
-                ctx, f"{rotulo} voltou ao padrão" if tinha else f"{rotulo} já estava no padrão",
-                f"-# {n} painel(is) atualizado(s).",
-            )
-            return
-        if arquivo is None and ctx.interaction is None:
+        if arquivo is None and not acao and ctx.interaction is None:
             arquivo = await _pegar_anexo(ctx)     # responder uma imagem tambem vale
-        if arquivo is None:
+        if arquivo is None and not (acao or "").strip():
             await _aviso(
                 ctx, f"Faltou a imagem de {rotulo}",
-                "Anexe a imagem no comando (ou responda uma imagem com ele).", ok=False,
+                "Anexe a imagem (ou responda uma), mande um link, ou use `nenhum` / `padrao`.", ok=False,
             )
             return
-        _, erro = await _salvar_img(chave, arquivo)
+        erro, ok = await aplicar_imagem(ctx.guild.id, chave, arquivo, acao or "")
         if erro:
-            await _aviso(ctx, f"Não deu pra usar o arquivo em {rotulo}", erro, ok=False)
+            await _aviso(ctx, f"Não deu pra usar em {rotulo}", erro, ok=False)
             return
         n = await refresh_panels(ctx.guild)
-        await _aviso(ctx, f"{rotulo.capitalize()} atualizado", f"-# {n} painel(is) atualizado(s).")
+        await _aviso(ctx, f"{rotulo.capitalize()}: {ok}", f"-# {n} painel(is) atualizado(s).")
 
-    @pvipconfig.command(name="topo", aliases=("banner",), description="Define (ou remove) a imagem do topo do painel.")
-    @app_commands.describe(arquivo="A imagem ou gif", acao="Escreva remover pra voltar ao padrão")
+    @pvipconfig.command(name="topo", aliases=("banner",), description="Define a imagem do topo do painel (anexo, link, nenhum ou padrao).")
+    @app_commands.describe(arquivo="A imagem ou gif", acao="Um link, nenhum (sem imagem) ou padrao")
     async def cfg_topo(self, ctx, acao: Optional[str] = None, arquivo: Optional[discord.Attachment] = None):
         await self._definir_imagem(ctx, "topo", "topo do painel", acao, arquivo)
 
-    @pvipconfig.command(name="fim", aliases=("final", "gif"), description="Define (ou remove) a imagem de baixo do painel.")
-    @app_commands.describe(arquivo="A imagem ou gif", acao="Escreva remover pra voltar ao gif de lacinhos")
+    @pvipconfig.command(name="fim", aliases=("final", "gif"), description="Define a imagem de baixo do painel (anexo, link, nenhum ou padrao).")
+    @app_commands.describe(arquivo="A imagem ou gif", acao="Um link, nenhum (sem imagem) ou padrao (lacinhos)")
     async def cfg_fim(self, ctx, acao: Optional[str] = None, arquivo: Optional[discord.Attachment] = None):
         await self._definir_imagem(ctx, "fim", "final do painel", acao, arquivo)
 
-    @pvipconfig.command(name="imagem", aliases=("img",), description="Define (ou remove) a imagem do cartão de um VIP.")
-    @app_commands.describe(vip="Qual VIP", arquivo="A imagem ou gif", acao="Escreva remover pra voltar ao padrão")
+    @pvipconfig.command(name="imagem", aliases=("img",), description="Define a imagem do cartão de um VIP (anexo, link, nenhum ou padrao).")
+    @app_commands.describe(vip="Qual VIP", arquivo="A imagem ou gif", acao="Um link, nenhum (sem imagem) ou padrao (usa a do topo)")
     @app_commands.choices(vip=[app_commands.Choice(name=k, value=k) for k in VIPS])
     async def cfg_imagem(self, ctx, vip: str, acao: Optional[str] = None, arquivo: Optional[discord.Attachment] = None):
         vips = get_cfg(ctx.guild.id)["vips"]
@@ -935,7 +1057,7 @@ class Vip(commands.Cog):
         if key is None:
             await _aviso(ctx, "VIP não encontrado", "Use um destes: " + ", ".join(f"`{k}`" for k in vips), ok=False)
             return
-        await self._definir_imagem(ctx, f"vip_{key}", f"imagem do {vips[key]['nome']}", acao, arquivo)
+        await self._definir_imagem(ctx, f"card_{key}", f"cartão do {vips[key]['nome']}", acao, arquivo)
 
     # ---- textos
 
