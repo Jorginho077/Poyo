@@ -41,6 +41,18 @@ ENFEITE_NOME = "poyo_fogo_aurora.gif"
 ENFEITE_CAMINHO = Path(__file__).resolve().parent.parent / "assets" / ENFEITE_NOME
 
 
+# Imagem do painel enquanto o Fogo ainda NÃO acendeu (falta alguém clicar).
+# Coloque um arquivo com esse nome em assets/ (Poyo calminho/sonequinha).
+# Se o arquivo não existir, o painel de espera fica sem imagem, em vez de
+# mostrar o Poyo feliz antes da hora.
+ESPERA_NOME = "poyo_fogo_espera.png"
+ESPERA_CAMINHO = Path(__file__).resolve().parent.parent / "assets" / ESPERA_NOME
+
+
+def espera_existe() -> bool:
+    return ESPERA_CAMINHO.is_file()
+
+
 # GIF de brilhos azul-gelo, usado no cartão "Fogo apagado".
 GELO_NOME = "poyo_fogo_neve.gif"
 GELO_CAMINHO = Path(__file__).resolve().parent.parent / "assets" / GELO_NOME
@@ -97,7 +109,9 @@ def container(*itens: discord.ui.Item, cor=COR_POYO, midia=None):
         discord.ui.Separator(visible=False, spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay("-# ✦ POYO  ·  um carinho em cada chama ♡"),
     ])
-    return discord.ui.Container(*conteudo, accent_colour=cor)
+    # Sem accent_colour: some a linha vertical laranja/azul do lado do cartão.
+    # (`cor` continua servindo só para escolher a imagem: gelo x aurora.)
+    return discord.ui.Container(*conteudo)
 
 
 def arquivos(view: discord.ui.LayoutView) -> list[discord.File]:
@@ -240,8 +254,8 @@ def frase_chama(sequencia: int) -> str:
 
 def blocos_painel(f) -> list[str]:
     """Texto do painel do dia (o GIF e o botão são montados pelo cog)."""
-    marca_a = "🔥 acendeu" if f["a_acendeu"] else "⏳ esperando"
-    marca_b = "🔥 acendeu" if f["b_acendeu"] else "⏳ esperando"
+    marca_a = f"{EMOJI_FOGO} acendeu" if f["a_acendeu"] else f"{EMOJI_ESPERA} esperando"
+    marca_b = f"{EMOJI_FOGO} acendeu" if f["b_acendeu"] else f"{EMOJI_ESPERA} esperando"
     nome = f"**{f['nome']}**" if f["nome"] else "A chaminha de vocês"
     total = int(bool(f["a_acendeu"])) + int(bool(f["b_acendeu"]))
     return [

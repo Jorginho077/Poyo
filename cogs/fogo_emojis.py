@@ -38,6 +38,10 @@ POYOS = (
 
 # Emojis que já existem no servidor, achados pelo nome.
 DO_SERVIDOR = (
+    # O foguinho do servidor vira o ícone do fogo (título e botão). Se o
+    # emoji não for achado, ficam o Poyo feliz / 🔥 de antes.
+    ("FOGO_EMOJI", "foguinho", "EMOJI_FOGO"),
+    ("FOGO_EMOJI_FELIZ", "foguinho", "EMOJI_FOGO_FELIZ"),
     ("FOGO_EMOJI_CONVITE", "poyo_piscadinha", "EMOJI_CONVITE"),
     ("FOGO_EMOJI_CORACAO", "poyo_coracao", "EMOJI_CORACAO"),
     ("FOGO_EMOJI_ESPERA", "poyo_sono", "EMOJI_ESPERA"),

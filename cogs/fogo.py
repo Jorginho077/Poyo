@@ -245,11 +245,13 @@ class PainelView(visual.CartaoFogo):
         blocos = list(visual.blocos_painel(fogo))
         if rodape:
             blocos[-1] += "\n" + rodape
-        usar_gif = enfeite and visual.enfeite_existe()
+        # Painel de espera: imagem NEUTRA (nunca a feliz da aurora). Se o
+        # arquivo de espera não existir, fica sem imagem.
+        usar_gif = enfeite and visual.espera_existe()
         super().__init__(
             *blocos,
             botoes=[AcenderBotao(fogo["id"]), *_botoes_nome(fogo)],
-            midia=visual.ENFEITE_NOME if usar_gif else None,
+            midia=visual.ESPERA_NOME,
         )
         self.enfeite = usar_gif
 
@@ -270,13 +272,10 @@ async def acender(interaction: discord.Interaction, fogo_id: int) -> None:
                 modo = modo_p
                 break
 
-        # Painéis antigos (sem o GIF anexado) são editados sem o GIF.
-        msg = interaction.message
-        enfeite = bool(
-            msg and any(a.filename == visual.ENFEITE_NOME for a in msg.attachments)
-        )
+        # A edição troca os anexos, então o card "aceso" sempre leva o GIF
+        # feliz (o painel de espera pode não ter nenhum anexo).
         await interaction.response.edit_message(
-            **visual.edicao(_view_do_dia(interaction.client, fogo, modo, enfeite=enfeite))
+            **visual.edicao(_view_do_dia(interaction.client, fogo, modo, enfeite=True))
         )
 
         cog = interaction.client.get_cog("Fogo")
