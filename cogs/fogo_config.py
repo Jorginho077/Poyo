@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from pathlib import Path
 from typing import Optional
 
 import discord
@@ -54,6 +55,103 @@ class _ViewDoAutor(discord.ui.LayoutView):
             "Esse painel não é seu.", ephemeral=True
         )
         return False
+
+
+# ------------------------------------------------- imagens (como no ticket)
+
+APELIDOS_IMG = {
+    "aceso": "aceso", "fogo": "aceso",
+    "apagado": "apagado", "frio": "apagado",
+    "espera": "espera", "painel": "espera", "convite": "espera",
+    "gif": "rodape", "rodape": "rodape", "baixo": "rodape",
+}
+
+
+async def guardar_imagem(slot: str, anexo: discord.Attachment) -> Optional[str]:
+    """Baixa o anexo e guarda em assets/. Devolve a mensagem de erro, se houver."""
+    ext = Path(anexo.filename).suffix.lower()
+    if ext not in visual.IMG_EXTS:
+        return "Mande uma imagem ou gif (png, jpg, gif ou webp)."
+    if anexo.size > visual.MAX_IMG_BYTES:
+        return f"Arquivo grande demais (máximo {visual.MAX_IMG_BYTES // 1024 // 1024} MB)."
+    try:
+        dados = await anexo.read()
+    except discord.HTTPException:
+        return "Não consegui baixar o arquivo, tenta de novo."
+    try:
+        await asyncio.to_thread(visual.salvar_imagem, slot, dados, ext)
+    except OSError as erro:
+        print(f"Fogo: não consegui salvar a imagem {slot}: {erro!r}")
+        return "Não consegui salvar o arquivo na pasta assets."
+    return None
+
+
+async def receber_imagem(
+    bot: commands.Bot, interaction: discord.Interaction, slot: str
+) -> None:
+    """Botão 📎: o dono manda a imagem no chat e o bot guarda."""
+    if not await bot.is_owner(interaction.user):
+        await interaction.response.send_message(
+            "Só o dono do bot muda as imagens do Fogo.", ephemeral=True
+        )
+        return
+    if interaction.channel is None:
+        await interaction.response.send_message(
+            "Não consegui ver este canal. Tente de novo.", ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        **visual.envio(visual.cartao_aviso(
+            "📎 Mande a imagem agora",
+            f"Envie **neste canal** uma imagem ou gif (png, jpg, gif, webp) "
+            f"nos próximos 60 segundos.\n**Vai em:** {visual.SLOTS_IMG[slot]}\n"
+            "-# Para cancelar, é só esperar.",
+        )),
+        ephemeral=True,
+    )
+
+    def confere(m: discord.Message) -> bool:
+        return (
+            m.author.id == interaction.user.id
+            and m.channel.id == interaction.channel.id
+            and any(Path(a.filename).suffix.lower() in visual.IMG_EXTS for a in m.attachments)
+        )
+
+    try:
+        msg = await bot.wait_for("message", check=confere, timeout=60)
+    except asyncio.TimeoutError:
+        await interaction.followup.send(
+            **visual.envio(visual.cartao_aviso(
+                "⏱️ Tempo esgotado", "Clique no botão 📎 de novo."
+            )),
+            ephemeral=True,
+        )
+        return
+
+    anexo = next(
+        a for a in msg.attachments
+        if Path(a.filename).suffix.lower() in visual.IMG_EXTS
+    )
+    erro = await guardar_imagem(slot, anexo)
+    if erro:
+        await interaction.followup.send(
+            **visual.envio(visual.cartao_aviso("⚠️ Não salvei", erro)),
+            ephemeral=True,
+        )
+        return
+    try:  # a cópia fica guardada no bot; a mensagem some do chat
+        await msg.delete()
+    except discord.HTTPException:
+        pass
+    await interaction.followup.send(
+        **visual.envio(visual.cartao_aviso(
+            "✅ Imagem salva",
+            f"**{visual.SLOTS_IMG[slot]}** atualizado. Vale para todos os "
+            "servidores, nas próximas mensagens do Fogo.",
+        )),
+        ephemeral=True,
+    )
 
 
 # ------------------------------------------------------------------ painel
@@ -132,6 +230,27 @@ class PainelConfig(_ViewDoAutor):
             label="Remover Fogo",
             emoji="🧯",
         )
+        def _envio_img(slot: str):
+            async def h(interaction: discord.Interaction) -> None:
+                await receber_imagem(self.bot, interaction, slot)
+            return h
+
+        botoes_img = []
+        for slot, rotulo in (
+            ("aceso", "Banner aceso"),
+            ("apagado", "Banner apagado"),
+            ("espera", "Banner espera"),
+            ("rodape", "GIF de baixo"),
+        ):
+            b = discord.ui.Button(
+                style=discord.ButtonStyle.secondary, label=rotulo, emoji="📎"
+            )
+            b.callback = _envio_img(slot)
+            botoes_img.append(b)
+        restaurar = discord.ui.Button(
+            style=discord.ButtonStyle.secondary, label="Imagens padrão", emoji="↩️"
+        )
+        restaurar.callback = self._restaurar_imagens
         horario.callback = self._horario
         botao_dm.callback = self._alternar_dm
         botao_servidor.callback = self._alternar_servidor
@@ -146,11 +265,15 @@ class PainelConfig(_ViewDoAutor):
                     f"**Avisos na DM:** {'ligados' if dm else 'desligados'}\n"
                     f"**Avisos no servidor:** {'ligados' if servidor else 'desligados'}\n"
                     f"**Fogos ativos aqui:** {ativos}\n"
-                    "-# Horário e avisos valem para todos os servidores."
+                    f"**Imagens próprias:** {visual.resumo_imagens()}\n"
+                    "-# Horário, avisos e imagens valem para todos os servidores."
                 ),
                 discord.ui.Separator(visible=False),
                 discord.ui.ActionRow(horario, remover),
                 discord.ui.ActionRow(botao_dm, botao_servidor),
+                discord.ui.Separator(),
+                discord.ui.ActionRow(*botoes_img[:3]),
+                discord.ui.ActionRow(botoes_img[3], restaurar),
             )
         )
 
@@ -189,6 +312,19 @@ class PainelConfig(_ViewDoAutor):
 
     async def _alternar_servidor(self, interaction: discord.Interaction) -> None:
         await self._alternar(interaction, "servidor")
+
+    async def _restaurar_imagens(self, interaction: discord.Interaction) -> None:
+        if not await self._so_dono(interaction, "Só o dono do bot muda as imagens."):
+            return
+        total = await asyncio.to_thread(visual.restaurar_imagens)
+        await interaction.response.send_message(
+            **visual.envio(visual.cartao_aviso(
+                "↩️ Imagens padrão",
+                "Voltei os banners e o GIF para o padrão."
+                if total else "Não havia imagens enviadas por você.",
+            )),
+            ephemeral=True,
+        )
 
     async def _remover(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(
@@ -375,6 +511,47 @@ class FogoConfig(commands.Cog):
             await ctx.send(**visual.envio(view), ephemeral=True)
         else:
             await ctx.send(**visual.envio(view), delete_after=300)
+
+
+    @commands.command(
+        name="fogoimg",
+        extras={
+            "categoria": "Fogo",
+            "uso": ",fogoimg <aceso|apagado|espera|gif|padrao> (anexe a imagem)",
+            "descricao": (
+                "Só o dono: troca os banners e o GIF de baixo do Fogo "
+                "anexando a imagem na mensagem. `,fogoimg padrao` volta ao padrão."
+            ),
+        },
+    )
+    @commands.is_owner()
+    async def fogoimg(self, ctx: commands.Context, onde: str = "") -> None:
+        onde = onde.lower().strip()
+        if onde in ("padrao", "padrão", "restaurar"):
+            await asyncio.to_thread(visual.restaurar_imagens)
+            await ctx.send(**visual.envio(visual.cartao_aviso(
+                "↩️ Imagens padrão", "Voltei os banners e o GIF para o padrão."
+            )))
+            return
+        slot = APELIDOS_IMG.get(onde)
+        if slot is None or not ctx.message.attachments:
+            await ctx.send(**visual.envio(visual.cartao_aviso(
+                "Como usar",
+                "Anexe a imagem e mande `,fogoimg aceso`, `apagado`, `espera` "
+                "ou `gif` (o GIF de baixo). Para voltar ao padrão: `,fogoimg padrao`.",
+            )))
+            return
+        erro = await guardar_imagem(slot, ctx.message.attachments[0])
+        if erro:
+            await ctx.send(**visual.envio(visual.cartao_aviso("⚠️ Não salvei", erro)))
+            return
+        try:
+            await ctx.message.delete()
+        except discord.HTTPException:
+            pass
+        await ctx.send(**visual.envio(visual.cartao_aviso(
+            "✅ Imagem salva", f"**{visual.SLOTS_IMG[slot]}** atualizado."
+        )))
 
 
 async def setup(bot: commands.Bot) -> None:

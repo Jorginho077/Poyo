@@ -13,8 +13,10 @@ definido no .env ou aqui tem prioridade sobre o automático.
 from __future__ import annotations
 
 import os
+import re
+import time
 from pathlib import Path
-from typing import Sequence
+from typing import Optional, Sequence
 
 import discord
 
@@ -39,6 +41,27 @@ COR_NEUTRA = discord.Colour.from_rgb(110, 110, 120)
 # GIF de brilhos que fica em cima do botão "Acender o Fogo".
 ENFEITE_NOME = "poyo_fogo_aurora.gif"
 ENFEITE_CAMINHO = Path(__file__).resolve().parent.parent / "assets" / ENFEITE_NOME
+
+
+# Banners de topo por estado (960x300) e GIF opcional de rodapé.
+ACESO_NOME = "poyo_fogo_aceso.png"  # Poyo pegando fogo: Fogo aceso
+APAGADO_NOME = "poyo_fogo_apagado.png"  # Poyo com frio: Fogo apagado
+RODAPE_NOME = "poyo_fogo_rodape.gif"  # opcional: GIF embaixo de todos os cartões
+
+
+def _existe(nome: str) -> bool:
+    return (Path(__file__).resolve().parent.parent / "assets" / nome).is_file()
+
+
+def estilo(texto: str) -> str:
+    """Deixa o texto em negrito + itálico (***...***), linha por linha,
+    mantendo os prefixos de título (#, ##, ###) e de texto pequeno (-#)."""
+    saida = []
+    for linha in texto.split("\n"):
+        m = re.match(r"^(#{1,3} |-# )?(.*)$", linha)
+        prefixo, corpo = m.group(1) or "", m.group(2).replace("**", "").strip()
+        saida.append(f"{prefixo}***{corpo}***" if corpo else linha)
+    return "\n".join(saida)
 
 
 # Imagem do painel enquanto o Fogo ainda NÃO acendeu (falta alguém clicar).
@@ -90,6 +113,72 @@ def dias(n: int) -> str:
 
 
 ASSETS = Path(__file__).resolve().parent.parent / "assets"
+# ------------------------------------------------ imagens enviadas pelo Discord
+# Mesmo esquema do ticket: o dono manda a imagem no chat (botão 📎 do
+# `,fogoconfig` ou `,fogoimg`), o bot guarda em assets/ com nome novo a cada
+# envio (o Discord não reaproveita a imagem antiga) e usa no lugar da padrão.
+
+IMG_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+MAX_IMG_BYTES = 8 * 1024 * 1024
+SLOTS_IMG = {
+    "aceso": "Banner do Fogo aceso",
+    "apagado": "Banner do Fogo apagado",
+    "espera": "Banner de espera (painel e convite)",
+    "rodape": "GIF de baixo dos cartões",
+}
+
+
+def imagem_enviada(slot: str) -> Optional[str]:
+    """Nome do arquivo mais novo enviado para esse espaço (ou None)."""
+    achados = [
+        p for p in ASSETS.glob(f"fogo_up_{slot}_*")
+        if p.suffix.lower() in IMG_EXTS and p.is_file()
+    ]
+    if not achados:
+        return None
+    return max(achados, key=lambda p: p.stat().st_mtime).name
+
+
+def salvar_imagem(slot: str, dados: bytes, ext: str) -> str:
+    """Grava o upload em assets/ e apaga as versões antigas desse espaço."""
+    ASSETS.mkdir(parents=True, exist_ok=True)
+    nome = f"fogo_up_{slot}_{int(time.time())}{ext.lower()}"
+    (ASSETS / nome).write_bytes(dados)
+    for velho in ASSETS.glob(f"fogo_up_{slot}_*"):
+        if velho.name != nome:
+            try:
+                velho.unlink()
+            except OSError:
+                pass
+    return nome
+
+
+def restaurar_imagens(slots=None) -> int:
+    """Apaga os uploads (volta às imagens padrão). Devolve quantos apagou."""
+    total = 0
+    for slot in slots or SLOTS_IMG:
+        for arq in ASSETS.glob(f"fogo_up_{slot}_*"):
+            try:
+                arq.unlink()
+                total += 1
+            except OSError:
+                pass
+    return total
+
+
+def resumo_imagens() -> str:
+    proprias = [rotulo for slot, rotulo in SLOTS_IMG.items() if imagem_enviada(slot)]
+    return ", ".join(proprias) if proprias else "nenhuma (usando as padrão)"
+
+
+# imagem padrão -> espaço que o dono pode trocar por upload
+_SLOT_DO_PADRAO = {
+    ACESO_NOME: "aceso",
+    APAGADO_NOME: "apagado",
+    GELO_NOME: "apagado",
+    ESPERA_NOME: "espera",
+}
+
 COR_POYO = discord.Colour.from_rgb(244, 147, 185)
 COR_LENDARIO = discord.Colour.from_rgb(247, 202, 113)
 
@@ -101,11 +190,14 @@ def container(*itens: discord.ui.Item, cor=COR_POYO, midia=None):
     if midia:
         nome = midia
     elif cor == COR_FRIO:
-        nome = GELO_NOME
+        nome = APAGADO_NOME if _existe(APAGADO_NOME) else GELO_NOME
     elif cor == COR_NEUTRA:
         nome = None
     else:
         nome = ENFEITE_NOME
+    slot = _SLOT_DO_PADRAO.get(nome) if nome else None
+    if slot:  # imagem enviada pelo Discord vale mais que a padrão
+        nome = imagem_enviada(slot) or nome
     conteudo = []
     if nome and (ASSETS / nome).is_file():
         conteudo.extend([
@@ -116,8 +208,15 @@ def container(*itens: discord.ui.Item, cor=COR_POYO, midia=None):
     conteudo.extend(itens)
     conteudo.extend([
         discord.ui.Separator(visible=False, spacing=discord.SeparatorSpacing.small),
-        discord.ui.TextDisplay("-# ✦ POYO  ·  um carinho em cada chama ♡"),
+        discord.ui.TextDisplay(estilo("-# ✦ POYO  ·  um carinho em cada chama ♡")),
     ])
+    rodape = imagem_enviada("rodape") or (RODAPE_NOME if _existe(RODAPE_NOME) else None)
+    if rodape:  # GIF embaixo do cartão (enviado pelo Discord ou posto em assets/)
+        conteudo.extend([
+            discord.ui.Separator(visible=False, spacing=discord.SeparatorSpacing.small),
+            discord.ui.MediaGallery(discord.MediaGalleryItem(
+                f"attachment://{rodape}", description="Poyo e o fogo, em uma animação.")),
+        ])
     # Sem accent_colour: some a linha vertical laranja/azul do lado do cartão.
     # (`cor` continua servindo só para escolher a imagem: gelo x aurora.)
     return discord.ui.Container(*conteudo)
@@ -169,7 +268,7 @@ class CartaoFogo(discord.ui.LayoutView):
         for indice, bloco in enumerate(blocos):
             if indice:
                 itens.append(discord.ui.Separator(visible=False))
-            itens.append(discord.ui.TextDisplay(bloco))
+            itens.append(discord.ui.TextDisplay(estilo(bloco)))
         if botoes:
             itens.append(discord.ui.Separator())
             itens.append(discord.ui.ActionRow(*botoes))
@@ -307,6 +406,8 @@ def cartao_fogo_aceso(
     if rodape:
         blocos.append(rodape)
 
+    if _existe(ACESO_NOME) or imagem_enviada("aceso"):  # banner do Poyo pegando fogo
+        midia = ACESO_NOME
     return CartaoFogo(*blocos, cor=COR_FOGO, botoes=botoes, midia=midia)
 
 

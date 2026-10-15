@@ -52,13 +52,11 @@ class ConviteView(visual.CartaoFogo):
         aceitar = discord.ui.Button(
             style=discord.ButtonStyle.success,
             label="Aceitar o Fogo",
-            emoji=visual.EMOJI_FOGO,
             custom_id=f"poyo:fogo:convite:{convite_id}:aceitar",
         )
         recusar = discord.ui.Button(
             style=discord.ButtonStyle.secondary,
             label="Recusar",
-            emoji="🧊",
             custom_id=f"poyo:fogo:convite:{convite_id}:recusar",
         )
         aceitar.callback = self._aceitar
@@ -477,7 +475,6 @@ class RespostaNomeBotao(
                     else discord.ButtonStyle.secondary
                 ),
                 label="Aceitar o nome" if aceitar else "Recusar",
-                emoji=visual.EMOJI_FOGO if aceitar else "🧊",
                 custom_id=f"poyo:fogo:nomeresp:{fogo_id}:{versao}:{acao}",
             )
         )
