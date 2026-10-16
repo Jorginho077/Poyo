@@ -74,45 +74,101 @@ async def buscar_roblox(nome: str) -> Optional[dict]:
 
 async def buscar_minecraft(nome: str) -> Optional[dict]:
     nome = nome.strip()
+    if not nome:
+        return None
+
     try:
         perfil = await requisicao_json(
             "GET",
-            f"https://skinrender.dev/api/profile/{quote(nome)}",
+            f"https://api.mojang.com/users/profiles/minecraft/{quote(nome)}",
         )
     except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError):
         return None
 
-    uuid = perfil.get("uuid")
+    uuid = perfil.get("id")
     real = perfil.get("name")
-    skin_hash = perfil.get("skinHash")
-
     if not uuid or not real:
         return None
 
     real = str(real)
-    # Preferir o hash imutável da textura evita o fallback/cache do render por UUID.
-    if skin_hash:
-        identificador = f"texture:{skin_hash}"
-        imagem = (
-            f"https://skinrender.dev/render/{quote(identificador, safe=':')}/body"
-            "?pose=walk&frame=0.25&size=832&model=auto"
-            "&cape=true&overlay=true&default=none"
+    # O NameMC usa um hash curto próprio para a textura no endpoint de render.
+    # Primeiro tentamos extrair esse hash da página pública do perfil.
+    perfil_url = f"https://namemc.com/profile/{quote(real)}"
+
+    def buscar_hash_namemc() -> Optional[str]:
+        import re
+        pedido = Request(
+            perfil_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml",
+            },
         )
-    else:
-        # Sem textura personalizada, não fingir que a skin padrão é a skin do jogador.
+        with urlopen(pedido, timeout=20) as resposta:
+            html = resposta.read().decode("utf-8", errors="ignore")
+
+        # A página inclui o hash usado pelo próprio renderizador do NameMC.
+        padroes = (
+            r'data-skin-hash=["\']([a-fA-F0-9]{8,64})["\']',
+            r'[?&]skin=([a-fA-F0-9]{8,64})',
+            r'"skinHash"\s*:\s*"([a-fA-F0-9]{8,64})"',
+            r'"skin_hash"\s*:\s*"([a-fA-F0-9]{8,64})"',
+        )
+        for padrao in padroes:
+            match = re.search(padrao, html)
+            if match:
+                return match.group(1)
         return None
+
+    try:
+        skin_hash = await asyncio.to_thread(buscar_hash_namemc)
+    except (HTTPError, URLError, TimeoutError, OSError, UnicodeError):
+        skin_hash = None
+
+    if not skin_hash:
+        # Fallback: NameMC pode bloquear scraping temporariamente. Busca a textura
+        # oficial e tenta usar o hash da URL da textura no renderizador NameMC.
+        try:
+            dados_textura = await requisicao_json(
+                "GET",
+                f"https://sessionserver.mojang.com/session/minecraft/profile/{quote(uuid)}",
+            )
+            import base64
+            propriedades = dados_textura.get("properties", [])
+            textura_b64 = next(
+                (item.get("value") for item in propriedades if item.get("name") == "textures" and item.get("value")),
+                None,
+            )
+            if textura_b64:
+                textura_json = json.loads(base64.b64decode(textura_b64).decode("utf-8"))
+                skin_url = textura_json.get("textures", {}).get("SKIN", {}).get("url", "")
+                match = __import__("re").search(r"/texture/([a-fA-F0-9]{32,})", skin_url)
+                if match:
+                    skin_hash = match.group(1)
+        except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError, TypeError):
+            skin_hash = None
+
+    if not skin_hash:
+        return None
+
+    # NameMC render: imagem 3D com braços slim/clássicos, camadas e capa
+    # associada ao perfil quando o serviço tem essa informação.
+    imagem = (
+        "https://render.namemc.com/skin/3d/body.png"
+        f"?skin={quote(skin_hash)}&model=slim&theta=-30&phi=20&time=90&width=600&height=800"
+    )
+    imagem_fallback = (
+        "https://render.namemc.com/skin/3d/body.png"
+        f"?skin={quote(skin_hash)}&model=classic&theta=-30&phi=20&time=90&width=600&height=800"
+    )
 
     return {
         "plataforma": "Minecraft",
         "nome": real,
         "exibicao": real,
         "imagem": imagem,
-        "imagem_fallback": (
-            f"https://skinrender.dev/render/{quote(identificador, safe=':')}/body"
-            "?pose=walk&frame=0.25&size=832&model=auto"
-            "&cape=true&overlay=true&default=none"
-        ),
-        "perfil": f"https://namemc.com/profile/{quote(real)}",
+        "imagem_fallback": imagem_fallback,
+        "perfil": perfil_url,
         "logo_id": MINECRAFT_LOGO_ID,
     }
 
