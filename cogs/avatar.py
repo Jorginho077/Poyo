@@ -91,76 +91,53 @@ async def buscar_minecraft(nome: str) -> Optional[dict]:
         return None
 
     real = str(real)
-    # O NameMC usa um hash curto próprio para a textura no endpoint de render.
-    # Primeiro tentamos extrair esse hash da página pública do perfil.
-    perfil_url = f"https://namemc.com/profile/{quote(real)}"
+    uuid_limpo = str(uuid).replace("-", "")
 
-    def buscar_hash_namemc() -> Optional[str]:
-        import re
-        pedido = Request(
-            perfil_url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml",
-            },
-        )
-        with urlopen(pedido, timeout=20) as resposta:
-            html = resposta.read().decode("utf-8", errors="ignore")
-
-        # A página inclui o hash usado pelo próprio renderizador do NameMC.
-        padroes = (
-            r'data-skin-hash=["\']([a-fA-F0-9]{8,64})["\']',
-            r'[?&]skin=([a-fA-F0-9]{8,64})',
-            r'"skinHash"\s*:\s*"([a-fA-F0-9]{8,64})"',
-            r'"skin_hash"\s*:\s*"([a-fA-F0-9]{8,64})"',
-        )
-        for padrao in padroes:
-            match = re.search(padrao, html)
-            if match:
-                return match.group(1)
-        return None
-
+    # Detecta slim (Alex) ou classic (Steve) + hash da textura
+    model = "classic"
+    skin_hash = None
     try:
-        skin_hash = await asyncio.to_thread(buscar_hash_namemc)
-    except (HTTPError, URLError, TimeoutError, OSError, UnicodeError):
-        skin_hash = None
+        dados_textura = await requisicao_json(
+            "GET",
+            f"https://sessionserver.mojang.com/session/minecraft/profile/{quote(uuid_limpo)}",
+        )
+        import base64
+        propriedades = dados_textura.get("properties", [])
+        textura_b64 = next(
+            (item.get("value") for item in propriedades if item.get("name") == "textures" and item.get("value")),
+            None,
+        )
+        if textura_b64:
+            textura_json = json.loads(base64.b64decode(textura_b64).decode("utf-8"))
+            textures = textura_json.get("textures", {})
+            skin_data = textures.get("SKIN", {})
+            if skin_data.get("metadata", {}).get("model") == "slim":
+                model = "slim"
+            skin_url = skin_data.get("url", "")
+            match = __import__("re").search(r"/texture/([a-fA-F0-9]{32,})", skin_url)
+            if match:
+                skin_hash = match.group(1)
+    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError, TypeError, KeyError):
+        pass
 
-    if not skin_hash:
-        # Fallback: NameMC pode bloquear scraping temporariamente. Busca a textura
-        # oficial e tenta usar o hash da URL da textura no renderizador NameMC.
-        try:
-            dados_textura = await requisicao_json(
-                "GET",
-                f"https://sessionserver.mojang.com/session/minecraft/profile/{quote(uuid)}",
-            )
-            import base64
-            propriedades = dados_textura.get("properties", [])
-            textura_b64 = next(
-                (item.get("value") for item in propriedades if item.get("name") == "textures" and item.get("value")),
-                None,
-            )
-            if textura_b64:
-                textura_json = json.loads(base64.b64decode(textura_b64).decode("utf-8"))
-                skin_url = textura_json.get("textures", {}).get("SKIN", {}).get("url", "")
-                match = __import__("re").search(r"/texture/([a-fA-F0-9]{32,})", skin_url)
-                if match:
-                    skin_hash = match.group(1)
-        except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError, TypeError):
-            skin_hash = None
-
-    if not skin_hash:
-        return None
-
-    # NameMC render: imagem 3D com braços slim/clássicos, camadas e capa
-    # associada ao perfil quando o serviço tem essa informação.
+    # Render principal (Crafty - estável e bonito, com capa automática)
     imagem = (
-        "https://render.namemc.com/skin/3d/body.png"
-        f"?skin={quote(skin_hash)}&model=slim&theta=-30&phi=20&time=90&width=600&height=800"
+        f"https://render.crafty.gg/3d/full/{quote(real)}"
+        f"?width=600&height=800&x=-25&y=20&z=0&shadow=true"
     )
-    imagem_fallback = (
-        "https://render.namemc.com/skin/3d/body.png"
-        f"?skin={quote(skin_hash)}&model=classic&theta=-30&phi=20&time=90&width=600&height=800"
-    )
+
+    # Fallback 1: Visage / VZGE
+    imagem_fallback = f"https://vzge.me/full/800/{uuid_limpo}.png"
+
+    # Fallback 2: NameMC (só se tiver hash)
+    imagem_namemc = None
+    if skin_hash:
+        imagem_namemc = (
+            "https://render.namemc.com/skin/3d/body.png"
+            f"?skin={quote(skin_hash)}&model={model}&theta=-30&phi=20&time=90&width=600&height=800"
+        )
+
+    perfil_url = f"https://namemc.com/profile/{quote(real)}"
 
     return {
         "plataforma": "Minecraft",
@@ -168,8 +145,10 @@ async def buscar_minecraft(nome: str) -> Optional[dict]:
         "exibicao": real,
         "imagem": imagem,
         "imagem_fallback": imagem_fallback,
+        "imagem_namemc": imagem_namemc,
         "perfil": perfil_url,
         "logo_id": MINECRAFT_LOGO_ID,
+        "model": model,
     }
 
 
@@ -398,12 +377,17 @@ class Avatar(commands.Cog):
 
         arquivo = None
         imagem_url = resultado["imagem"]
-        for url in (resultado["imagem"], resultado.get("imagem_fallback")):
+        urls_tentar = [
+            resultado.get("imagem"),
+            resultado.get("imagem_fallback"),
+            resultado.get("imagem_namemc"),
+        ]
+        for url in urls_tentar:
             if not url:
                 continue
             try:
                 arquivo = await asyncio.wait_for(
-                    baixar_arquivo(url, "poyo-avatar.png"), timeout=30
+                    baixar_arquivo(url, "poyo-avatar.png"), timeout=25
                 )
                 imagem_url = "attachment://poyo-avatar.png"
                 break
