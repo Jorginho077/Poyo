@@ -121,21 +121,21 @@ async def buscar_minecraft(nome: str) -> Optional[dict]:
         pass
 
     if not skin_hash:
-        return None  # sem skin personalizada não tem como renderizar no estilo NameMC
+        return None
 
-    # === PRIORIDADE 1: NameMC (estilo da imagem do MoriDK - pose de caminhada) ===
+    # === PRIORIDADE ABSOLUTA: NameMC com pose de caminhada (time=90) ===
     imagem = (
         "https://render.namemc.com/skin/3d/body.png"
         f"?skin={quote(skin_hash)}&model={model}&theta=-30&phi=20&time=90&width=600&height=800"
     )
 
-    # Fallback caso o NameMC falhe (troca o model)
+    # Fallback 1: NameMC com model invertido
     imagem_fallback = (
         "https://render.namemc.com/skin/3d/body.png"
         f"?skin={quote(skin_hash)}&model={'classic' if model == 'slim' else 'slim'}&theta=-30&phi=20&time=90&width=600&height=800"
     )
 
-    # Fallback extra (Visage)
+    # Fallback 2: Visage (só se NameMC falhar de vez)
     imagem_extra = f"https://vzge.me/full/800/{uuid_limpo}.png"
 
     perfil_url = f"https://namemc.com/profile/{quote(real)}"
@@ -234,11 +234,12 @@ def registrar_curtida_db(message_id: int, user_id: int) -> tuple[bool, list[int]
 
 
 class SkinView(discord.ui.LayoutView):
-    def __init__(self, skin: dict, imagem_url: str, curtidas=None):
+    def __init__(self, skin: dict, imagem_url: str, curtidas=None, message_id: int = 0):
         super().__init__(timeout=None)
         self.skin = skin
         self.imagem_url = imagem_url
         self.curtidas = set(curtidas or [])
+        self.message_id = message_id
         self.lock = asyncio.Lock()
         self.montar()
 
@@ -251,10 +252,14 @@ class SkinView(discord.ui.LayoutView):
         perfil = discord.ui.Button(
             emoji=logo, style=discord.ButtonStyle.link, url=self.skin["perfil"]
         )
+
+        # custom_id ÚNICO por mensagem (resolve o bug de "já curtiu")
+        custom_id = f"skinview:curtir:{self.message_id}" if self.message_id else f"skinview:curtir:temp:{self.skin['nome']}"
+
         like = discord.ui.Button(
             emoji="🤍",
             style=discord.ButtonStyle.secondary,
-            custom_id=f"skinview:curtir:{self.skin['plataforma']}:{self.skin['nome']}",
+            custom_id=custom_id,
         )
         like.callback = self.curtir
         self.add_item(discord.ui.Container(
@@ -272,7 +277,6 @@ class SkinView(discord.ui.LayoutView):
         ))
 
     async def curtir(self, interaction: discord.Interaction):
-        # Responder dentro do prazo do Discord antes de fazer I/O no banco.
         try:
             await interaction.response.defer()
         except discord.InteractionResponded:
@@ -289,6 +293,11 @@ class SkinView(discord.ui.LayoutView):
             except discord.HTTPException:
                 pass
             return
+
+        # Atualiza o message_id caso ainda seja temporário
+        if self.message_id == 0:
+            self.message_id = mensagem.id
+            self.montar()
 
         async with self.lock:
             try:
@@ -319,7 +328,6 @@ class SkinView(discord.ui.LayoutView):
             try:
                 await mensagem.edit(view=self)
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                # A curtida já foi salva no banco; não apagar o voto por falha de edição.
                 try:
                     await interaction.followup.send(
                         "Sua curtida foi salva, mas não consegui atualizar o cartão. "
@@ -340,6 +348,7 @@ class Avatar(commands.Cog):
                     json.loads(skin_json),
                     imagem_url,
                     set(json.loads(likes_json or "[]")),
+                    message_id=int(mid),
                 )
                 self.bot.add_view(view, message_id=int(mid))
                 self._views_registradas.add(int(mid))
@@ -399,12 +408,23 @@ class Avatar(commands.Cog):
             await avisar("Não consegui renderizar/baixar a skin agora. Tente novamente.")
             return
 
-        view = SkinView(resultado, imagem_url)
+        # Cria o view SEM message_id ainda
+        view = SkinView(resultado, imagem_url, message_id=0)
+
         try:
             msg = await ctx.send(view=view, file=arquivo)
         except (discord.Forbidden, discord.HTTPException):
             await avisar("Não consegui enviar o cartão da skin. Verifique as permissões do bot.")
             return
+
+        # Agora que temos o message_id, atualiza o view e registra
+        view.message_id = msg.id
+        view.montar()  # recria o botão com custom_id único
+
+        try:
+            await msg.edit(view=view)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
 
         if msg.guild is not None:
             try:
@@ -415,8 +435,6 @@ class Avatar(commands.Cog):
                 self.bot.add_view(view, message_id=msg.id)
                 self._views_registradas.add(msg.id)
             except (sqlite3.Error, OSError, discord.HTTPException):
-                # O cartão foi enviado, mas views antigas só podem ser recuperadas
-                # depois de um registro bem-sucedido no banco.
                 pass
 
     @commands.hybrid_command(
