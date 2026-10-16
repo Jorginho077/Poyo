@@ -72,13 +72,12 @@ async def buscar_minecraft(nome: str) -> Optional[dict]:
     if not uuid or not real:
         return None
     real = str(real)
-    # mc-heads renderiza corpo completo respeitando o modelo (slim/alex ou classic/steve)
     return {
         "plataforma": "Minecraft",
         "nome": real,
         "exibicao": real,
-        "imagem": f"https://mc-heads.net/player/{uuid}/832",
-        "imagem_fallback": f"https://minotar.net/armor/body/{quote(real)}/832.png",
+        "imagem": f"https://crafatar.com/renders/body/{uuid}?overlay&scale=10",
+        "imagem_fallback": f"https://mc-heads.net/body/{uuid}/832",
         "perfil": f"https://namemc.com/profile/{quote(real)}",
         "logo_id": MINECRAFT_LOGO_ID,
     }
@@ -166,7 +165,6 @@ class SkinView(discord.ui.LayoutView):
         ))
 
     async def curtir(self, interaction: discord.Interaction):
-        # IMPORTANTE: sempre defer primeiro para evitar "interaction failed"
         try:
             if not interaction.response.is_done():
                 await interaction.response.defer()
@@ -192,8 +190,7 @@ class SkinView(discord.ui.LayoutView):
             self.montar()
 
             try:
-                # Após defer(), o correto é usar interaction.edit_message (não response.edit_message)
-                await interaction.edit_message(view=self)
+                await interaction.message.edit(view=self)
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 self.curtidas.discard(interaction.user.id)
                 try:
