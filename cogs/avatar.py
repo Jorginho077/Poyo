@@ -1,5 +1,5 @@
 from __future__ import annotations
-import asyncio, io, json, sqlite3
+import asyncio, base64, io, json, sqlite3
 from pathlib import Path
 from typing import Optional
 from urllib.error import HTTPError, URLError
@@ -63,6 +63,25 @@ async def buscar_roblox(nome: str) -> Optional[dict]:
         return None
 
 
+async def detectar_modelo_skin(uuid: str) -> str:
+    """Retorna 'slim' (Alex) ou 'default' (Steve)."""
+    try:
+        sessao = await requisicao_json(
+            "GET",
+            f"https://sessionserver.mojang.com/session/minecraft/profile/{uuid}"
+        )
+        for prop in sessao.get("properties", []):
+            if prop.get("name") == "textures":
+                texturas = json.loads(base64.b64decode(prop["value"]).decode("utf-8"))
+                modelo = texturas.get("textures", {}).get("SKIN", {}).get("metadata", {}).get("model")
+                if modelo == "slim":
+                    return "slim"
+                break
+    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError, KeyError, ValueError):
+        pass
+    return "default"
+
+
 async def buscar_minecraft(nome: str) -> Optional[dict]:
     try:
         perfil = await requisicao_json("GET", f"https://api.mojang.com/users/profiles/minecraft/{quote(nome)}")
@@ -72,11 +91,14 @@ async def buscar_minecraft(nome: str) -> Optional[dict]:
     if not uuid or not real:
         return None
     real = str(real)
+
+    modelo = await detectar_modelo_skin(uuid)
+
     return {
         "plataforma": "Minecraft",
         "nome": real,
         "exibicao": real,
-        "imagem": f"https://crafatar.com/renders/body/{uuid}?overlay&scale=10",
+        "imagem": f"https://skinrender.dev/render/{uuid}/body?pose=walk&frame=0.25&size=832&model={modelo}",
         "imagem_fallback": f"https://mc-heads.net/body/{uuid}/832",
         "perfil": f"https://namemc.com/profile/{quote(real)}",
         "logo_id": MINECRAFT_LOGO_ID,
