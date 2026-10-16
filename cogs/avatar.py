@@ -53,10 +53,11 @@ async def buscar_minecraft(nome: str) -> Optional[dict]:
         return None
     uuid, real = perfil.get("id"), perfil.get("name")
     if not uuid or not real: return None
+    encoded_nome = quote(str(real))
     return {"plataforma":"Minecraft","nome":str(real),"exibicao":str(real),
-            "imagem":f"https://skinrender.dev/render/{uuid}/body?pose=walk&frame=0.25&size=832&capeAngle=25",
-            "imagem_fallback":f"https://mc-api.io/render/FULL/{quote(str(real))}/JAVA?size=832",
-            "perfil":f"https://namemc.com/profile/{quote(str(real))}","logo_id":MINECRAFT_LOGO_ID}
+            "imagem":f"https://mc-api.io/render/FULL/{encoded_nome}/JAVA?size=832",
+            "imagem_fallback":f"https://skinhead.dev/head/{uuid}?format=png&size=256",
+            "perfil":f"https://namemc.com/profile/{encoded_nome}","logo_id":MINECRAFT_LOGO_ID}
 
 async def buscar_skin(entrada: str) -> Optional[dict]:
     valor=entrada.strip().lstrip("@"); low=valor.lower()
@@ -87,7 +88,6 @@ def salvar_post(message_id, channel_id, guild_id, skin, imagem_url, curtidas):
         (message_id,channel_id,guild_id,json.dumps(skin),imagem_url,json.dumps(sorted(curtidas))))
 
 def salvar_curtidas_bg(message_id, curtidas):
-    """Non-blocking database write - run in background"""
     try:
         with sqlite3.connect(DATABASE_PATH) as db:
             db.execute("UPDATE skinview_posts SET curtidas_json=? WHERE message_id=?",
@@ -118,53 +118,53 @@ class SkinView(discord.ui.LayoutView):
 
     async def curtir(self, interaction: discord.Interaction):
         try:
-            if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True)
+            await interaction.response.defer(ephemeral=True)
         except discord.NotFound:
             return
-        
+        except discord.HTTPException:
+            return
+
         if interaction.message is None:
             try:
                 await interaction.followup.send("Não consegui localizar esta publicação.",ephemeral=True)
-            except (discord.NotFound, discord.HTTPException):
+            except:
                 pass
             return
-        
+
         async with self.lock:
             if interaction.user.id in self.curtidas:
                 try:
                     await interaction.followup.send("Você já curtiu esta skin.",ephemeral=True)
-                except (discord.NotFound, discord.HTTPException):
+                except:
                     pass
                 return
-            
+
             self.curtidas.add(interaction.user.id)
             self.montar()
-            
+
             try:
                 await interaction.response.edit_message(view=self)
             except discord.NotFound:
                 self.curtidas.discard(interaction.user.id)
                 try:
                     await interaction.followup.send("A mensagem foi deletada.",ephemeral=True)
-                except (discord.NotFound, discord.HTTPException):
+                except:
                     pass
                 return
             except (discord.Forbidden, discord.HTTPException):
                 self.curtidas.discard(interaction.user.id)
                 try:
                     await interaction.followup.send("Erro ao atualizar a curtida.",ephemeral=True)
-                except (discord.NotFound, discord.HTTPException):
+                except:
                     pass
                 return
-        
-        if interaction.message is not None:
-            try:
-                interaction.client.loop.create_task(
-                    asyncio.to_thread(salvar_curtidas_bg, interaction.message.id, self.curtidas)
-                )
-            except Exception:
-                pass
+
+        try:
+            interaction.client.loop.create_task(
+                asyncio.to_thread(salvar_curtidas_bg, interaction.message.id, self.curtidas)
+            )
+        except:
+            pass
 
 class Avatar(commands.Cog):
     def __init__(self,bot:commands.Bot):
