@@ -120,22 +120,23 @@ async def buscar_minecraft(nome: str) -> Optional[dict]:
     except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError, TypeError, KeyError):
         pass
 
-    # Render principal (Crafty - estável e bonito, com capa automática)
+    if not skin_hash:
+        return None  # sem skin personalizada não tem como renderizar no estilo NameMC
+
+    # === PRIORIDADE 1: NameMC (estilo da imagem do MoriDK - pose de caminhada) ===
     imagem = (
-        f"https://render.crafty.gg/3d/full/{quote(real)}"
-        f"?width=600&height=800&x=-25&y=20&z=0&shadow=true"
+        "https://render.namemc.com/skin/3d/body.png"
+        f"?skin={quote(skin_hash)}&model={model}&theta=-30&phi=20&time=90&width=600&height=800"
     )
 
-    # Fallback 1: Visage / VZGE
-    imagem_fallback = f"https://vzge.me/full/800/{uuid_limpo}.png"
+    # Fallback caso o NameMC falhe (troca o model)
+    imagem_fallback = (
+        "https://render.namemc.com/skin/3d/body.png"
+        f"?skin={quote(skin_hash)}&model={'classic' if model == 'slim' else 'slim'}&theta=-30&phi=20&time=90&width=600&height=800"
+    )
 
-    # Fallback 2: NameMC (só se tiver hash)
-    imagem_namemc = None
-    if skin_hash:
-        imagem_namemc = (
-            "https://render.namemc.com/skin/3d/body.png"
-            f"?skin={quote(skin_hash)}&model={model}&theta=-30&phi=20&time=90&width=600&height=800"
-        )
+    # Fallback extra (Visage)
+    imagem_extra = f"https://vzge.me/full/800/{uuid_limpo}.png"
 
     perfil_url = f"https://namemc.com/profile/{quote(real)}"
 
@@ -145,7 +146,7 @@ async def buscar_minecraft(nome: str) -> Optional[dict]:
         "exibicao": real,
         "imagem": imagem,
         "imagem_fallback": imagem_fallback,
-        "imagem_namemc": imagem_namemc,
+        "imagem_namemc": imagem_extra,
         "perfil": perfil_url,
         "logo_id": MINECRAFT_LOGO_ID,
         "model": model,
