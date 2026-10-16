@@ -117,16 +117,25 @@ class SkinView(discord.ui.LayoutView):
             discord.ui.Separator(),discord.ui.ActionRow(like)))
 
     async def curtir(self, interaction: discord.Interaction):
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True)
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
         
         if interaction.message is None:
-            await interaction.followup.send("Não consegui localizar esta publicação. Execute o comando novamente.",ephemeral=True)
+            try:
+                await interaction.followup.send("Não consegui localizar esta publicação.",ephemeral=True)
+            except (discord.NotFound, discord.HTTPException):
+                pass
             return
         
         async with self.lock:
             if interaction.user.id in self.curtidas:
-                await interaction.followup.send("Você já curtiu esta skin.",ephemeral=True)
+                try:
+                    await interaction.followup.send("Você já curtiu esta skin.",ephemeral=True)
+                except (discord.NotFound, discord.HTTPException):
+                    pass
                 return
             
             self.curtidas.add(interaction.user.id)
@@ -134,15 +143,28 @@ class SkinView(discord.ui.LayoutView):
             
             try:
                 await interaction.response.edit_message(view=self)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            except discord.NotFound:
                 self.curtidas.discard(interaction.user.id)
-                await interaction.followup.send("Não consegui atualizar a curtida. Tente novamente.",ephemeral=True)
+                try:
+                    await interaction.followup.send("A mensagem foi deletada.",ephemeral=True)
+                except (discord.NotFound, discord.HTTPException):
+                    pass
+                return
+            except (discord.Forbidden, discord.HTTPException):
+                self.curtidas.discard(interaction.user.id)
+                try:
+                    await interaction.followup.send("Erro ao atualizar a curtida.",ephemeral=True)
+                except (discord.NotFound, discord.HTTPException):
+                    pass
                 return
         
         if interaction.message is not None:
-            interaction.client.loop.create_task(
-                asyncio.to_thread(salvar_curtidas_bg, interaction.message.id, self.curtidas)
-            )
+            try:
+                interaction.client.loop.create_task(
+                    asyncio.to_thread(salvar_curtidas_bg, interaction.message.id, self.curtidas)
+                )
+            except Exception:
+                pass
 
 class Avatar(commands.Cog):
     def __init__(self,bot:commands.Bot):
