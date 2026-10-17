@@ -5,7 +5,9 @@ import re
 import copy
 import json
 import asyncio
+import difflib
 import logging
+import unicodedata
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -161,6 +163,7 @@ DEFAULTS = {
         "cargos_lista": [],        # usados quando o modo e "lista"
         "creditar": True,          # linha "enviado por @pessoa" no fim
         "bloquear_duplicado": True,  # nao aceita o mesmo servidor duas vezes
+        "conferir_nome": True,     # tambem barra por nome parecido (pra convites antigos que expiraram)
     },
     "bloquear_links": True,    # True = so as categorias de links_tipos podem mandar link (equipe sempre pode)
     "links_tipos": ["parceria"],  # chaves das categorias que aceitam link (o bot reposta se outro bot cortar)
@@ -1068,7 +1071,22 @@ ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
 # registro das parcerias ja postadas: {"guilds": {id_do_nosso_server: {id_do_server_parceiro: {...}}}}
 PARC_FILE = Path(os.getenv("TICKETS_PARCERIAS_FILE", "tickets_parcerias.json"))
 _parc = _read_json(PARC_FILE)
-_parc.setdefault("guilds", {})
+
+
+def _parc_sanitize():
+    # arquivo editado a mao com formato errado: descarta o que nao for dict em vez de quebrar
+    if not isinstance(_parc.get("guilds"), dict):
+        _parc["guilds"] = {}
+    for gid in list(_parc["guilds"]):
+        reg = _parc["guilds"][gid]
+        if not isinstance(reg, dict):
+            _parc["guilds"][gid] = {}
+            continue
+        for k in [k for k, e in reg.items() if not isinstance(e, dict)]:
+            del reg[k]
+
+
+_parc_sanitize()
 
 
 def _parc_save():
@@ -1079,7 +1097,13 @@ def _parc_guild(guild_id) -> dict:
     return _parc["guilds"].setdefault(str(guild_id), {})
 
 
+_INVITE_ENTRE_COLCHETES = re.compile(
+    r"<((?:https?://)?(?:discord\.gg|discord(?:app)?\.com/invite)/[^\s<>]+)>", re.IGNORECASE)
+
+
 def _limpar_parceria(texto: str, p: dict) -> str:
+    # convite entre < > nao mostra preview no Discord: tira os colchetes so dele
+    texto = _INVITE_ENTRE_COLCHETES.sub(r"\1", texto)
     # tira do texto o que o painel mandou tirar (everyone/here e cargos)
     if p.get("remover_everyone", True):
         texto = EVERYONE_RE.sub("", texto)
@@ -2167,15 +2191,16 @@ class _ChanSel(_Fn, discord.ui.ChannelSelect):
 
 # janela pra digitar o id dos cargos na mao (um ou varios)
 class RoleIdsModal(discord.ui.Modal):
-    def __init__(self, painel, titulo, salvar, atuais=None):
+    def __init__(self, painel, titulo, salvar, atuais=None, maximo=None):
         super().__init__(title=titulo[:45])
         self.painel = painel
         self.salvar = salvar
+        self.maximo = maximo
         ids = atuais if isinstance(atuais, (list, tuple)) else [atuais]
         padrao = " ".join(str(i) for i in ids if isinstance(i, int))
         self.campo = discord.ui.TextInput(
-            label="ID ou nome dos cargos",
-            placeholder="123456789012345678, 987654321098765432, Staff",
+            label="ID, @menção ou nome do cargo",
+            placeholder="123456789012345678, <@&987654321098765432>, Staff",
             default=padrao[:400] or None,
             style=discord.TextStyle.paragraph,
             max_length=400,
@@ -2186,6 +2211,9 @@ class RoleIdsModal(discord.ui.Modal):
         ids, erro = await _parse_cargos(self.campo.value, self.painel.guild)
         if erro:
             await _erro_card(interaction, "Nada foi salvo", erro)
+            return
+        if self.maximo and len(ids) > self.maximo:
+            await _erro_card(interaction, "Nada foi salvo", f"Aqui cabe só {self.maximo} cargo. Mande apenas um.")
             return
         self.salvar(ids)
         await self.painel.update(interaction, f"✅ Salvo · {len(ids)} cargo(s)")
@@ -2784,6 +2812,223 @@ class ConfigView(discord.ui.LayoutView):
         ]
 
 
+# ---- descobrir o nome do servidor pelo texto da parceria (pra convite que expirou)
+
+_ROTULO_NOME = re.compile(
+    r"^\s*[-*•>#_\s]*(?:nome(?:\s+do)?(?:\s+(?:servidor|server|sv|comunidade))?|servidor|server|sv|comunidade)"
+    r"\s*[:：=\-–—]\s*(.+)$", re.IGNORECASE)
+_PREFIXO_NOME = re.compile(
+    r"^(?:parcerias?|partner(?:ship)?|divulga[cç][aã]o|servidor|server|sv)\s*(?:com|with|de|do|da)?\s*[:\-–—|]*\s*",
+    re.IGNORECASE)
+_CUSTOM_EMOJI = re.compile(r"<a?:\w+:\d+>")
+_MENCAO = re.compile(r"<(?:@[!&]?|#)\d+>")
+_COD_EMOJI = re.compile(r":[A-Za-z0-9_]{2,}:")
+_GENERICOS = {
+    "parceria", "parcerias", "partner", "partnership", "servidor", "server", "discord", "convite", "invite",
+    "divulgacao", "anuncio", "ad", "ads", "link", "novo", "nova", "oi", "ola", "pv", "dm",
+}
+
+
+def _norm_nome(n: str) -> str:
+    # compara nomes ignorando acento, maiuscula, emoji, espaco e enfeite
+    n = unicodedata.normalize("NFKD", n or "")
+    n = "".join(ch for ch in n if not unicodedata.combining(ch))
+    return "".join(ch for ch in n.casefold() if ch.isalnum())
+
+
+def _nomes_parecidos(a: str, b: str) -> bool:
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if re.sub(r"\D", "", a) != re.sub(r"\D", "", b):
+        return False                    # "Hub 1" e "Hub 2" sao servidores diferentes
+    return min(len(a), len(b)) >= 8 and difflib.SequenceMatcher(None, a, b).ratio() >= 0.93
+
+
+def _limpa_nome(t: str) -> str:
+    t = re.sub(r"\s+", " ", t or "")
+    t = LINK_RE.sub(" ", t)
+    t = _CUSTOM_EMOJI.sub(" ", t)
+    t = _MENCAO.sub(" ", t)
+    t = _COD_EMOJI.sub(" ", t)
+    t = "".join(ch for ch in t if unicodedata.category(ch)[0] not in "SC")   # emoji, simbolos, invisiveis
+    t = re.sub(r"[*_~|`>#\[\]()]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip(" -–—:|.,!?\"'")
+    for _ in range(3):
+        novo = _PREFIXO_NOME.sub("", t).strip(" -–—:|.,!?\"'")
+        if novo == t:
+            break
+        t = novo
+    return t
+
+
+def _nome_do_texto(texto: str):
+    """chuta o nome do servidor pelo texto da parceria: campo 'Nome:', negrito/titulo ou primeira linha curta.
+    devolve None se nao tiver certeza (melhor nao chutar do que barrar servidor errado)"""
+    linhas = [l for l in (texto or "").splitlines() if l.strip() and not l.lstrip().startswith("-#")]
+    candidatos = []   # (texto, max de palavras, estrito)
+    for l in linhas:
+        m = _ROTULO_NOME.match(l)
+        if m:
+            candidatos.append((m.group(1), 8, False))
+            break
+    if not candidatos:
+        for l in linhas:
+            m = re.search(r"\*\*(.+?)\*\*|__(.+?)__", l) or re.match(r"\s*#{1,3}\s+(.+)", l)
+            if m:
+                candidatos.append((next(g for g in m.groups() if g), 8, False))
+                break
+    if not candidatos:
+        for l in linhas:
+            if _norm_nome(_limpa_nome(l)):
+                candidatos.append((l, 4, True))     # primeira linha com texto: so vale se for curtinha e sem cara de frase
+                break
+    for bruto, max_palavras, estrito in candidatos:
+        nome = _limpa_nome(bruto)
+        nn = _norm_nome(nome)
+        if not (len(nn) >= 4 and nn not in _GENERICOS and len(nome) <= 50 and len(nome.split()) <= max_palavras):
+            continue
+        if estrito and any(_norm_nome(w) in _PALAVRAS_DE_FRASE for w in nome.split()):
+            continue
+        return nome
+    return None
+
+
+# palavras que entregam frase de conversa, nao nome de servidor (usado so no palpite da primeira linha)
+_PALAVRAS_DE_FRASE = {
+    "oi", "ola", "opa", "eae", "fala", "bom", "boa", "dia", "tarde", "noite", "tudo", "bem", "gente", "galera",
+    "pessoal", "vim", "vem", "venha", "fazer", "quero", "queria", "gostaria", "vcs", "voce", "voces", "tenho",
+    "meu", "minha", "nosso", "nossa", "sou", "somos", "aqui", "segue", "link", "convite", "entra", "entrem",
+    "parceria", "parcerias", "partner", "ola", "hello", "hi", "hey", "please", "pode", "podemos", "topa",
+}
+
+
+def _barra(tick: int, n: int = 12, bloco: int = 4) -> str:
+    pos = tick % (n + bloco)
+    return "".join("▰" if pos - bloco < i <= pos else "▱" for i in range(n))
+
+
+def _novo_st() -> dict:
+    return {"cancelar": False, "lidas": 0, "links": 0, "novos": 0, "por_nome": 0, "repetidos": 0,
+            "invalidos": 0, "falhas": 0, "inicio": asyncio.get_running_loop().time()}
+
+
+# varredura em andamento por servidor: {guild_id: contadores (ver _novo_st)}
+_VARRENDO: dict = {}
+
+
+async def _varrer_parcerias(bot, guild, canal, painel=None):
+    """le o canal de parcerias inteiro e salva cada servidor no registro.
+    convite valido: descobre o servidor pelo Discord. convite expirado: tenta pelo nome escrito no texto.
+    nao mexe no que ja esta salvo; vale o registro mais antigo de cada servidor"""
+    st = _VARRENDO[guild.id]
+    reg = _parc_guild(guild.id)
+    conhecidos = {str(e.get("codigo", "")).lower() for e in reg.values()}
+    vistos = set()
+    erro, ultimo = None, 0.0
+    try:
+        async for m in canal.history(limit=None, oldest_first=True):
+            if st["cancelar"]:
+                break
+            st["lidas"] += 1
+            texto = m.content or ""
+            for e in m.embeds:
+                texto += f" {e.url or ''} {e.description or ''}"
+            codigos = []
+            for c in INVITE_RE.findall(texto):
+                if c.lower() not in (x.lower() for x in codigos):
+                    codigos.append(c)
+            for code in codigos:
+                lc = code.lower()
+                if lc in vistos:
+                    continue
+                vistos.add(lc)
+                st["links"] += 1
+                if lc in conhecidos:
+                    continue
+                alvo, morto = None, False
+                for tentativa in (1, 2):
+                    try:
+                        convite = await bot.fetch_invite(code, with_counts=False)
+                        alvo = getattr(convite, "guild", None)
+                        morto = alvo is None
+                        break
+                    except discord.NotFound:
+                        morto = True              # expirado ou apagado
+                        break
+                    except discord.HTTPException:
+                        if tentativa == 2:
+                            st["falhas"] += 1
+                        else:
+                            await asyncio.sleep(3)
+                await asyncio.sleep(0.25)
+                credito = re.search(r"enviado por <@!?(\d+)>", m.content or "")
+                autor = int(credito.group(1)) if credito else (0 if m.author.bot else m.author.id)
+                base = {
+                    "codigo": code, "autor": autor, "ts": int(m.created_at.timestamp()), "canal": canal.id,
+                    "msg": m.id, "importado": True, "salvo_em": int(datetime.now().timestamp()),
+                }
+                if alvo is not None:
+                    if alvo.id == guild.id:
+                        continue
+                    gid = str(alvo.id)
+                    if gid in reg:
+                        st["repetidos"] += 1      # mesmo servidor com outro link
+                        continue
+                    reg[gid] = {**base, "nome": getattr(alvo, "name", None) or gid}
+                    st["novos"] += 1
+                elif morto:
+                    # convite morto: tenta descobrir o servidor pelo nome que a pessoa escreveu
+                    nome = _nome_do_texto(m.content or "") if len(codigos) == 1 else None
+                    if not nome:
+                        st["invalidos"] += 1
+                        continue
+                    nn = _norm_nome(nome)
+                    if any(_nomes_parecidos(nn, _norm_nome(e.get("nome", ""))) for e in reg.values()):
+                        st["repetidos"] += 1      # esse servidor ja esta no registro
+                        continue
+                    reg[f"nome:{nn}"] = {**base, "nome": nome, "por_nome": True}
+                    st["por_nome"] += 1
+                else:
+                    continue                       # discord nao respondeu (ja contado em falhas)
+                if (st["novos"] + st["por_nome"]) % 25 == 0:
+                    _parc_save()
+            agora = asyncio.get_running_loop().time()
+            if painel is not None and agora - ultimo > 8:
+                ultimo = agora
+                await painel.refresh_sent()
+    except discord.Forbidden:
+        erro = "O bot não consegue ler o histórico do canal (falta **Ver histórico de mensagens**)."
+    except Exception:
+        log.exception("erro na varredura de parcerias")
+        erro = "Deu erro no meio da varredura. O que já foi lido ficou salvo."
+    finally:
+        cancelado = st["cancelar"]
+        _parc_save()
+        _VARRENDO.pop(guild.id, None)
+
+    linhas = [
+        f"**{st['lidas']}** mensagens lidas · **{st['links']}** convites diferentes",
+        f"**{st['novos']}** servidores salvos pelo convite",
+        f"**{st['por_nome']}** servidores salvos pelo nome escrito no texto (convite expirado)",
+        f"**{st['repetidos']}** já estavam no registro",
+        f"**{st['invalidos']}** convites expirados sem nome claro no texto (não dá pra identificar)",
+    ]
+    if st["falhas"]:
+        linhas.append(f"**{st['falhas']}** convites que o Discord não respondeu")
+    if erro:
+        linhas.append(f"\n⚠️ {erro}")
+    titulo = "⏹️ Varredura parada" if cancelado else ("⚠️ Varredura incompleta" if erro else "✅ Varredura concluída")
+    onde = painel.sent.channel if painel is not None and painel.sent is not None else canal
+    try:
+        await onde.send(view=Card(titulo, "\n".join(linhas)), allowed_mentions=NO_MENTIONS)
+    except discord.HTTPException:
+        pass
+    if painel is not None:
+        await painel.refresh_sent()
+
+
 class ParceriaLiberarModal(discord.ui.Modal):
     def __init__(self, painel):
         super().__init__(title="Liberar servidor")
@@ -2799,10 +3044,13 @@ class ParceriaLiberarModal(discord.ui.Modal):
         txt = self.campo.value.strip()
         m = INVITE_RE.search(txt)
         cod = (m.group(1) if m else txt).strip("/ ").lower()
+        nn = _norm_nome(txt)
         reg = _parc_guild(self.painel.guild.id)
-        achado = next((k for k, e in reg.items()
-                       if k == cod or str(e.get("codigo", "")).lower() == cod
-                       or str(e.get("nome", "")).lower() == txt.lower()), None)
+        achado = None
+        if cod:
+            achado = next((k for k, e in reg.items()
+                           if k == cod or str(e.get("codigo", "")).lower() == cod
+                           or (nn and _norm_nome(e.get("nome") or "") == nn)), None)
         if achado is None:
             await self.painel.update(interaction, "⚠️ Não achei esse servidor no registro")
             return
@@ -2822,9 +3070,10 @@ def _cargos_txt(ids) -> str:
 # painel minimalista da postagem automatica de parcerias (mesma cara do ,ptconfig)
 class ParceriaView(discord.ui.LayoutView):
     def __init__(self, author_id: int, guild: discord.Guild):
-        super().__init__(timeout=600)
+        super().__init__(timeout=1800)
         self.author_id, self.guild = author_id, guild
         self.page, self.notice, self.sent = "home", "", None
+        self.tick, self._live = 0, None
         self.render()
 
     @classmethod
@@ -2869,6 +3118,44 @@ class ParceriaView(discord.ui.LayoutView):
     async def go(self, interaction, page):
         self.page = page
         await self.update(interaction)
+        if page == "ao_vivo":
+            self._start_live()
+
+    def _start_live(self):
+        if self._live is None or self._live.done():
+            self._live = asyncio.create_task(self._loop_live())
+
+    async def _loop_live(self):
+        # a tela "ao vivo" se redesenha sozinha enquanto estiver aberta
+        ultimo = None
+        try:
+            while not self.is_finished() and self.page == "ao_vivo" and self.sent is not None:
+                rodando = self.guild.id in _VARRENDO
+                await asyncio.sleep(3 if rodando else 6)
+                if self.is_finished() or self.page != "ao_vivo":
+                    break
+                reg = _parc_guild(self.guild.id)
+                sig = (len(reg), max((e.get("salvo_em", 0) for e in reg.values()), default=0), rodando)
+                if not rodando and sig == ultimo:
+                    continue                       # nada mudou: nao gasta edicao
+                ultimo = sig
+                self.tick += 1
+                self.render()
+                await self.sent.edit(view=self)
+        except discord.HTTPException:
+            pass
+        except Exception:
+            log.exception("erro na tela ao vivo")
+
+    async def refresh_sent(self):
+        # redesenha a tela sozinha (usado pela varredura em segundo plano)
+        if self.sent is None or self.is_finished() or self.page != "registro":
+            return
+        self.render()
+        try:
+            await self.sent.edit(view=self)
+        except discord.HTTPException:
+            pass
 
     def render(self):
         cfg = get_cfg(self.guild.id)
@@ -2896,6 +3183,38 @@ class ParceriaView(discord.ui.LayoutView):
             atual = _dig(get_cfg(self.guild.id), path)
             set_path(self.guild.id, path, not atual)
             await self.update(interaction, "✅ Salvo")
+        return h
+
+    async def _h_varrer(self, interaction, item):
+        g = self.guild
+        p = get_cfg(g.id)["parceria"]
+        canal = g.get_channel(p.get("canal") or 0)
+        if not isinstance(canal, discord.TextChannel):
+            await self.update(interaction, "⚠️ Escolha o canal das parcerias antes de varrer")
+            return
+        if g.id in _VARRENDO:
+            await self.update(interaction, "⏳ Já tem uma varredura rodando")
+            return
+        st = _novo_st()
+        _VARRENDO[g.id] = st
+        st["task"] = asyncio.create_task(_varrer_parcerias(interaction.client, g, canal, self))
+        await self.update(interaction, "🔎 Varredura iniciada · aviso aqui quando terminar")
+
+    async def _h_parar(self, interaction, item):
+        st = _VARRENDO.get(self.guild.id)
+        if st:
+            st["cancelar"] = True
+        await self.update(interaction, "⏹️ Parando · o que já foi lido fica salvo")
+
+    def _ids_modal(self, titulo, path, unico=False):
+        # botao que abre a janela pra digitar id, @ ou nome do(s) cargo(s)
+        async def h(interaction, item):
+            atual = _dig(get_cfg(self.guild.id), path)
+
+            def salvar(ids):
+                set_path(self.guild.id, path, ids[0] if unico else ids)
+            await interaction.response.send_modal(
+                RoleIdsModal(self, titulo, salvar, atual, maximo=1 if unico else None))
         return h
 
     def _set(self, path, valor, aviso="✅ Salvo"):
@@ -2942,6 +3261,7 @@ class ParceriaView(discord.ui.LayoutView):
             discord.ui.ActionRow(
                 self._btn("Links", self._goto("links"), emoji="🔗"),
                 self._btn("Registro", self._goto("registro"), emoji="🗂️"),
+                self._btn("Ao vivo", self._goto("ao_vivo"), emoji="📡"),
             ),
         ]
 
@@ -2980,7 +3300,11 @@ class ParceriaView(discord.ui.LayoutView):
             sep(),
             _sec("🔔 Cargo do ping", "agora: " + ping_txt),
             discord.ui.ActionRow(_RoleSel(cargo, placeholder="Escolher o cargo", min_values=1, max_values=1)),
-            discord.ui.ActionRow(self._btn("Tirar ping", self._set(("parceria", "ping_cargo"), None, "✅ Removido"))),
+            discord.ui.ActionRow(
+                self._btn("Digitar ID ou @", self._ids_modal("Cargo do ping", ("parceria", "ping_cargo"), unico=True),
+                          discord.ButtonStyle.primary, "🔢"),
+                self._btn("Tirar ping", self._set(("parceria", "ping_cargo"), None, "✅ Removido")),
+            ),
             sep(),
             _sec("🎟️ Ticket que posta sozinho", "só o dono do ticket dessa categoria, e só convites"),
             discord.ui.ActionRow(_Sel(tipo, placeholder="Escolher a categoria", options=opcoes)),
@@ -3023,17 +3347,24 @@ class ParceriaView(discord.ui.LayoutView):
             sep(),
             _sec("📋 Cargos escolhidos", f"valem no modo \"só os escolhidos\": {_cargos_txt(p.get('cargos_lista'))}"),
             discord.ui.ActionRow(_RoleSel(lista_sel, placeholder="Escolher cargos", min_values=1, max_values=25)),
-            discord.ui.ActionRow(self._btn("Limpar lista", self._set(("parceria", "cargos_lista"), [], "✅ Lista limpa"))),
+            discord.ui.ActionRow(
+                self._btn("Digitar IDs ou @", self._ids_modal("Cargos tirados do texto", ("parceria", "cargos_lista")),
+                          discord.ButtonStyle.primary, "🔢"),
+                self._btn("Limpar lista", self._set(("parceria", "cargos_lista"), [], "✅ Lista limpa")),
+            ),
             sep(),
             _sec("🧾 Crédito", "linha pequena “enviado por @pessoa” no fim do post"),
             discord.ui.ActionRow(self._btn(
                 "Mostrar: sim" if p.get("creditar", True) else "Mostrar: não",
                 self._flip(("parceria", "creditar")))),
             sep(),
-            _sec("🔁 Servidor repetido", "não aceita o mesmo servidor duas vezes"),
-            discord.ui.ActionRow(self._btn(
-                "Bloquear: sim" if p.get("bloquear_duplicado", True) else "Bloquear: não",
-                self._flip(("parceria", "bloquear_duplicado")))),
+            _sec("🔁 Servidor repetido", "barra o mesmo servidor · conferir nome pega os de convite antigo que expirou"),
+            discord.ui.ActionRow(
+                self._btn("Bloquear: sim" if p.get("bloquear_duplicado", True) else "Bloquear: não",
+                          self._flip(("parceria", "bloquear_duplicado"))),
+                self._btn("Conferir nome: sim" if p.get("conferir_nome", True) else "Conferir nome: não",
+                          self._flip(("parceria", "conferir_nome"))),
+            ),
             sep(),
             self._voltar(),
         ]
@@ -3070,25 +3401,88 @@ class ParceriaView(discord.ui.LayoutView):
         ]
 
     def _page_registro(self, cfg):
-        reg = _parc_guild(self.guild.id)
+        g = self.guild
+        reg = _parc_guild(g.id)
+        rodando = _VARRENDO.get(g.id)
         itens = sorted(reg.items(), key=lambda kv: kv[1].get("ts", 0), reverse=True)[:8]
         linhas = "\n".join(
-            f"**{e.get('nome', k)}**  `{k}`  ·  <t:{e.get('ts', 0)}:d>  ·  <@{e.get('autor', 0)}>"
+            ("🔤 " if e.get("por_nome") else "")
+            + f"**{e.get('nome', k)}**"
+            + ("  ·  pelo nome" if e.get("por_nome") else f"  `{k}`")
+            + f"  ·  <t:{e.get('ts', 0)}:d>"
+            + (f"  ·  <@{e['autor']}>" if e.get("autor") else "")
             for k, e in itens
         ) or "*nenhuma parceria registrada*"
 
         async def liberar(interaction, item):
             await interaction.response.send_modal(ParceriaLiberarModal(self))
 
+        status = ""
+        if rodando:
+            status = (f"🔎 varrendo o canal… **{rodando['lidas']}** mensagens lidas · "
+                      f"**{rodando['novos'] + rodando['por_nome']}** servidores novos\n")
         return [
             discord.ui.TextDisplay(
                 f"## 🗂️ Registro ({len(reg)})\n-# servidores já postados · apagar o post também libera o servidor"),
             sep(),
-            discord.ui.TextDisplay(linhas + ("\n-# mostrando os 8 mais recentes" if len(reg) > 8 else "")),
+            discord.ui.TextDisplay(status + linhas + ("\n-# mostrando os 8 mais recentes" if len(reg) > 8 else "")),
+            sep(),
+            _sec("🔎 Varrer o canal de parcerias",
+                 "lê o canal inteiro e salva os servidores que ainda não estão no registro · leva um tempo se o canal for grande"),
+            discord.ui.ActionRow(
+                self._btn("Parar varredura", self._h_parar, discord.ButtonStyle.danger, "⏹️") if rodando
+                else self._btn("Varrer canal", self._h_varrer, discord.ButtonStyle.primary, "🔎"),
+                self._btn("Ao vivo", self._goto("ao_vivo"), emoji="📡"),
+            ),
             sep(),
             discord.ui.ActionRow(
                 self._btn("Liberar servidor", liberar, emoji="🔓"),
                 self._btn("Limpar tudo", self._goto("limpar"), discord.ButtonStyle.danger, "🗑️", disabled=not reg),
+            ),
+            self._voltar(),
+        ]
+
+    def _page_ao_vivo(self, cfg):
+        g = self.guild
+        reg = _parc_guild(g.id)
+        st = _VARRENDO.get(g.id)
+        spin = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[self.tick % 10]
+        if st:
+            dec = int(asyncio.get_running_loop().time() - st.get("inicio", 0))
+            topo = (
+                f"{spin} **varrendo o canal**\n"
+                f"`{_barra(self.tick)}`\n"
+                f"**{st['lidas']}** mensagens · **{st['links']}** convites · **{st['novos']}** salvos · "
+                f"**{st['por_nome']}** pelo nome · **{st['invalidos']}** sem identificar\n"
+                f"-# rodando há {dec // 60}:{dec % 60:02d}"
+            )
+        else:
+            topo = "⚪ **sem varredura**\n-# novas parcerias aparecem aqui assim que são salvas"
+        n_nome = sum(1 for e in reg.values() if e.get("por_nome"))
+        total = (f"**{len(reg)}** servidores no registro  ·  **{len(reg) - n_nome}** pelo convite  ·  "
+                 f"**{n_nome}** pelo nome")
+        agora = int(datetime.now().timestamp())
+        recentes = sorted(reg.values(), key=lambda e: e.get("salvo_em", e.get("ts", 0)), reverse=True)[:8]
+        feed = "\n".join(
+            ("✨" if agora - e.get("salvo_em", 0) < 15 else "▫️")
+            + f" **{e.get('nome', '?')}**" + ("  🔤" if e.get("por_nome") else "")
+            + f"  ·  <t:{e.get('salvo_em', e.get('ts', 0))}:R>"
+            for e in recentes
+        ) or "*nada salvo ainda*"
+        return [
+            discord.ui.TextDisplay("## 📡 Ao vivo\n-# atualiza sozinho enquanto esta tela estiver aberta"),
+            sep(),
+            discord.ui.TextDisplay(topo),
+            sep(),
+            discord.ui.TextDisplay(total),
+            sep(),
+            _sec("🆕 Últimos salvos", "✨ = salvo agora há pouco  ·  🔤 = identificado pelo nome"),
+            discord.ui.TextDisplay(feed),
+            sep(),
+            discord.ui.ActionRow(
+                self._btn("Parar varredura", self._h_parar, discord.ButtonStyle.danger, "⏹️") if st
+                else self._btn("Varrer canal", self._h_varrer, discord.ButtonStyle.primary, "🔎"),
+                self._btn("Registro", self._goto("registro"), emoji="🗂️"),
             ),
             self._voltar(),
         ]
@@ -3294,6 +3688,19 @@ class Tickets(commands.Cog):
                                    f"**{nome}** foi publicada em <t:{e.get('ts', 0)}:D>. "
                                    "Cada servidor só pode ter uma parceria postada.")
 
+            if p.get("bloquear_duplicado", True) and p.get("conferir_nome", True):
+                nn = _norm_nome(nome)
+                achou = next((e for e in reg.values()
+                              if e.get("por_nome") and _nomes_parecidos(nn, _norm_nome(e.get("nome", "")))), None)
+                if achou:
+                    onde = ""
+                    if achou.get("canal") and achou.get("msg"):
+                        onde = f" {'https://discord.com/channels/%s/%s/%s' % (guild.id, achou['canal'], achou['msg'])}"
+                    return await aviso("Esse servidor parece já ter parceria",
+                                       f"**{nome}** tem o mesmo nome de **{achou.get('nome')}**, "
+                                       f"já postado em <t:{achou.get('ts', 0)}:D>.{onde}\n"
+                                       "Se for outro servidor, chame a equipe pra liberar.")
+
             # monta o texto: limpa o que o painel mandou tirar, ping do cargo e credito
             corpo = _limpar_parceria(message.content, p)
             topo = f"<@&{p['ping_cargo']}>" if p.get("ping_cargo") else ""
@@ -3330,6 +3737,7 @@ class Tickets(commands.Cog):
             reg[str(alvo.id)] = {
                 "nome": nome, "codigo": codigos[0], "autor": autor.id,
                 "ts": int(datetime.now().timestamp()), "canal": destino.id, "msg": post.id,
+                "salvo_em": int(datetime.now().timestamp()),
             }
             _parc_save()
 
