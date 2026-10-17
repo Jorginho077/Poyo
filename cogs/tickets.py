@@ -1,6 +1,7 @@
 # cog de tickets com components v2 - totalmente configuravel por servidor
 import os
 import io
+import secrets
 import re
 import copy
 import json
@@ -173,7 +174,15 @@ DEFAULTS = {
         "creditar": True,          # linha "enviado por @pessoa" no fim
         "bloquear_duplicado": True,  # nao aceita o mesmo servidor duas vezes
         "conferir_nome": True,     # tambem barra por nome parecido (pra convites antigos que expiraram)
+        "renovar_dias": 5,         # dias ate o mesmo servidor poder postar de novo (0 = so a equipe libera)
         "confirmar": False,        # True = mostra o preview no ticket e so posta depois do ok do dono
+    },
+    "ranking": {
+        "ativo": False,            # liga a pontuacao dos atendimentos (precisa de canal pro placar)
+        "canal": None,             # canal onde o placar do mes fica (a mensagem se atualiza sozinha)
+        "avaliacao": True,         # pede nota de 1 a 5 estrelas pro dono do ticket, na DM, ao encerrar
+        "pontos_ticket": 10,       # pontos por ticket atendido e encerrado
+        "pontos_estrela": 2,       # pontos extras por estrela recebida (nota 5 = 10 extras)
     },
     "bloquear_links": True,    # True = so as categorias de links_tipos podem mandar link (equipe sempre pode)
     "links_tipos": ["parceria"],  # chaves das categorias que aceitam link (o bot reposta se outro bot cortar)
@@ -1793,6 +1802,22 @@ async def close_ticket(channel, closer):
                 except discord.HTTPException:
                     pass  # dm fechada
 
+        # ranking: conta o atendimento e pede a nota pro dono (na DM, porque o ticket vai ser apagado)
+        try:
+            rid = _rank_registrar(channel.guild.id, data, cfg)
+            if rid:
+                if cfg["ranking"].get("avaliacao") and not data.get("rank_dm"):
+                    dono_m = channel.guild.get_member(data["owner"])
+                    if dono_m is not None:
+                        try:
+                            await dono_m.send(view=build_rate_view(rid, data["claimed"], channel.guild.name))
+                            data["rank_dm"] = True
+                        except discord.HTTPException:
+                            pass  # dm fechada: o ponto do ticket conta igual, so fica sem nota
+                await atualizar_ranking(channel.guild)
+        except Exception:
+            log.exception("erro ao registrar o atendimento no ranking")
+
         wait = f"**{delay} segundos**" if delay else "instantes"
         try:
             await channel.send(
@@ -1820,7 +1845,7 @@ async def close_ticket(channel, closer):
 
 # botoes continuam dps de reiniciar
 def register_views(client):
-    client.add_dynamic_items(NewTicketButton)
+    client.add_dynamic_items(NewTicketButton, RateButton)
     # menu do painel e menu de dentro do ticket
     painel = discord.ui.LayoutView(timeout=None)
     painel.add_item(discord.ui.ActionRow(PanelSelect()))
@@ -3088,6 +3113,13 @@ class ParceriaLiberarModal(discord.ui.Modal):
         await _erro_card(interaction, "Algo deu errado", "Tente de novo.")
 
 
+def _renov_txt(p) -> str:
+    dias = int(p.get("renovar_dias", 5) or 0)
+    if not p.get("bloquear_duplicado", True):
+        return "sem bloqueio"
+    return "só a equipe libera" if dias <= 0 else f"após {dias} dia{'s' if dias != 1 else ''}"
+
+
 def _cargos_txt(ids) -> str:
     return " ".join(f"<@&{i}>" for i in ids) if ids else "*nenhum*"
 
@@ -3275,6 +3307,7 @@ class ParceriaView(discord.ui.LayoutView):
                 f"**Ping**  {ping}\n"
                 f"**Ticket**  {_ico(c)}{c['label']}\n"
                 f"**Confirmação**  {'🟢 pede ok antes de postar' if p.get('confirmar') else '⚪ posta direto'}\n"
+                f"**Renovação**  {_renov_txt(p)}\n"
                 f"**Registradas**  {n}"
             ),
             sep(),
@@ -3282,7 +3315,7 @@ class ParceriaView(discord.ui.LayoutView):
                 self._btn("Desligar" if ativo else "Ligar", ligar,
                           discord.ButtonStyle.secondary if ativo else discord.ButtonStyle.success),
                 self._btn("Destino", self._goto("destino"), emoji="📍"),
-                self._btn("Limpeza", self._goto("limpeza"), emoji="🧹"),
+                self._btn("Renovação", self._goto("renovacao"), emoji=_poyo_ui("renovar", "🔁")),
                 self._btn("Confirmação: sim" if p.get("confirmar") else "Confirmação: não",
                           self._flip(("parceria", "confirmar")),
                           discord.ButtonStyle.success if p.get("confirmar") else discord.ButtonStyle.secondary,
@@ -3342,53 +3375,32 @@ class ParceriaView(discord.ui.LayoutView):
             self._voltar(),
         ]
 
-    def _page_limpeza(self, cfg):
+    def _page_renovacao(self, cfg):
         p = cfg["parceria"]
         g = self.guild
-        modo = p.get("cargos_modo", "todos")
+        dias = int(p.get("renovar_dias", 5) or 0)
 
-        async def modo_sel(interaction, item):
-            set_path(g.id, ("parceria", "cargos_modo"), item.values[0])
+        async def dias_sel(interaction, item):
+            set_path(g.id, ("parceria", "renovar_dias"), int(item.values[0]))
             await self.update(interaction, "✅ Salvo")
 
-        async def lista_sel(interaction, item):
-            set_path(g.id, ("parceria", "cargos_lista"), [r.id for r in item.values])
-            await self.update(interaction, "✅ Salvo")
-
-        sn = lambda v: "sim" if v else "não"
+        valores = sorted({0, 1, 2, 3, 5, 7, 10, 14, 30, dias})
         opcoes = [
-            discord.SelectOption(label="Todos os cargos", value="todos", default=modo == "todos",
-                                 description="nenhuma menção de cargo vai pro post"),
-            discord.SelectOption(label="Só os escolhidos", value="lista", default=modo == "lista",
-                                 description="tira apenas os cargos da lista abaixo"),
-            discord.SelectOption(label="Nenhum", value="nenhum", default=modo == "nenhum",
-                                 description="mantém o texto (sem ping)"),
+            discord.SelectOption(
+                label="Nunca (só a equipe libera)" if d == 0 else f"{d} dia{'s' if d != 1 else ''}",
+                value=str(d), default=(d == dias),
+                emoji=_poyo_ui("renovar", "🔁"),
+            )
+            for d in valores
         ]
         return [
-            discord.ui.TextDisplay("## 🧹 Limpeza\n-# o que o bot ajeita no texto antes de postar · ninguém é pingado além do cargo do ping"),
+            discord.ui.TextDisplay(
+                f"## {_poyo('renovar', '🔁')} Renovação\n-# quanto tempo um servidor espera pra postar parceria de novo"),
             sep(),
-            _sec("📣 @everyone e @here", f"tirar do texto: {sn(p.get('remover_everyone', True))}"),
-            discord.ui.ActionRow(self._btn(
-                "Remover: sim" if p.get("remover_everyone", True) else "Remover: não",
-                self._flip(("parceria", "remover_everyone")))),
+            _sec("⏳ Prazo", f"agora: {_renov_txt(p)}  ·  conta do dia do post e vale pros servidores importados também"),
+            discord.ui.ActionRow(_Sel(dias_sel, placeholder="Escolher o prazo", options=opcoes)),
             sep(),
-            _sec("🏷️ Cargos no texto", "tirar: " + {"todos": "todos", "lista": "só os escolhidos", "nenhum": "nenhum"}[modo]),
-            discord.ui.ActionRow(_Sel(modo_sel, placeholder="Escolher o modo", options=opcoes)),
-            sep(),
-            _sec("📋 Cargos escolhidos", f"valem no modo \"só os escolhidos\": {_cargos_txt(p.get('cargos_lista'))}"),
-            discord.ui.ActionRow(_RoleSel(lista_sel, placeholder="Escolher cargos", min_values=1, max_values=25)),
-            discord.ui.ActionRow(
-                self._btn("Digitar IDs ou @", self._ids_modal("Cargos tirados do texto", ("parceria", "cargos_lista")),
-                          discord.ButtonStyle.primary, "🔢"),
-                self._btn("Limpar lista", self._set(("parceria", "cargos_lista"), [], "✅ Lista limpa")),
-            ),
-            sep(),
-            _sec("🧾 Crédito", "linha pequena “enviado por @pessoa” no fim do post"),
-            discord.ui.ActionRow(self._btn(
-                "Mostrar: sim" if p.get("creditar", True) else "Mostrar: não",
-                self._flip(("parceria", "creditar")))),
-            sep(),
-            _sec("🔁 Servidor repetido", "barra o mesmo servidor · conferir nome pega os de convite antigo que expirou"),
+            _sec("🔁 Servidor repetido", "barra o servidor até o prazo passar · conferir nome pega os de convite antigo que expirou"),
             discord.ui.ActionRow(
                 self._btn("Bloquear: sim" if p.get("bloquear_duplicado", True) else "Bloquear: não",
                           self._flip(("parceria", "bloquear_duplicado"))),
@@ -3467,7 +3479,6 @@ class ParceriaView(discord.ui.LayoutView):
             sep(),
             discord.ui.ActionRow(
                 self._btn("Liberar servidor", liberar, emoji="🔓"),
-                self._btn("Limpar tudo", self._goto("limpar"), discord.ButtonStyle.danger, "🗑️", disabled=not reg),
             ),
             self._voltar(),
         ]
@@ -3515,22 +3526,6 @@ class ParceriaView(discord.ui.LayoutView):
                 self._btn("Registro", self._goto("registro"), emoji="🗂️"),
             ),
             self._voltar(),
-        ]
-
-    def _page_limpar(self, cfg):
-        async def apagar(interaction, item):
-            _parc_guild(self.guild.id).clear()
-            _parc_save()
-            self.page = "registro"
-            await self.update(interaction, "✅ Registro limpo")
-
-        return [
-            discord.ui.TextDisplay("## 🗑️ Limpar o registro?\n"
-                                   "Todos os servidores poderão postar parceria de novo. Os posts já feitos continuam no canal."),
-            discord.ui.ActionRow(
-                self._btn("Sim, limpar", apagar, discord.ButtonStyle.danger, "🗑️"),
-                self._btn("Cancelar", self._goto("registro")),
-            ),
         ]
 
 
@@ -3610,6 +3605,396 @@ class ConfirmarParceriaView(discord.ui.LayoutView):
                                                "Mande o convite de novo se ainda quiser postar."))
             except discord.HTTPException:
                 pass
+
+
+# ---------------------------------------------------------------- ranking da equipe
+
+RANK_FILE = Path(os.getenv("TICKETS_RANKING_FILE", "tickets_ranking.json"))
+_rank = _read_json(RANK_FILE)
+if not isinstance(_rank.get("guilds"), dict):
+    _rank["guilds"] = {}
+_rank_locks: dict = {}
+MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho",
+         "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
+
+
+def _rank_save():
+    _write_json(RANK_FILE, _rank)
+
+
+def _rank_guild(guild_id) -> dict:
+    g = _rank["guilds"].get(str(guild_id))
+    if not isinstance(g, dict):
+        g = _rank["guilds"][str(guild_id)] = {}
+    if not isinstance(g.get("registros"), list):
+        g["registros"] = []
+    return g
+
+
+# emojis poyo_* do ranking: se existirem num servidor do bot eles vencem, senao cai no unicode
+#   poyo_trofeu · poyo_rank_1 · poyo_rank_2 · poyo_rank_3 · poyo_estrela · poyo_renovar
+def _poyo(nome: str, fallback: str) -> str:
+    return AUTO_EMOJIS.get(f"poyo_{nome}") or fallback
+
+
+def _poyo_ui(nome: str, fallback: str):
+    # versao pra botao e menu (so aceita emoji de verdade)
+    custom = AUTO_EMOJIS.get(f"poyo_{nome}")
+    return (_ui_emoji(custom) if custom else None) or fallback
+
+
+def _rank_registrar(guild_id, data, cfg):
+    """grava o atendimento no ranking e devolve o id do registro (None se nao conta)"""
+    if not cfg["ranking"].get("ativo"):
+        return None
+    if data.get("rank_id"):
+        return data["rank_id"]          # fechamento repetido: nao conta duas vezes
+    staff, dono = data.get("claimed"), data.get("owner")
+    if not staff or staff == dono:      # sem atendente, ou atendeu o proprio ticket: nao pontua
+        return None
+    g = _rank_guild(guild_id)
+    rid = secrets.token_hex(5)
+    agora = int(datetime.now().timestamp())
+    g["registros"].append({
+        "id": rid, "staff": staff, "owner": dono,
+        "tipo": data.get("tipo", "outros"), "ts": agora, "nota": None,
+    })
+    corte = agora - 400 * 86400         # guarda mais de um ano, o resto sai
+    g["registros"] = [x for x in g["registros"] if x.get("ts", 0) >= corte]
+    data["rank_id"] = rid
+    _save()
+    _rank_save()
+    return rid
+
+
+def _rank_achar(rid):
+    for gid, g in _rank["guilds"].items():
+        if isinstance(g, dict):
+            for x in g.get("registros", []):
+                if x.get("id") == rid:
+                    return int(gid), x
+    return None
+
+
+def _rank_periodo(meses_atras: int = 0):
+    # (inicio, fim, "Outubro/2026") do mes pedido, no fuso do bot
+    agora = datetime.now(TZ)
+    m = agora.month - 1 - meses_atras
+    ano, mes = agora.year + m // 12, m % 12 + 1
+    ini = datetime(ano, mes, 1, tzinfo=TZ)
+    fim = datetime(ano + (1 if mes == 12 else 0), 1 if mes == 12 else mes + 1, 1, tzinfo=TZ)
+    return int(ini.timestamp()), int(fim.timestamp()), f"{MESES[mes - 1].capitalize()}/{ano}"
+
+
+def _rank_tabela(guild_id, cfg, ini, fim) -> list:
+    r = cfg["ranking"]
+    pt, pe = int(r.get("pontos_ticket", 10)), int(r.get("pontos_estrela", 2))
+    tab = {}
+    for x in _rank_guild(guild_id)["registros"]:
+        if not ini <= x.get("ts", 0) < fim:
+            continue
+        t = tab.setdefault(x["staff"], {"pts": 0, "tickets": 0, "soma": 0, "notas": 0})
+        t["tickets"] += 1
+        t["pts"] += pt
+        n = x.get("nota")
+        if isinstance(n, int) and 1 <= n <= 5:
+            t["pts"] += n * pe
+            t["soma"] += n
+            t["notas"] += 1
+    return sorted(tab.items(), key=lambda kv: (-kv[1]["pts"], -kv[1]["tickets"], kv[0]))
+
+
+def build_ranking_view(guild, cfg, meses_atras: int = 0):
+    ini, fim, mes = _rank_periodo(meses_atras)
+    tabela = _rank_tabela(guild.id, cfg, ini, fim)
+    medalhas = [_poyo("rank_1", "🥇"), _poyo("rank_2", "🥈"), _poyo("rank_3", "🥉")]
+    estrela = _poyo("estrela", "⭐")
+    linhas = []
+    for i, (uid, t) in enumerate(tabela[:10]):
+        pos = medalhas[i] if i < 3 else f"`{i + 1}º`"
+        media = f"  ·  {estrela} {t['soma'] / t['notas']:.1f}" if t["notas"] else ""
+        linhas.append(
+            f"{pos} <@{uid}>  **{t['pts']} pts**  ·  {t['tickets']} ticket{'s' if t['tickets'] != 1 else ''}{media}")
+    corpo = "\n".join(linhas) or "*ninguém atendeu ticket neste mês ainda*"
+    r = cfg["ranking"]
+    regra = f"cada ticket atendido vale {r.get('pontos_ticket', 10)} pts"
+    if r.get("avaliacao") and r.get("pontos_estrela"):
+        regra += f" · cada estrela recebida soma +{r['pontos_estrela']}"
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(discord.ui.Container(
+        discord.ui.TextDisplay(f"## {_poyo('trofeu', '🏆')} Ranking da equipe\n-# {mes}"),
+        discord.ui.Separator(),
+        discord.ui.TextDisplay(corpo),
+        discord.ui.Separator(),
+        discord.ui.TextDisplay(f"-# {regra}\n-# atualizado <t:{int(datetime.now().timestamp())}:R>"),
+    ))
+    return view
+
+
+async def atualizar_ranking(guild) -> bool:
+    """reedita (ou posta) o placar do mes no canal configurado"""
+    cfg = get_cfg(guild.id)
+    r = cfg["ranking"]
+    if not r.get("ativo") or not r.get("canal"):
+        return False
+    canal = guild.get_channel(r["canal"])
+    if not isinstance(canal, discord.TextChannel):
+        return False
+    lock = _rank_locks.setdefault(guild.id, asyncio.Lock())
+    async with lock:
+        g = _rank_guild(guild.id)
+        view = build_ranking_view(guild, cfg)
+        ref = g.get("painel")
+        if isinstance(ref, list) and len(ref) == 2 and ref[0] == canal.id:
+            try:
+                await canal.get_partial_message(ref[1]).edit(view=view, allowed_mentions=NO_MENTIONS)
+                return True
+            except discord.NotFound:
+                pass                    # placar apagado: posta outro
+            except discord.HTTPException as e:
+                log.warning("nao consegui atualizar o placar do ranking: %s", e)
+                return False
+        try:
+            msg = await canal.send(view=view, allowed_mentions=NO_MENTIONS)
+        except discord.HTTPException as e:
+            log.warning("nao consegui postar o placar do ranking em #%s: %s", canal.name, e)
+            return False
+        g["painel"] = [canal.id, msg.id]
+        _rank_save()
+        return True
+
+
+# nota de 1 a 5 estrelas: o id do botao leva o registro e a nota, entao vale depois de reiniciar
+class RateButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"tk:rate:(?P<rid>[a-z0-9]+):(?P<n>[1-5])",
+):
+    def __init__(self, rid: str, n: int):
+        super().__init__(
+            discord.ui.Button(
+                label=str(n), style=discord.ButtonStyle.secondary,
+                emoji=_poyo_ui("estrela", "⭐"), custom_id=f"tk:rate:{rid}:{n}",
+            )
+        )
+        self.rid, self.n = rid, n
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match, /):
+        return cls(match["rid"], int(match["n"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        achado = _rank_achar(self.rid)
+        if achado is None:
+            await interaction.response.edit_message(
+                view=Card("Avaliação indisponível", "Esse atendimento não está mais no ranking."))
+            return
+        gid, rec = achado
+        if interaction.user.id != rec.get("owner"):
+            await _erro_card(interaction, "Essa avaliação não é sua", "Só quem abriu o ticket pode avaliar.")
+            return
+        if rec.get("nota"):
+            await interaction.response.edit_message(view=Card("Você já avaliou", "Obrigado!"))
+            return
+        rec["nota"] = self.n
+        _rank_save()
+        estrelas = _poyo("estrela", "⭐") * self.n
+        await interaction.response.edit_message(
+            view=Card("Obrigado pela avaliação", f"{estrelas}\nSua nota ajuda a equipe a melhorar."))
+        guild = interaction.client.get_guild(gid)
+        if guild is not None:
+            await atualizar_ranking(guild)
+
+
+def build_rate_view(rid, staff_id, guild_name):
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(discord.ui.Container(
+        discord.ui.TextDisplay(
+            f"### {_poyo('estrela', '⭐')} Como foi o seu atendimento?\n"
+            f"Em **{guild_name}**, quem cuidou de você foi <@{staff_id}>.\n"
+            "-# toque numa nota de 1 a 5"),
+        discord.ui.ActionRow(*(RateButton(rid, n) for n in range(1, 6))),
+    ))
+    return view
+
+
+class RankPontosModal(discord.ui.Modal):
+    def __init__(self, painel):
+        super().__init__(title="Pontuação do ranking")
+        self.painel = painel
+        r = get_cfg(painel.guild.id)["ranking"]
+        self.pt = discord.ui.TextInput(
+            label="Pontos por ticket atendido (0 a 1000)", default=str(r["pontos_ticket"]), max_length=4)
+        self.pe = discord.ui.TextInput(
+            label="Pontos extras por estrela (0 a 100)", default=str(r["pontos_estrela"]), max_length=3)
+        self.add_item(self.pt)
+        self.add_item(self.pe)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            pt, pe = int(self.pt.value.strip()), int(self.pe.value.strip())
+        except ValueError:
+            await _erro_card(interaction, "Nada foi salvo", "Mande só números inteiros.")
+            return
+        if not (0 <= pt <= 1000 and 0 <= pe <= 100):
+            await _erro_card(interaction, "Nada foi salvo", "Use 0 a 1000 nos tickets e 0 a 100 nas estrelas.")
+            return
+        set_path(self.painel.guild.id, ("ranking", "pontos_ticket"), pt)
+        set_path(self.painel.guild.id, ("ranking", "pontos_estrela"), pe)
+        await self.painel.update(interaction, "✅ Pontuação salva", refresh=True)
+
+    async def on_error(self, interaction, error):
+        log.exception("erro na janela de pontuacao", exc_info=error)
+        await _erro_card(interaction, "Algo deu errado", "Tente de novo.")
+
+
+# painel do ranking (mesma cara do ,ptconfig e do ,ptparc)
+class RankView(discord.ui.LayoutView):
+    def __init__(self, author_id: int, guild: discord.Guild):
+        super().__init__(timeout=900)
+        self.author_id, self.guild = author_id, guild
+        self.notice, self.sent, self.meses_atras = "", None, 0
+        self.render()
+
+    @classmethod
+    async def open(cls, ctx):
+        view = cls(ctx.author.id, ctx.guild)
+        view.sent = await ctx.send(view=view, allowed_mentions=NO_MENTIONS)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                view=Card("Esse painel é de outra pessoa", "Use `,ptrank` pra abrir o seu."), ephemeral=True)
+            return False
+        perms = getattr(interaction.user, "guild_permissions", None)
+        if not (perms is not None and perms.administrator) and not tem_acesso_total(interaction.user):
+            await _erro_card(interaction, "Sem permissão", "Só administradores mexem aqui.")
+            return False
+        return True
+
+    async def on_timeout(self):
+        if self.sent is None:
+            return
+        for item in self.walk_children():
+            if hasattr(item, "disabled"):
+                item.disabled = True
+        try:
+            await self.sent.edit(view=self)
+        except discord.HTTPException:
+            pass
+
+    async def on_error(self, interaction, error, item):
+        log.exception("erro no painel do ranking", exc_info=error)
+        await _erro_card(interaction, "Algo deu errado", "Tente de novo.")
+
+    async def update(self, interaction, notice="", refresh=False):
+        if refresh:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+            ok = await atualizar_ranking(self.guild)
+            notice = notice + (" · placar atualizado" if ok else "")
+        self.notice = notice
+        self.render()
+        if interaction.response.is_done():
+            await interaction.edit_original_response(view=self)
+        else:
+            await interaction.response.edit_message(view=self)
+
+    def render(self):
+        cfg = get_cfg(self.guild.id)
+        children = self._tela(cfg)
+        if self.notice:
+            children.append(discord.ui.TextDisplay(f"-# {self.notice}"))
+        self.clear_items()
+        self.add_item(discord.ui.Container(*children))
+
+    def _btn(self, label, fn, style=discord.ButtonStyle.secondary, emoji=None, disabled=False):
+        return _Btn(fn, label=label[:80], style=style, emoji=emoji, disabled=disabled)
+
+    def _flip(self, path, refresh=False):
+        async def h(interaction, item):
+            atual = _dig(get_cfg(self.guild.id), path)
+            set_path(self.guild.id, path, not atual)
+            await self.update(interaction, "✅ Salvo", refresh=refresh)
+        return h
+
+    def _tela(self, cfg):
+        g = self.guild
+        r = cfg["ranking"]
+        ativo = r["ativo"]
+        canal = f"<#{r['canal']}>" if r.get("canal") else "*não definido*"
+        ini, fim, mes = _rank_periodo(self.meses_atras)
+        tabela = _rank_tabela(g.id, cfg, ini, fim)
+        total = sum(t["tickets"] for _, t in tabela)
+        medalhas = [_poyo("rank_1", "🥇"), _poyo("rank_2", "🥈"), _poyo("rank_3", "🥉")]
+        topo = "\n".join(
+            f"{medalhas[i]} <@{uid}>  **{t['pts']} pts**  ·  {t['tickets']}"
+            for i, (uid, t) in enumerate(tabela[:3])
+        ) or "*sem atendimentos neste mês*"
+
+        async def ligar(interaction, item):
+            atual = get_cfg(g.id)["ranking"]
+            if not atual["ativo"] and not g.get_channel(atual.get("canal") or 0):
+                await self.update(interaction, "⚠️ Escolha o canal do placar antes de ligar")
+                return
+            set_path(g.id, ("ranking", "ativo"), not atual["ativo"])
+            await self.update(interaction, "✅ Desligado" if atual["ativo"] else "✅ Ligado", refresh=True)
+
+        async def pontos(interaction, item):
+            await interaction.response.send_modal(RankPontosModal(self))
+
+        async def atualizar(interaction, item):
+            if not get_cfg(g.id)["ranking"]["ativo"]:
+                await self.update(interaction, "⚠️ Ligue o ranking primeiro")
+                return
+            await self.update(interaction, "🔄 Pronto", refresh=True)
+
+        async def virar_mes(interaction, item):
+            self.meses_atras = 0 if self.meses_atras else 1
+            await self.update(interaction)
+
+        async def escolher_canal(interaction, item):
+            set_path(g.id, ("ranking", "canal"), item.values[0].id)
+            await self.update(interaction, "✅ Salvo", refresh=True)
+
+        async def tirar_canal(interaction, item):
+            set_path(g.id, ("ranking", "canal"), None)
+            await self.update(interaction, "✅ Removido")
+
+        verde, cinza = discord.ButtonStyle.success, discord.ButtonStyle.secondary
+        aval = r.get("avaliacao", True)
+        return [
+            discord.ui.TextDisplay(
+                f"## {_poyo('trofeu', '🏆')} Ranking da equipe\n"
+                "-# pontos por ticket atendido e nota de 1 a 5 estrelas dada pelo dono do ticket"),
+            sep(),
+            discord.ui.TextDisplay(
+                f"**Status**  {'🟢 ligado' if ativo else '⚪ desligado'}\n"
+                f"**Canal do placar**  {canal}\n"
+                f"**Avaliação por estrelas**  {'🟢 pede na DM ao encerrar' if aval else '⚪ desligada'}\n"
+                f"**Pontuação**  {r['pontos_ticket']} por ticket"
+                + (f" · +{r['pontos_estrela']} por estrela" if aval else "")
+            ),
+            sep(),
+            _sec(f"{_poyo('trofeu', '🏆')} {mes}", f"{total} atendimento(s) no mês"),
+            discord.ui.TextDisplay(topo),
+            sep(),
+            discord.ui.ActionRow(
+                self._btn("Desligar" if ativo else "Ligar", ligar, cinza if ativo else verde),
+                self._btn("Estrelas: sim" if aval else "Estrelas: não", self._flip(("ranking", "avaliacao")),
+                          verde if aval else cinza, _poyo_ui("estrela", "⭐")),
+                self._btn("Pontuação", pontos, emoji="🎯"),
+            ),
+            discord.ui.ActionRow(
+                self._btn("Atualizar placar", atualizar, discord.ButtonStyle.primary, "🔄"),
+                self._btn("Ver este mês" if self.meses_atras else "Ver mês passado", virar_mes, emoji="📅"),
+            ),
+            sep(),
+            _sec("📍 Canal do placar", "uma mensagem que se atualiza sozinha a cada ticket encerrado"),
+            discord.ui.ActionRow(_ChanSel(
+                escolher_canal, placeholder="Escolher o canal",
+                channel_types=[discord.ChannelType.text], min_values=1, max_values=1)),
+            discord.ui.ActionRow(self._btn("Tirar canal", tirar_canal)),
+        ]
 
 
 class Tickets(commands.Cog):
@@ -3750,26 +4135,40 @@ class Tickets(commands.Cog):
             return
 
     def _dup_parceria(self, guild, p, alvo_id, nome):
-        # devolve (titulo, texto) se o servidor ja tem parceria postada, senao None
+        # devolve (titulo, texto) se o servidor ainda nao pode postar, senao None
         if not p.get("bloquear_duplicado", True):
             return None
+        dias = int(p.get("renovar_dias", 5) or 0)
+        agora = int(datetime.now().timestamp())
+
+        def livre(e):   # ja passou o prazo de renovacao
+            return dias > 0 and agora - int(e.get("ts", 0) or 0) >= dias * 86400
+
+        def quando(e):
+            if dias <= 0:
+                return "Cada servidor só pode ter uma parceria postada. A equipe pode liberar."
+            libera = int(e.get("ts", 0) or 0) + dias * 86400
+            return f"Você pode renovar em <t:{libera}:D> (<t:{libera}:R>)."
+
         reg = _parc_guild(guild.id)
         e = reg.get(str(alvo_id))
         if e:
+            if livre(e):
+                return None
             return ("Esse servidor já tem parceria postada",
-                    f"**{nome}** foi publicada em <t:{e.get('ts', 0)}:D>. "
-                    "Cada servidor só pode ter uma parceria postada.")
+                    f"**{nome}** foi publicada em <t:{e.get('ts', 0)}:D>. {quando(e)}")
         if p.get("conferir_nome", True):
             nn = _norm_nome(nome)
-            achou = next((x for x in reg.values()
-                          if x.get("por_nome") and _nomes_parecidos(nn, _norm_nome(x.get("nome", "")))), None)
-            if achou:
+            barram = [x for x in reg.values()
+                      if x.get("por_nome") and _nomes_parecidos(nn, _norm_nome(x.get("nome", ""))) and not livre(x)]
+            if barram:
+                achou = max(barram, key=lambda x: x.get("ts", 0))
                 onde = ""
                 if achou.get("canal") and achou.get("msg"):
                     onde = f" {'https://discord.com/channels/%s/%s/%s' % (guild.id, achou['canal'], achou['msg'])}"
                 return ("Esse servidor parece já ter parceria",
                         f"**{nome}** tem o mesmo nome de **{achou.get('nome')}**, "
-                        f"já postado em <t:{achou.get('ts', 0)}:D>.{onde}\n"
+                        f"já postado em <t:{achou.get('ts', 0)}:D>.{onde}\n{quando(achou)}\n"
                         "Se for outro servidor, chame a equipe pra liberar.")
         return None
 
@@ -3860,7 +4259,13 @@ class Tickets(commands.Cog):
                                        "O bot precisa de permissão pra enviar mensagens no canal de parcerias. "
                                        "A equipe vai ver isso.")
 
-                _parc_guild(guild.id)[str(alvo.id)] = {
+                reg = _parc_guild(guild.id)
+                nn_novo = _norm_nome(nome)
+                for k, x in list(reg.items()):
+                    # registro antigo guardado so pelo nome: o novo (pelo convite) substitui
+                    if k != str(alvo.id) and x.get("por_nome") and _nomes_parecidos(nn_novo, _norm_nome(x.get("nome", ""))):
+                        del reg[k]
+                reg[str(alvo.id)] = {
                     "nome": nome, "codigo": codigos[0], "autor": autor.id,
                     "ts": int(datetime.now().timestamp()), "canal": destino.id, "msg": post.id,
                     "salvo_em": int(datetime.now().timestamp()),
@@ -3871,7 +4276,11 @@ class Tickets(commands.Cog):
                 await message.delete()
             except discord.HTTPException as e:
                 log.warning("nao consegui apagar a mensagem original da parceria no ticket %s: %s", channel.id, e)
-            await aviso("Parceria publicada", f"{autor.mention}, sua parceria foi publicada: {post.jump_url}", True)
+            dias_r = int(p.get("renovar_dias", 5) or 0)
+            nota_r = ""
+            if dias_r > 0 and p.get("bloquear_duplicado", True):
+                nota_r = f"\n-# Renovação liberada em <t:{int(datetime.now().timestamp()) + dias_r * 86400}:D>."
+            await aviso("Parceria publicada", f"{autor.mention}, sua parceria foi publicada: {post.jump_url}{nota_r}", True)
 
         if not p.get("confirmar"):
             return await publicar()
@@ -3917,6 +4326,20 @@ class Tickets(commands.Cog):
     @commands.guild_only()
     async def ptparc(self, ctx):
         await ParceriaView.open(ctx)
+
+    @commands.group(
+        name="ptrank",
+        aliases=("ranking",),
+        invoke_without_command=True,
+        extras={
+            "categoria": "Utilidades",
+            "uso": ",ptrank",
+            "descricao": "Painel do ranking de atendimentos da equipe (pontos e estrelas).",
+        },
+    )
+    @commands.guild_only()
+    async def ptrank(self, ctx):
+        await RankView.open(ctx)
 
     async def _updated(self, ctx, title, text=""):
         n = await refresh_panels(ctx.guild)
