@@ -27,17 +27,13 @@ def _env_float(nome: str, padrao: float, minimo: float, maximo: float) -> float:
 
 
 # ----------------------------------------------------------------------------
-# OpenRouter
+# NVIDIA NIM
 # ----------------------------------------------------------------------------
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "qwen/qwen3.6-plus:free").strip()
-OPENROUTER_API_BASE = os.getenv(
-    "OPENROUTER_API_BASE", "https://openrouter.ai/api/v1"
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "").strip()
+NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3-super-120b-a12b").strip()
+NVIDIA_API_BASE = os.getenv(
+    "NVIDIA_API_BASE", "https://integrate.api.nvidia.com/v1"
 ).rstrip("/")
-
-# Opcional: identificação do app nos headers do OpenRouter (recomendado)
-OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME", "PoyoBot").strip()
-OPENROUTER_APP_URL = os.getenv("OPENROUTER_APP_URL", "").strip()
 
 COOLDOWN_SEGUNDOS = _env_float("POYO_COOLDOWN", 2.5, 0, 60)
 MAX_TOOL_ITERACOES = int(_env_float("POYO_MAX_TOOL_ITER", 80, 1, 120))
@@ -217,8 +213,8 @@ class Poyo(commands.Cog):
 
         print(
             "[Poyo] Config: "
-            f"OpenRouter={'ok' if OPENROUTER_API_KEY else 'ausente'} | "
-            f"Modelo={OPENROUTER_MODEL} | MaxIter={MAX_TOOL_ITERACOES}"
+            f"NVIDIA={'ok' if NVIDIA_API_KEY else 'ausente'} | "
+            f"Modelo={NVIDIA_MODEL} | MaxIter={MAX_TOOL_ITERACOES}"
         )
 
     async def cog_load(self) -> None:
@@ -279,56 +275,54 @@ class Poyo(commands.Cog):
         return True, ""
 
     # ------------------------------------------------------------------
-    # OpenRouter
+    # Chamada ao modelo (NVIDIA NIM)
     # ------------------------------------------------------------------
     async def _chat_completions(
         self,
         mensagens: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        if not OPENROUTER_API_KEY:
-            raise RuntimeError("OPENROUTER_API_KEY não configurada")
+        if not NVIDIA_API_KEY:
+            raise RuntimeError("NVIDIA_API_KEY não configurada")
 
         payload: dict[str, Any] = {
-            "model": OPENROUTER_MODEL,
+            "model": NVIDIA_MODEL,
             "messages": mensagens,
             "temperature": 0.5,
             "top_p": 0.9,
             "max_tokens": 1024,
+            "stream": False,
         }
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
 
         headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
+            "Authorization": f"Bearer {NVIDIA_API_KEY}",
             "Accept": "application/json",
-            # Identificação recomendada pelo OpenRouter (não obrigatória)
-            "HTTP-Referer": OPENROUTER_APP_URL or "https://localhost",
-            "X-Title": OPENROUTER_APP_NAME or "PoyoBot",
+            "Content-Type": "application/json",
         }
 
         for tentativa in range(3):
             async with self.sessao().post(
-                f"{OPENROUTER_API_BASE}/chat/completions",
+                f"{NVIDIA_API_BASE}/chat/completions",
                 json=payload,
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=60),
             ) as r:
                 if r.status in (429, 503) and tentativa < 2:
                     espera = tentativa + 1
-                    print(f"[Poyo] OpenRouter {r.status}. Retry em {espera}s.")
+                    print(f"[Poyo] NVIDIA NIM {r.status}. Retry em {espera}s.")
                     await asyncio.sleep(espera)
                     continue
                 if r.status >= 400:
                     detalhe = (await r.text())[:400]
                     raise RuntimeError(
-                        f"OpenRouter HTTP {r.status}: {detalhe}"
+                        f"NVIDIA NIM HTTP {r.status}: {detalhe}"
                     )
                 return await r.json()
 
-        raise RuntimeError("OpenRouter não respondeu após tentativas")
+        raise RuntimeError("NVIDIA NIM não respondeu após tentativas")
 
     async def contexto_do_canal(self, message: discord.Message) -> str:
         linhas: list[str] = []
