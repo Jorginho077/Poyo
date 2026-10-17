@@ -173,6 +173,7 @@ DEFAULTS = {
         "creditar": True,          # linha "enviado por @pessoa" no fim
         "bloquear_duplicado": True,  # nao aceita o mesmo servidor duas vezes
         "conferir_nome": True,     # tambem barra por nome parecido (pra convites antigos que expiraram)
+        "confirmar": False,        # True = mostra o preview no ticket e so posta depois do ok do dono
     },
     "bloquear_links": True,    # True = so as categorias de links_tipos podem mandar link (equipe sempre pode)
     "links_tipos": ["parceria"],  # chaves das categorias que aceitam link (o bot reposta se outro bot cortar)
@@ -3273,6 +3274,7 @@ class ParceriaView(discord.ui.LayoutView):
                 f"**Canal**  {canal}\n"
                 f"**Ping**  {ping}\n"
                 f"**Ticket**  {_ico(c)}{c['label']}\n"
+                f"**Confirmação**  {'🟢 pede ok antes de postar' if p.get('confirmar') else '⚪ posta direto'}\n"
                 f"**Registradas**  {n}"
             ),
             sep(),
@@ -3281,6 +3283,10 @@ class ParceriaView(discord.ui.LayoutView):
                           discord.ButtonStyle.secondary if ativo else discord.ButtonStyle.success),
                 self._btn("Destino", self._goto("destino"), emoji="📍"),
                 self._btn("Limpeza", self._goto("limpeza"), emoji="🧹"),
+                self._btn("Confirmação: sim" if p.get("confirmar") else "Confirmação: não",
+                          self._flip(("parceria", "confirmar")),
+                          discord.ButtonStyle.success if p.get("confirmar") else discord.ButtonStyle.secondary,
+                          emoji="🧾"),
             ),
             discord.ui.ActionRow(
                 self._btn("Links", self._goto("links"), emoji="🔗"),
@@ -3528,10 +3534,89 @@ class ParceriaView(discord.ui.LayoutView):
         ]
 
 
+# confirmacao da postagem de parceria: preview + "pode prosseguir?" (so o dono do ticket ou a equipe)
+class ConfirmarParceriaView(discord.ui.LayoutView):
+    def __init__(self, dono_id, tipo, preview, destino, n_anexos, publicar):
+        super().__init__(timeout=600)
+        self.dono_id, self.tipo, self.publicar = dono_id, tipo, publicar
+        self.sent, self.done, self.fim = None, False, None
+        extra = f"\n-# {n_anexos} anexo(s) vão junto" if n_anexos else ""
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(
+                f"### Pode prosseguir com a postagem?\n-# vai ser publicada em {destino.mention} assim:"),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay(_quote(preview, 3000) + extra),
+            discord.ui.ActionRow(
+                _Btn(self._sim, label="Pode prosseguir", style=discord.ButtonStyle.success, emoji="✅"),
+                _Btn(self._nao, label="Cancelar", style=discord.ButtonStyle.secondary),
+            ),
+        ))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        u = interaction.user
+        ok = u.id == self.dono_id or tem_acesso_total(u)
+        if not ok and isinstance(u, discord.Member):
+            ok = is_staff(u, get_cfg(u.guild.id), self.tipo)
+        if not ok:
+            await _erro_card(interaction, "Só quem abriu o ticket decide",
+                             "Esse botão é do dono do ticket ou da equipe.")
+        return ok
+
+    def _encerrar(self):
+        self.done = True
+        self.stop()
+        if self.fim:
+            self.fim()
+
+    async def cancelar(self, titulo, texto):
+        if self.done:
+            return
+        self._encerrar()
+        if self.sent is not None:
+            try:
+                await self.sent.edit(view=Card(titulo, texto))
+            except discord.HTTPException:
+                pass
+
+    async def _sim(self, interaction, item):
+        if self.done:
+            await interaction.response.defer()
+            return
+        self._encerrar()
+        await interaction.response.edit_message(view=Card("Publicando", "Um instante."))
+        await self.publicar()
+        try:
+            await interaction.message.delete()   # o resultado ja foi avisado no canal
+        except discord.HTTPException:
+            pass
+
+    async def _nao(self, interaction, item):
+        if self.done:
+            await interaction.response.defer()
+            return
+        self._encerrar()
+        await interaction.response.edit_message(
+            view=Card("Cancelado", "Nada foi postado. Mande o convite de novo quando quiser."))
+
+    async def on_timeout(self):
+        if self.done:
+            return
+        self.done = True
+        if self.fim:
+            self.fim()
+        if self.sent is not None:
+            try:
+                await self.sent.edit(view=Card("Confirmação expirada",
+                                               "Mande o convite de novo se ainda quiser postar."))
+            except discord.HTTPException:
+                pass
+
+
 class Tickets(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self._locks: dict = {}
+        self._confirmando: dict = {}   # canal do ticket -> confirmacao de parceria esperando o ok
 
     def _lock(self, guild_id) -> asyncio.Lock:
         return self._locks.setdefault(guild_id, asyncio.Lock())
@@ -3606,14 +3691,16 @@ class Tickets(commands.Cog):
             return
         autor = message.author
         cfg = get_cfg(message.guild.id)
-        if isinstance(autor, discord.Member) and is_staff(autor, cfg, data["tipo"]):
-            return
 
         # parceria: o dono do ticket manda o convite e o bot publica no canal de parcerias
+        # (vale pro dono mesmo sendo staff)
         p = cfg["parceria"]
         if (p.get("ativo") and data["tipo"] == p.get("tipo") and autor.id == data["owner"]
                 and INVITE_RE.search(message.content)):
             await self._auto_postar(message, data, cfg)
+            return
+
+        if isinstance(autor, discord.Member) and is_staff(autor, cfg, data["tipo"]):
             return
 
         if not cfg.get("bloquear_links"):
@@ -3662,6 +3749,30 @@ class Tickets(commands.Cog):
                 log.warning("nao consegui repostar o link no ticket %s: %s", channel.id, e)
             return
 
+    def _dup_parceria(self, guild, p, alvo_id, nome):
+        # devolve (titulo, texto) se o servidor ja tem parceria postada, senao None
+        if not p.get("bloquear_duplicado", True):
+            return None
+        reg = _parc_guild(guild.id)
+        e = reg.get(str(alvo_id))
+        if e:
+            return ("Esse servidor já tem parceria postada",
+                    f"**{nome}** foi publicada em <t:{e.get('ts', 0)}:D>. "
+                    "Cada servidor só pode ter uma parceria postada.")
+        if p.get("conferir_nome", True):
+            nn = _norm_nome(nome)
+            achou = next((x for x in reg.values()
+                          if x.get("por_nome") and _nomes_parecidos(nn, _norm_nome(x.get("nome", "")))), None)
+            if achou:
+                onde = ""
+                if achou.get("canal") and achou.get("msg"):
+                    onde = f" {'https://discord.com/channels/%s/%s/%s' % (guild.id, achou['canal'], achou['msg'])}"
+                return ("Esse servidor parece já ter parceria",
+                        f"**{nome}** tem o mesmo nome de **{achou.get('nome')}**, "
+                        f"já postado em <t:{achou.get('ts', 0)}:D>.{onde}\n"
+                        "Se for outro servidor, chame a equipe pra liberar.")
+        return None
+
     async def _auto_postar(self, message, data, cfg):
         p = cfg["parceria"]
         guild, channel, autor = message.guild, message.channel, message.author
@@ -3705,71 +3816,79 @@ class Tickets(commands.Cog):
         nome = getattr(alvo, "name", None) or str(alvo.id)
 
         async with self._lock(guild.id):
-            reg = _parc_guild(guild.id)
-            if p.get("bloquear_duplicado", True) and str(alvo.id) in reg:
-                e = reg[str(alvo.id)]
-                return await aviso("Esse servidor já tem parceria postada",
-                                   f"**{nome}** foi publicada em <t:{e.get('ts', 0)}:D>. "
-                                   "Cada servidor só pode ter uma parceria postada.")
+            dup = self._dup_parceria(guild, p, alvo.id, nome)
+        if dup:
+            return await aviso(*dup)
 
-            if p.get("bloquear_duplicado", True) and p.get("conferir_nome", True):
-                nn = _norm_nome(nome)
-                achou = next((e for e in reg.values()
-                              if e.get("por_nome") and _nomes_parecidos(nn, _norm_nome(e.get("nome", "")))), None)
-                if achou:
-                    onde = ""
-                    if achou.get("canal") and achou.get("msg"):
-                        onde = f" {'https://discord.com/channels/%s/%s/%s' % (guild.id, achou['canal'], achou['msg'])}"
-                    return await aviso("Esse servidor parece já ter parceria",
-                                       f"**{nome}** tem o mesmo nome de **{achou.get('nome')}**, "
-                                       f"já postado em <t:{achou.get('ts', 0)}:D>.{onde}\n"
-                                       "Se for outro servidor, chame a equipe pra liberar.")
+        # monta o texto: limpa o que o painel mandou tirar, ping do cargo e credito
+        corpo = _limpar_parceria(message.content, p)
+        topo = f"<@&{p['ping_cargo']}>" if p.get("ping_cargo") else ""
+        rodape = f"-# enviado por {autor.mention}" if p.get("creditar", True) else ""
+        reserva = len(topo) + len(rodape) + 60
+        if len(corpo) > 2000 - reserva:
+            corpo = corpo[: 2000 - reserva].rstrip()
+            if codigos[0].lower() not in corpo.lower():
+                corpo += f"\ndiscord.gg/{codigos[0]}"
+        conteudo = "\n".join(x for x in (topo, corpo, rodape) if x)[:2000]
 
-            # monta o texto: limpa o que o painel mandou tirar, ping do cargo e credito
-            corpo = _limpar_parceria(message.content, p)
-            topo = f"<@&{p['ping_cargo']}>" if p.get("ping_cargo") else ""
-            rodape = f"-# enviado por {autor.mention}" if p.get("creditar", True) else ""
-            reserva = len(topo) + len(rodape) + 60
-            if len(corpo) > 2000 - reserva:
-                corpo = corpo[: 2000 - reserva].rstrip()
-                if codigos[0].lower() not in corpo.lower():
-                    corpo += f"\ndiscord.gg/{codigos[0]}"
-            conteudo = "\n".join(x for x in (topo, corpo, rodape) if x)[:2000]
+        async def publicar():
+            async with self._lock(guild.id):
+                # confere de novo: com a confirmacao, outro ticket pode ter postado esse servidor
+                dup2 = self._dup_parceria(guild, p, alvo.id, nome)
+                if dup2:
+                    return await aviso(*dup2)
 
-            # copia os anexos antes de apagar a mensagem original
-            arquivos = []
-            for a in message.attachments[:4]:
-                if a.size <= guild.filesize_limit:
-                    try:
-                        arquivos.append(await a.to_file())
-                    except discord.HTTPException:
-                        pass
-            kwargs = {"files": arquivos} if arquivos else {}
-            ping_roles = [discord.Object(p["ping_cargo"])] if p.get("ping_cargo") else False
+                # copia os anexos antes de apagar a mensagem original
+                arquivos = []
+                for a in message.attachments[:4]:
+                    if a.size <= guild.filesize_limit:
+                        try:
+                            arquivos.append(await a.to_file())
+                        except discord.HTTPException:
+                            pass
+                kwargs = {"files": arquivos} if arquivos else {}
+                ping_roles = [discord.Object(p["ping_cargo"])] if p.get("ping_cargo") else False
+                try:
+                    post = await destino.send(
+                        conteudo,
+                        allowed_mentions=discord.AllowedMentions(everyone=False, users=False, roles=ping_roles),
+                        **kwargs,
+                    )
+                except discord.HTTPException as e:
+                    log.warning("nao consegui postar a parceria em #%s: %s", destino.name, e)
+                    return await aviso("Não consegui publicar",
+                                       "O bot precisa de permissão pra enviar mensagens no canal de parcerias. "
+                                       "A equipe vai ver isso.")
+
+                _parc_guild(guild.id)[str(alvo.id)] = {
+                    "nome": nome, "codigo": codigos[0], "autor": autor.id,
+                    "ts": int(datetime.now().timestamp()), "canal": destino.id, "msg": post.id,
+                    "salvo_em": int(datetime.now().timestamp()),
+                }
+                _parc_save()
+
             try:
-                post = await destino.send(
-                    conteudo,
-                    allowed_mentions=discord.AllowedMentions(everyone=False, users=False, roles=ping_roles),
-                    **kwargs,
-                )
+                await message.delete()
             except discord.HTTPException as e:
-                log.warning("nao consegui postar a parceria em #%s: %s", destino.name, e)
-                return await aviso("Não consegui publicar",
-                                   "O bot precisa de permissão pra enviar mensagens no canal de parcerias. "
-                                   "A equipe vai ver isso.")
+                log.warning("nao consegui apagar a mensagem original da parceria no ticket %s: %s", channel.id, e)
+            await aviso("Parceria publicada", f"{autor.mention}, sua parceria foi publicada: {post.jump_url}", True)
 
-            reg[str(alvo.id)] = {
-                "nome": nome, "codigo": codigos[0], "autor": autor.id,
-                "ts": int(datetime.now().timestamp()), "canal": destino.id, "msg": post.id,
-                "salvo_em": int(datetime.now().timestamp()),
-            }
-            _parc_save()
+        if not p.get("confirmar"):
+            return await publicar()
 
+        # confirmacao ligada: mostra o preview e espera o ok antes de postar
+        velho = self._confirmando.pop(channel.id, None)
+        if velho is not None:
+            await velho.cancelar("Substituída", "Você mandou outro convite, vale o último.")
+        n_anexos = sum(1 for a in message.attachments[:4] if a.size <= guild.filesize_limit)
+        view = ConfirmarParceriaView(autor.id, data["tipo"], conteudo, destino, n_anexos, publicar)
+        view.fim = lambda: self._confirmando.pop(channel.id, None) if self._confirmando.get(channel.id) is view else None
         try:
-            await message.delete()
+            view.sent = await channel.send(view=view, allowed_mentions=NO_MENTIONS)
         except discord.HTTPException as e:
-            log.warning("nao consegui apagar a mensagem original da parceria no ticket %s: %s", channel.id, e)
-        await aviso("Parceria publicada", f"{autor.mention}, sua parceria foi publicada: {post.jump_url}", True)
+            log.warning("nao consegui mandar a confirmacao da parceria no ticket %s: %s", channel.id, e)
+            return
+        self._confirmando[channel.id] = view
 
     @commands.Cog.listener()
     async def on_raw_message_delete(self, payload):
