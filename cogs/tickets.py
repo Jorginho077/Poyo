@@ -1181,10 +1181,11 @@ async def _menu_action(interaction: discord.Interaction, acao: str):
             publico = ("Ticket assumido", f"<@{data['owner']}>, {user.mention} vai cuidar do seu atendimento.")
     elif acao in SO_EQUIPE and not is_staff(user, cfg, data["tipo"]):
         erro = ("Apenas a equipe", "Só a equipe pode fazer isso.")
+    elif acao == "add":
+        # qualquer membro que esteja no ticket pode adicionar outras pessoas
+        extra = AddMemberView()
     elif not _can_manage(user, data, cfg):
         erro = ("Sem permissão", "Só a equipe ou quem abriu o ticket pode fazer isso.")
-    elif acao == "add":
-        extra = AddMemberView()
     elif acao == "remove":
         extra = RemoveMemberView(msg_id)
     elif acao == "transfer":
