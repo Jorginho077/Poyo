@@ -142,7 +142,7 @@ DEFAULTS = {
             "Olá, {usuario}. Recebemos a sua solicitação.\n"
             "A nossa equipe já foi avisada{staff} e responderá em breve."
         ),
-        "rodape": "Use o menu acima para assumir, adicionar alguém ou encerrar o atendimento.",
+        "rodape": "Use o menu acima para assumir, notificar, adicionar alguém, criar uma call ou encerrar o atendimento.",
         "nome_canal": "{tipo}-{usuario}",
         "cor": None,
     },
@@ -459,18 +459,33 @@ def _ico(c) -> str:
     return f"{c['emoji']}  " if c.get("emoji") else ""
 
 
-# menu de acoes do ticket (assumir / adicionar / encerrar) um menu so no lugar dos botoes
+# menu de acoes do ticket: um menu so no lugar dos botoes
 class TicketMenu(discord.ui.Select):
     def __init__(self, claimed: bool = False):
+        op = discord.SelectOption
         ops = []
         if not claimed:
-            ops.append(discord.SelectOption(
-                label="Assumir ticket", value="claim", description="Você passa a cuidar deste atendimento"))
-        ops.append(discord.SelectOption(
-            label="Adicionar membro", value="add", description="Dá acesso a mais uma pessoa"))
-        ops.append(discord.SelectOption(
-            label="Encerrar ticket", value="close",
-            description="Só quem assumiu encerra e envia a transcrição" if claimed else "Só depois que a equipe assumir o ticket"))
+            ops.append(op(label="Assumir ticket", value="claim", emoji="🙋",
+                          description="Você passa a cuidar deste atendimento"))
+        ops += [
+            op(label="Notificar", value="notify", emoji="🔔",
+               description="Chama a outra parte do atendimento (DM ou menção)"),
+            op(label="Criar call", value="call", emoji="📞",
+               description="Abre um canal de voz privado para o atendimento"),
+            op(label="Adicionar membros", value="add", emoji="➕",
+               description="Adiciona membros ao ticket"),
+            op(label="Remover membros", value="remove", emoji="➖",
+               description="Remove membros do ticket"),
+            op(label="Transferir atendimento", value="transfer", emoji="➡️",
+               description="Transfere o atendimento para outro atendente"),
+            op(label="Renomear ticket", value="rename", emoji="✏️",
+               description="Altera o nome do canal ou tópico do ticket"),
+            op(label="Transferir para outra opção", value="move", emoji="🔀",
+               description="Muda a categoria do ticket mantendo o canal e a conversa"),
+            op(label="Encerrar ticket", value="close", emoji="🔒",
+               description="Só quem assumiu encerra e envia a transcrição" if claimed
+               else "Só depois que a equipe assumir o ticket"),
+        ]
         super().__init__(custom_id="tk:menu", placeholder="Ações do ticket", options=ops)
 
     async def callback(self, interaction: discord.Interaction):
@@ -1006,46 +1021,234 @@ def _can_manage(member, data, cfg):
     return member.id == data["owner"] or is_staff(member, cfg, data["tipo"])
 
 
+# admin de verdade: pode mexer no ticket que outro atendente assumiu
+def _is_admin(member) -> bool:
+    p = member.guild_permissions
+    return p.administrator or p.manage_messages or tem_acesso_total(member)
+
+
+# acoes que so a equipe faz (quem abriu o ticket nao)
+SO_EQUIPE = {"remove", "transfer", "rename", "move"}
+NOTIFICAR_ESPERA = 60  # segundos entre uma notificacao e outra (anti spam)
+
+
+# refaz o cartao do ticket (atendente, categoria) e de quebra limpa a opcao marcada no menu
+async def _refresh_card(channel, msg_id, data, cfg):
+    if not msg_id:
+        return
+    try:
+        await channel.get_partial_message(msg_id).edit(
+            view=build_ticket_view(data, cfg), attachments=panel_files(cfg))
+    except discord.HTTPException as e:
+        log.warning("nao consegui atualizar o cartao do ticket %s: %s", channel.id, e)
+
+
+async def _dm(client, user_id, texto) -> bool:
+    try:
+        u = client.get_user(user_id) or await client.fetch_user(user_id)
+        await u.send(texto)
+        return True
+    except discord.HTTPException:
+        return False
+
+
+def _member_of(interaction, picked):
+    if isinstance(picked, discord.Member):
+        return picked
+    return interaction.guild.get_member(picked.id)
+
+
+# ---- call privada do atendimento
+
+def _call_channel(guild, data):
+    cid = data.get("call")
+    ch = guild.get_channel(cid) if cid else None
+    return ch if isinstance(ch, discord.VoiceChannel) else None
+
+
+async def _call_dar_acesso(guild, data, member):
+    vc = _call_channel(guild, data)
+    if vc is None or member.bot:
+        return
+    try:
+        await vc.set_permissions(member, view_channel=True, connect=True, speak=True, reason="Ticket: acesso à call")
+    except discord.HTTPException as e:
+        log.warning("nao consegui liberar %s na call %s: %s", member, vc.id, e)
+
+
+async def _call_tirar_acesso(guild, data, member):
+    vc = _call_channel(guild, data)
+    if vc is None:
+        return
+    try:
+        await vc.set_permissions(member, overwrite=None, reason="Ticket: saiu do atendimento")
+    except discord.HTTPException as e:
+        log.warning("nao consegui tirar %s da call %s: %s", member, vc.id, e)
+
+
+# canal de voz privado: dono, atendente, quem ja esta no ticket e os cargos da equipe
+async def _criar_call(channel, data, cfg):
+    guild = channel.guild
+    parent = getattr(channel, "parent", None) or channel
+    ok = discord.PermissionOverwrite(view_channel=True, connect=True, speak=True)
+    ow = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False, connect=False),
+        guild.me: discord.PermissionOverwrite(view_channel=True, connect=True),
+    }
+    ids = {data["owner"], data.get("claimed")}
+    if isinstance(channel, discord.Thread):
+        ids |= {m.id for m in channel.members if not m.bot}
+    for uid in ids:
+        m = guild.get_member(uid) if uid else None
+        if m is not None and not m.bot:
+            ow[m] = ok
+    for r in staff_roles(guild, cfg, data["tipo"]):
+        ow[r] = ok
+    try:
+        vc = await guild.create_voice_channel(
+            name=f"call-{channel.name}"[:100], category=parent.category,
+            overwrites=ow, reason=f"Ticket: call do atendimento #{channel.name}",
+        )
+    except discord.Forbidden:
+        return None, "O bot precisa das permissões **Gerenciar canais** e **Gerenciar permissões**."
+    except discord.HTTPException as e:
+        log.warning("nao consegui criar a call do ticket %s: %s", channel.id, e)
+        return None, "O Discord recusou criar o canal de voz. Avise a Staff."
+    data["call"] = vc.id
+    _save()
+    return vc, ""
+
+
+async def _apagar_call(guild, data):
+    vc = _call_channel(guild, data)
+    if vc is None:
+        return
+    try:
+        await vc.delete(reason="Ticket encerrado")
+    except discord.HTTPException as e:
+        log.warning("nao consegui apagar a call %s: %s", vc.id, e)
+
+
 # o menu faz tudo: sempre refaz o cartao primeiro (limpa a opcao marcada) e depois
 # manda o aviso so pra quem clicou ou publico se for o caso
 async def _menu_action(interaction: discord.Interaction, acao: str):
-    cfg = get_cfg(interaction.guild.id)
-    data = _data_for(interaction.channel)
-    erro, publico, extra = None, None, None
+    guild, user, channel = interaction.guild, interaction.user, interaction.channel
+    cfg = get_cfg(guild.id)
+    data = _data_for(channel)
+    msg_id = interaction.message.id if interaction.message else None
+    claimed = data.get("claimed")
+    erro, publico, extra, depois, modal = None, None, None, None, None
+    allowed = discord.AllowedMentions(users=[discord.Object(data["owner"])])
 
     if acao == "claim":
-        if not is_staff(interaction.user, cfg, data["tipo"]):
+        if not is_staff(user, cfg, data["tipo"]):
             erro = ("Apenas a equipe", "Só a equipe pode assumir tickets.")
-        elif data.get("claimed"):
-            erro = ("Já assumido", f"Quem cuida deste ticket: <@{data['claimed']}>")
+        elif claimed:
+            erro = ("Já assumido", f"Quem cuida deste ticket: <@{claimed}>")
         else:
-            data["claimed"] = interaction.user.id
+            data["claimed"] = user.id
             _save()
-            publico = ("Ticket assumido", f"{interaction.user.mention} vai cuidar do seu atendimento.")
-    elif not _can_manage(interaction.user, data, cfg):
+            publico = ("Ticket assumido", f"<@{data['owner']}>, {user.mention} vai cuidar do seu atendimento.")
+    elif acao in SO_EQUIPE and not is_staff(user, cfg, data["tipo"]):
+        erro = ("Apenas a equipe", "Só a equipe pode fazer isso.")
+    elif not _can_manage(user, data, cfg):
         erro = ("Sem permissão", "Só a equipe ou quem abriu o ticket pode fazer isso.")
     elif acao == "add":
         extra = AddMemberView()
+    elif acao == "remove":
+        extra = RemoveMemberView(msg_id)
+    elif acao == "transfer":
+        if claimed and user.id != claimed and not _is_admin(user):
+            erro = ("Só quem assumiu transfere",
+                    f"Este ticket está com <@{claimed}>. Só quem assumiu (ou um administrador) pode transferir.")
+        else:
+            extra = TransferView(msg_id)
+    elif acao == "rename":
+        modal = RenameModal(msg_id, channel.name)
+    elif acao == "move":
+        if len(cfg["categorias"]) < 2:
+            erro = ("Sem outras opções", "Não existe outra categoria configurada para onde mover este ticket.")
+        else:
+            extra = MoveCategoryView(msg_id, cfg, data["tipo"])
+    elif acao == "notify":
+        agora = int(datetime.now().timestamp())
+        faltam = NOTIFICAR_ESPERA - (agora - data.get("notificado", 0))
+        if faltam > 0:
+            erro = ("Calma aí", f"Você já notificou há pouco. Tente de novo em {faltam}s.")
+        elif user.id == data["owner"]:
+            # quem abriu o ticket chama o atendente (ou a equipe, se ninguem assumiu ainda)
+            data["notificado"] = agora
+            _save()
+            if claimed:
+                allowed = discord.AllowedMentions(users=[discord.Object(claimed)])
+                publico = ("Atendente notificado", f"<@{claimed}>, {user.mention} está aguardando você neste ticket.")
+
+                async def depois():
+                    await _dm(interaction.client, claimed,
+                              f"{user.display_name} está esperando por você no ticket {channel.mention} em **{guild.name}**.")
+            else:
+                roles = staff_roles(guild, cfg, data["tipo"])
+                allowed = discord.AllowedMentions(roles=roles or False)
+                quem = " ".join(r.mention for r in roles) or "Equipe"
+                publico = ("Equipe notificada", f"{quem}, {user.mention} está aguardando atendimento.")
+        else:
+            # a equipe chama quem abriu: DM pro dono (se a DM estiver fechada, marca no ticket)
+            data["notificado"] = agora
+            _save()
+            dono = data["owner"]
+
+            async def depois():
+                ok = await _dm(
+                    interaction.client, dono,
+                    f"Oi! A equipe de **{guild.name}** está te chamando no seu ticket: {channel.jump_url}")
+                if ok:
+                    await interaction.followup.send(
+                        view=Card("Dono do ticket notificado", f"Mandei uma mensagem na DM de <@{dono}>."),
+                        ephemeral=True, allowed_mentions=NO_MENTIONS)
+                else:
+                    await interaction.followup.send(
+                        view=Card("Você foi chamado", f"<@{dono}>, a equipe está te esperando neste ticket."),
+                        allowed_mentions=discord.AllowedMentions(users=[discord.Object(dono)]))
+    elif acao == "call":
+        vc = _call_channel(guild, data)
+        if vc is not None:
+            erro = ("A call já existe", f"A call deste atendimento já está aberta: {vc.mention}")
+        else:
+            async def depois():
+                novo, motivo = await _criar_call(channel, data, cfg)
+                if novo is None:
+                    await interaction.followup.send(view=Card("Não consegui criar a call", motivo), ephemeral=True)
+                else:
+                    await interaction.followup.send(
+                        view=Card("Call criada", f"{user.mention} abriu uma call privada para o atendimento: {novo.mention}"),
+                        allowed_mentions=NO_MENTIONS)
     elif acao == "close":
         # so fecha depois que alguem da equipe assumiu
-        if not data.get("claimed"):
+        if not claimed:
             erro = ("Assuma o ticket primeiro", "O ticket só pode ser encerrado depois que alguém da equipe assumir o atendimento.")
-        elif interaction.user.id not in (data["claimed"], data["owner"]):
+        elif user.id not in (claimed, data["owner"]):
             erro = ("Só quem assumiu pode encerrar",
-                    f"Este ticket está com <@{data['claimed']}>. Só quem assumiu (ou quem abriu o ticket) pode encerrá-lo.")
+                    f"Este ticket está com <@{claimed}>. Só quem assumiu (ou quem abriu o ticket) pode encerrá-lo.")
         else:
             extra = ConfirmCloseView()
+
+    # renomear abre um formulario: ele precisa ser a primeira resposta,
+    # entao o cartao (menu) e refeito por fora
+    if modal is not None:
+        await interaction.response.send_modal(modal)
+        await _refresh_card(channel, msg_id, data, cfg)
+        return
 
     await interaction.response.edit_message(view=build_ticket_view(data, cfg), attachments=panel_files(cfg))
     if erro:
         await interaction.followup.send(view=Card(*erro), ephemeral=True)
-    elif publico:
-        await interaction.followup.send(
-            view=Card(*publico),
-            allowed_mentions=discord.AllowedMentions(users=[discord.Object(data["owner"])]),
-        )
-    elif extra is not None:
+        return
+    if publico:
+        await interaction.followup.send(view=Card(*publico), allowed_mentions=allowed)
+    if extra is not None:
         await interaction.followup.send(view=extra, ephemeral=True)
+    if depois is not None:
+        await depois()
 
 
 # janelinha so pra quem clicou escolher quem entra no ticket
@@ -1076,6 +1279,7 @@ class AddMemberRow(discord.ui.ActionRow):
         fala_ok = True
         if isinstance(interaction.channel, discord.Thread):
             fala_ok = await _liberar_fala(interaction.channel, member, _data_for(interaction.channel))
+        await _call_dar_acesso(interaction.guild, _data_for(interaction.channel), member)
         await interaction.response.edit_message(view=Card("Pronto", f"{member.mention} foi adicionado."))
         await interaction.followup.send(
             view=Card("Membro adicionado", f"{member.mention} agora tem acesso a este ticket."),
@@ -1099,6 +1303,214 @@ class AddMemberView(discord.ui.LayoutView):
             discord.ui.TextDisplay("### Adicionar membro\n-# escolha quem vai poder ver e falar neste ticket"),
             AddMemberRow(),
         ))
+
+
+# ---- remover membro do ticket
+class _RemoveSelect(discord.ui.UserSelect):
+    def __init__(self, msg_id):
+        super().__init__(placeholder="Selecione quem deve sair", min_values=1, max_values=1)
+        self.msg_id = msg_id
+
+    async def callback(self, interaction: discord.Interaction):
+        guild, channel = interaction.guild, interaction.channel
+        cfg = get_cfg(guild.id)
+        data = _data_for(channel)
+        aviso = lambda t, x: interaction.response.edit_message(view=Card(t, x))
+        if not is_staff(interaction.user, cfg, data["tipo"]):
+            return await aviso("Apenas a equipe", "Só a equipe pode remover membros.")
+        m = _member_of(interaction, self.values[0])
+        if m is None:
+            return await aviso("Pessoa não encontrada", "Ela não está mais no servidor.")
+        if m.bot:
+            return await aviso("Selecione uma pessoa", "Bots não podem ser removidos aqui.")
+        if m.id == data["owner"]:
+            return await aviso("Não dá pra remover", "Esta pessoa abriu o ticket.")
+        if m.id == data.get("claimed"):
+            return await aviso("Não dá pra remover", "Esta pessoa está atendendo. Transfira o atendimento primeiro.")
+        try:
+            if isinstance(channel, discord.Thread):
+                await channel.remove_user(m)
+            else:  # ticket antigo em canal
+                await channel.set_permissions(m, overwrite=None, reason="Ticket: membro removido")
+        except discord.HTTPException:
+            return await aviso("Não consegui remover", "Confira as permissões do bot neste ticket.")
+        await aviso("Pronto", f"{m.mention} foi removido.")
+        lib = data.get("liberados", [])
+        if m.id in lib:
+            lib.remove(m.id)
+            _save()
+            await _limpar_liberados(guild, data.get("parent"), [m.id])
+        await _call_tirar_acesso(guild, data, m)
+        await interaction.followup.send(
+            view=Card("Membro removido", f"{m.mention} não tem mais acesso a este ticket."),
+            allowed_mentions=NO_MENTIONS)
+
+
+class RemoveMemberView(discord.ui.LayoutView):
+    def __init__(self, msg_id=None):
+        super().__init__(timeout=120)
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("### Remover membro\n-# escolha quem deixa de ver este ticket"),
+            discord.ui.ActionRow(_RemoveSelect(msg_id)),
+        ))
+
+
+# ---- transferir o atendimento pra outro atendente
+class _TransferSelect(discord.ui.UserSelect):
+    def __init__(self, msg_id):
+        super().__init__(placeholder="Selecione quem vai atender", min_values=1, max_values=1)
+        self.msg_id = msg_id
+
+    async def callback(self, interaction: discord.Interaction):
+        guild, channel = interaction.guild, interaction.channel
+        cfg = get_cfg(guild.id)
+        data = _data_for(channel)
+        aviso = lambda t, x: interaction.response.edit_message(view=Card(t, x))
+        antigo = data.get("claimed")
+        if not is_staff(interaction.user, cfg, data["tipo"]):
+            return await aviso("Apenas a equipe", "Só a equipe pode transferir o atendimento.")
+        if antigo and interaction.user.id != antigo and not _is_admin(interaction.user):
+            return await aviso("Só quem assumiu transfere", f"Este ticket está com <@{antigo}>.")
+        m = _member_of(interaction, self.values[0])
+        if m is None or m.bot:
+            return await aviso("Selecione uma pessoa", "Escolha um membro da equipe (bots não atendem).")
+        if not is_staff(m, cfg, data["tipo"]):
+            return await aviso("Não é da equipe", f"{m.mention} precisa ser da equipe pra assumir este atendimento.")
+        if antigo == m.id:
+            return await aviso("Já é o atendente", f"{m.mention} já está cuidando deste ticket.")
+        try:
+            if isinstance(channel, discord.Thread):
+                await channel.add_user(m)
+        except discord.HTTPException:
+            return await aviso("Não consegui transferir", "Confira as permissões do bot neste ticket.")
+        data["claimed"] = m.id
+        _save()
+        await aviso("Pronto", f"O atendimento agora é de {m.mention}.")
+        await _refresh_card(channel, self.msg_id, data, cfg)
+        fala_ok = await _liberar_fala(channel, m, data)
+        await _call_dar_acesso(guild, data, m)
+        de = f" de <@{antigo}>" if antigo else ""
+        await interaction.followup.send(
+            view=Card("Atendimento transferido",
+                      f"{interaction.user.mention} passou o atendimento{de} para {m.mention}. "
+                      f"{m.mention}, este ticket agora é seu."),
+            allowed_mentions=discord.AllowedMentions(users=[m]))
+        if not fala_ok:
+            await interaction.followup.send(
+                view=Card("Atenção", f"{m.mention} pode não conseguir escrever. Libere **Enviar mensagens em tópicos** "
+                                     "no canal do ticket ou dê **Gerenciar permissões** ao bot nele."),
+                ephemeral=True)
+
+
+class TransferView(discord.ui.LayoutView):
+    def __init__(self, msg_id=None):
+        super().__init__(timeout=120)
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("### Transferir atendimento\n-# escolha quem passa a cuidar deste ticket"),
+            discord.ui.ActionRow(_TransferSelect(msg_id)),
+        ))
+
+
+# ---- mudar o ticket de categoria (mantem o canal e a conversa)
+class _MoveSelect(discord.ui.Select):
+    def __init__(self, msg_id, cfg, atual):
+        ops = [
+            discord.SelectOption(
+                label=c["label"][:100], value=k, emoji=_ui_emoji(c["emoji"]),
+                description=(c.get("hint") or "")[:100] or None,
+            )
+            for k, c in cfg["categorias"].items() if k != atual
+        ][:25]
+        super().__init__(placeholder="Escolha a nova categoria", options=ops)
+        self.msg_id = msg_id
+
+    async def callback(self, interaction: discord.Interaction):
+        guild, channel = interaction.guild, interaction.channel
+        cfg = get_cfg(guild.id)
+        data = _data_for(channel)
+        aviso = lambda t, x: interaction.response.edit_message(view=Card(t, x))
+        if not is_staff(interaction.user, cfg, data["tipo"]):
+            return await aviso("Apenas a equipe", "Só a equipe pode mudar a categoria do ticket.")
+        novo = self.values[0]
+        t = cfg["categorias"].get(novo)
+        if t is None:
+            return await aviso("Categoria indisponível", "Essa opção não existe mais.")
+        velho = cat_of(cfg, data["tipo"])
+        data["tipo"] = novo
+        _save()
+        roles = staff_roles(guild, cfg, novo)
+        if not isinstance(channel, discord.Thread):  # ticket antigo em canal: topico e cargos da nova categoria
+            try:
+                await asyncio.wait_for(channel.edit(topic=f"ticket:{data['owner']}:{novo}"), timeout=5)
+            except (discord.HTTPException, asyncio.TimeoutError):
+                pass
+            for r in roles:
+                try:
+                    await channel.set_permissions(
+                        r, view_channel=True, send_messages=True, read_message_history=True, attach_files=True)
+                except discord.HTTPException:
+                    pass
+        await aviso("Pronto", f"Ticket movido para **{t['label']}**.")
+        await _refresh_card(channel, self.msg_id, data, cfg)
+        menc = " ".join(r.mention for r in roles)
+        await interaction.followup.send(
+            view=Card("Ticket movido",
+                      f"{interaction.user.mention} moveu este ticket de **{velho['label']}** para **{t['label']}**."
+                      + (f"\n{menc}" if menc else "")),
+            allowed_mentions=discord.AllowedMentions(roles=roles or False))
+
+
+class MoveCategoryView(discord.ui.LayoutView):
+    def __init__(self, msg_id, cfg, atual):
+        super().__init__(timeout=120)
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("### Transferir para outra opção\n-# o canal e a conversa continuam, só muda a categoria"),
+            discord.ui.ActionRow(_MoveSelect(msg_id, cfg, atual)),
+        ))
+
+
+# ---- renomear o ticket
+class RenameModal(discord.ui.Modal):
+    nome = discord.ui.TextInput(label="Novo nome", max_length=90, placeholder="ex: suporte-pagamento")
+
+    def __init__(self, msg_id, atual: str):
+        super().__init__(title="Renomear ticket", timeout=300)
+        self.msg_id = msg_id
+        self.nome.default = (atual or "")[:90] or None
+
+    async def on_submit(self, interaction: discord.Interaction):
+        channel = interaction.channel
+        cfg = get_cfg(interaction.guild.id)
+        data = _data_for(channel)
+        if not is_staff(interaction.user, cfg, data["tipo"]):
+            return await interaction.response.send_message(
+                view=Card("Apenas a equipe", "Só a equipe pode renomear o ticket."), ephemeral=True)
+        nome = re.sub(r"\s+", "-", self.nome.value.strip().lower()).strip("-・")[:100]
+        if not nome:
+            return await interaction.response.send_message(
+                view=Card("Nome inválido", "Escreva pelo menos uma letra ou número."), ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        try:
+            # o discord limita renomear (2x a cada 10 min): nao deixa a interacao pendurada
+            await asyncio.wait_for(channel.edit(name=nome, reason=f"Ticket renomeado por {interaction.user}"), timeout=8)
+        except asyncio.TimeoutError:
+            return await interaction.followup.send(
+                view=Card("Limite do Discord", "Dá pra renomear só 2 vezes a cada 10 minutos. Tente de novo daqui a pouco."),
+                ephemeral=True)
+        except discord.HTTPException:
+            return await interaction.followup.send(
+                view=Card("Não consegui renomear", "Confira as permissões do bot neste ticket."), ephemeral=True)
+        await channel.send(
+            view=Card("Ticket renomeado", f"{interaction.user.mention} alterou o nome para **{nome}**."),
+            allowed_mentions=NO_MENTIONS)
+        await interaction.followup.send(view=Card("Pronto", "Nome alterado."), ephemeral=True)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        log.warning("erro ao renomear ticket: %s", error)
+        try:
+            await interaction.response.send_message(view=Card("Algo deu errado", "Tente de novo."), ephemeral=True)
+        except discord.HTTPException:
+            pass
 
 
 # ---- botoes antigos: ficam registrados so pros tickets que ja estavam abertos
@@ -1230,6 +1642,7 @@ async def close_ticket(channel, closer):
     _save()
     if data.get("liberados"):
         await _limpar_liberados(channel.guild, data.get("parent"), data["liberados"])
+    await _apagar_call(channel.guild, data)
     try:
         await channel.delete(reason=f"Ticket fechado por {closer}")
     except discord.HTTPException as e:
@@ -2285,9 +2698,11 @@ class Tickets(commands.Cog):
 
     @commands.Cog.listener()
     async def on_guild_channel_delete(self, channel):
-        # ticket apagado na mao: limpa o regisrto
-        if state["tickets"].pop(str(channel.id), None) is not None:
+        # ticket apagado na mao: limpa o regisrto (e a call dele)
+        data = state["tickets"].pop(str(channel.id), None)
+        if data is not None:
             _save()
+            await _apagar_call(channel.guild, data)
 
     @commands.Cog.listener()
     async def on_thread_delete(self, thread):
@@ -2297,6 +2712,7 @@ class Tickets(commands.Cog):
             _save()
             if data.get("liberados"):
                 await _limpar_liberados(thread.guild, data.get("parent"), data["liberados"])
+            await _apagar_call(thread.guild, data)
 
     @commands.Cog.listener()
     async def on_thread_update(self, before, after):
