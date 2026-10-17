@@ -151,6 +151,8 @@ DEFAULTS = {
     "log": os.getenv("TICKET_LOG_CHANNEL", "chat-staff"),  # id do canal ou pedaco do nome
     "categoria": None,         # (antigo) categoria dos tickets que eram canais; os novos sao topicos
     "canal_tickets": None,     # canal onde os topicos de ticket nascem (vazio = canal do painel)
+    "bloquear_links": True,    # True = so as categorias de links_tipos podem mandar link (equipe sempre pode)
+    "links_tipos": ["parceria"],  # chaves das categorias que aceitam link (o bot reposta se outro bot cortar)
     "formulario": True,        # True = pede assunto e detalhes antes de abrir · False = abre direto
     "limite": max(1, _env_int("TICKET_MAX_PER_USER", 1)),
     "delay": 10,               # segundos ate apagar o canal
@@ -1038,6 +1040,14 @@ def _can_manage(member, data, cfg):
 def _is_admin(member) -> bool:
     p = member.guild_permissions
     return p.administrator or p.manage_messages or tem_acesso_total(member)
+
+
+# links (http/https, www. e convites do discord)
+LINK_RE = re.compile(
+    r"(?:https?://|www\.)\S+|(?:discord\.gg|discord(?:app)?\.com/invite)/\S+",
+    re.IGNORECASE,
+)
+_LINKS_REPOSTADOS: list = []   # ids ja repostados (evita repostar duas vezes)
 
 
 # acoes que so a equipe faz (quem abriu o ticket nao)
@@ -2788,6 +2798,70 @@ class Tickets(commands.Cog):
                 await after.edit(archived=False)
             except discord.HTTPException as e:
                 log.warning("nao consegui reabrir o topico do ticket %s: %s", after.id, e)
+
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        # links: so as categorias liberadas (ex.: parceria) aceitam; a equipe sempre pode
+        if message.author.bot or message.guild is None or message.webhook_id:
+            return
+        channel = message.channel
+        if not isinstance(channel, (discord.Thread, discord.TextChannel)):
+            return
+        data = state["tickets"].get(str(channel.id))   # so tickets registrados
+        if not data or data.get("closing"):
+            return
+        cfg = get_cfg(message.guild.id)
+        if not cfg.get("bloquear_links"):
+            return
+        if not message.content or not LINK_RE.search(message.content):
+            return
+        autor = message.author
+        if isinstance(autor, discord.Member) and is_staff(autor, cfg, data["tipo"]):
+            return
+
+        if data["tipo"] not in (cfg.get("links_tipos") or []):
+            # categoria que nao aceita link: apaga e avisa rapidinho
+            try:
+                await message.delete()
+            except discord.HTTPException as e:
+                log.warning("nao consegui apagar link no ticket %s: %s (o bot precisa de Gerenciar Mensagens)",
+                            channel.id, e)
+                return
+            try:
+                await channel.send(
+                    view=Card("Links não são permitidos aqui",
+                              f"{autor.mention}, links só podem ser enviados em tickets de parceria."),
+                    allowed_mentions=discord.AllowedMentions(users=[autor]),
+                    delete_after=8,
+                )
+            except discord.HTTPException:
+                pass
+            return
+
+        # categoria liberada: se outro bot apagar ou cortar o link, o nosso reposta o texto inteiro
+        original = message.content
+        for espera in (2, 4):
+            await asyncio.sleep(espera)
+            if message.id in _LINKS_REPOSTADOS:
+                return
+            try:
+                atual = await channel.fetch_message(message.id)
+                if atual.content == original:
+                    continue          # intacta: confere de novo mais tarde
+            except discord.NotFound:
+                pass                  # foi apagada
+            except discord.HTTPException:
+                return
+            _LINKS_REPOSTADOS.append(message.id)
+            del _LINKS_REPOSTADOS[:-200]
+            try:
+                await channel.send(
+                    view=Card(f"Link enviado por {autor.display_name}", original[:3500]),
+                    allowed_mentions=NO_MENTIONS,
+                )
+            except discord.HTTPException as e:
+                log.warning("nao consegui repostar o link no ticket %s: %s", channel.id, e)
+            return
 
     async def _updated(self, ctx, title, text=""):
         n = await refresh_panels(ctx.guild)
