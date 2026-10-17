@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import json
+import logging
+import re
 import sqlite3
 from pathlib import Path
 from typing import Optional
@@ -24,9 +27,21 @@ except ModuleNotFoundError:
         return discord.File(io.BytesIO(await asyncio.to_thread(baixar)), filename=nome)
 
 
+log = logging.getLogger(__name__)
+
 ROBLOX_LOGO_ID = 1509476102890979409
 MINECRAFT_LOGO_ID = 1509476073904148582
 DATABASE_PATH = Path(__file__).resolve().parent.parent / "avatar.sqlite3"
+
+# Quando alguém digitar a chave (minúscula), o bot busca a skin da "conta",
+# mas mostra o nome em "exibir" e a época embaixo.
+ALIASES_MC = {
+    "jeovany": {
+        "conta": "Yovanny18Games",
+        "exibir": "jeovany",
+        "epoca": "2015",
+    },
+}
 
 
 async def requisicao_json(metodo: str, url: str, dados: Optional[dict] = None) -> dict:
@@ -77,10 +92,13 @@ async def buscar_minecraft(nome: str) -> Optional[dict]:
     if not nome:
         return None
 
+    alias = ALIASES_MC.get(nome.lower())
+    nome_busca = alias["conta"] if alias else nome
+
     try:
         perfil = await requisicao_json(
             "GET",
-            f"https://api.mojang.com/users/profiles/minecraft/{quote(nome)}",
+            f"https://api.mojang.com/users/profiles/minecraft/{quote(nome_busca)}",
         )
     except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError):
         return None
@@ -101,7 +119,6 @@ async def buscar_minecraft(nome: str) -> Optional[dict]:
             "GET",
             f"https://sessionserver.mojang.com/session/minecraft/profile/{quote(uuid_limpo)}",
         )
-        import base64
         propriedades = dados_textura.get("properties", [])
         textura_b64 = next(
             (item.get("value") for item in propriedades if item.get("name") == "textures" and item.get("value")),
@@ -114,16 +131,16 @@ async def buscar_minecraft(nome: str) -> Optional[dict]:
             if skin_data.get("metadata", {}).get("model") == "slim":
                 model = "slim"
             skin_url = skin_data.get("url", "")
-            match = __import__("re").search(r"/texture/([a-fA-F0-9]{32,})", skin_url)
+            match = re.search(r"/texture/([a-fA-F0-9]{32,})", skin_url)
             if match:
                 skin_hash = match.group(1)
     except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError, TypeError, KeyError):
-        pass
+        log.exception("Falha ao obter textura de %s", real)
 
     if not skin_hash:
         return None
 
-    # === PRIORIDADE ABSOLUTA: NameMC com pose de caminhada (time=90) ===
+    # NameMC com pose de caminhada (time=90)
     imagem = (
         "https://render.namemc.com/skin/3d/body.png"
         f"?skin={quote(skin_hash)}&model={model}&theta=-30&phi=20&time=90&width=600&height=800"
@@ -135,15 +152,17 @@ async def buscar_minecraft(nome: str) -> Optional[dict]:
         f"?skin={quote(skin_hash)}&model={'classic' if model == 'slim' else 'slim'}&theta=-30&phi=20&time=90&width=600&height=800"
     )
 
-    # Fallback 2: Visage (só se NameMC falhar de vez)
+    # Fallback 2: Visage
     imagem_extra = f"https://vzge.me/full/800/{uuid_limpo}.png"
 
     perfil_url = f"https://namemc.com/profile/{quote(real)}"
+    exibido = alias["exibir"] if alias else real
 
     return {
         "plataforma": "Minecraft",
-        "nome": real,
-        "exibicao": real,
+        "nome": exibido,
+        "exibicao": exibido,
+        "epoca": alias["epoca"] if alias else None,
         "imagem": imagem,
         "imagem_fallback": imagem_fallback,
         "imagem_namemc": imagem_extra,
@@ -204,21 +223,36 @@ def salvar_post(message_id, channel_id, guild_id, skin, imagem_url, curtidas):
              imagem_url, json.dumps(sorted(curtidas))))
 
 
-def registrar_curtida_db(message_id: int, user_id: int) -> tuple[bool, list[int]]:
-    """Registra a curtida atomicamente e devolve o estado persistido."""
+def registrar_curtida_db(message_id: int, user_id: int, fallback=None) -> tuple[bool, list[int]]:
+    """Registra a curtida atomicamente e devolve (adicionou, lista_de_curtidas).
+
+    Se o post não existir no banco e `fallback` for passado
+    (channel_id, guild_id, skin, imagem_url), o post é criado na hora.
+    """
     with sqlite3.connect(DATABASE_PATH, timeout=15) as db:
         db.execute("BEGIN IMMEDIATE")
         row = db.execute(
             "SELECT curtidas_json FROM skinview_posts WHERE message_id=?",
             (message_id,),
         ).fetchone()
+
         if row is None:
-            db.rollback()
-            return False, []
-        try:
-            likes = set(json.loads(row[0] or "[]"))
-        except (ValueError, TypeError):
+            if fallback is None:
+                db.rollback()
+                return False, []
+            channel_id, guild_id, skin, imagem_url = fallback
+            db.execute(
+                "INSERT INTO skinview_posts"
+                "(message_id, channel_id, guild_id, skin_json, imagem_url, curtidas_json) "
+                "VALUES(?,?,?,?,?,'[]')",
+                (message_id, channel_id, guild_id, json.dumps(skin), imagem_url),
+            )
             likes = set()
+        else:
+            try:
+                likes = set(json.loads(row[0] or "[]"))
+            except (ValueError, TypeError):
+                likes = set()
 
         if user_id in likes:
             db.commit()
@@ -253,8 +287,11 @@ class SkinView(discord.ui.LayoutView):
             emoji=logo, style=discord.ButtonStyle.link, url=self.skin["perfil"]
         )
 
-        # custom_id ÚNICO por mensagem (resolve o bug de "já curtiu")
-        custom_id = f"skinview:curtir:{self.message_id}" if self.message_id else f"skinview:curtir:temp:{self.skin['nome']}"
+        custom_id = (
+            f"skinview:curtir:{self.message_id}"
+            if self.message_id
+            else f"skinview:curtir:temp:{self.skin['nome']}"
+        )
 
         like = discord.ui.Button(
             emoji="🤍",
@@ -262,11 +299,16 @@ class SkinView(discord.ui.LayoutView):
             custom_id=custom_id,
         )
         like.callback = self.curtir
+
+        epoca = self.skin.get("epoca")
+        linha_epoca = f"\n-# 🕰️ Conta criada em {epoca}" if epoca else ""
+
         self.add_item(discord.ui.Container(
             discord.ui.Section(
                 discord.ui.TextDisplay(
                     f"## [{self.skin['exibicao']}]({self.skin['perfil']})\n"
                     f"`@{self.skin['nome']}` - {texto_curtidas(len(self.curtidas))}"
+                    f"{linha_epoca}"
                 ),
                 accessory=perfil,
             ),
@@ -294,17 +336,24 @@ class SkinView(discord.ui.LayoutView):
                 pass
             return
 
-        # Atualiza o message_id caso ainda seja temporário
         if self.message_id == 0:
             self.message_id = mensagem.id
             self.montar()
 
+        fallback = (
+            mensagem.channel.id,
+            interaction.guild_id or 0,
+            self.skin,
+            self.imagem_url,
+        )
+
         async with self.lock:
             try:
                 adicionou, likes = await asyncio.to_thread(
-                    registrar_curtida_db, mensagem.id, interaction.user.id
+                    registrar_curtida_db, mensagem.id, interaction.user.id, fallback
                 )
             except (sqlite3.Error, OSError):
+                log.exception("Falha ao registrar curtida (msg %s)", mensagem.id)
                 try:
                     await interaction.followup.send(
                         "Não consegui salvar a curtida agora. Tente novamente.",
@@ -328,6 +377,7 @@ class SkinView(discord.ui.LayoutView):
             try:
                 await mensagem.edit(view=self)
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                log.exception("Falha ao atualizar cartão (msg %s)", mensagem.id)
                 try:
                     await interaction.followup.send(
                         "Sua curtida foi salva, mas não consegui atualizar o cartão. "
@@ -353,6 +403,7 @@ class Avatar(commands.Cog):
                 self.bot.add_view(view, message_id=int(mid))
                 self._views_registradas.add(int(mid))
             except (ValueError, TypeError, KeyError, discord.HTTPException):
+                log.exception("Falha ao registrar view do post %s", mid)
                 continue
 
     async def _enviar_skin(self, ctx: commands.Context, nome: str, buscar):
@@ -408,7 +459,6 @@ class Avatar(commands.Cog):
             await avisar("Não consegui renderizar/baixar a skin agora. Tente novamente.")
             return
 
-        # Cria o view SEM message_id ainda
         view = SkinView(resultado, imagem_url, message_id=0)
 
         try:
@@ -417,14 +467,14 @@ class Avatar(commands.Cog):
             await avisar("Não consegui enviar o cartão da skin. Verifique as permissões do bot.")
             return
 
-        # Agora que temos o message_id, atualiza o view e registra
+        # Agora que temos o message_id, recria o botão com custom_id único
         view.message_id = msg.id
-        view.montar()  # recria o botão com custom_id único
+        view.montar()
 
         try:
             await msg.edit(view=view)
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            pass
+            log.exception("Falha ao editar cartão recém-enviado (msg %s)", msg.id)
 
         if msg.guild is not None:
             try:
@@ -435,7 +485,7 @@ class Avatar(commands.Cog):
                 self.bot.add_view(view, message_id=msg.id)
                 self._views_registradas.add(msg.id)
             except (sqlite3.Error, OSError, discord.HTTPException):
-                pass
+                log.exception("salvar_post falhou (msg %s)", msg.id)
 
     @commands.hybrid_command(
         name="avatar_roblox",
