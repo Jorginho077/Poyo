@@ -151,6 +151,17 @@ DEFAULTS = {
     "log": os.getenv("TICKET_LOG_CHANNEL", "chat-staff"),  # id do canal ou pedaco do nome
     "categoria": None,         # (antigo) categoria dos tickets que eram canais; os novos sao topicos
     "canal_tickets": None,     # canal onde os topicos de ticket nascem (vazio = canal do painel)
+    "parceria": {
+        "ativo": False,            # liga a postagem automatica (precisa de canal)
+        "tipo": "parceria",        # chave da categoria de ticket que posta sozinha
+        "canal": None,             # canal onde as parcerias sao publicadas
+        "ping_cargo": None,        # cargo pingado em cada postagem (vazio = sem ping)
+        "remover_everyone": True,  # tira @everyone e @here do texto
+        "cargos_modo": "todos",    # todos | lista | nenhum  (cargos tirados do texto)
+        "cargos_lista": [],        # usados quando o modo e "lista"
+        "creditar": True,          # linha "enviado por @pessoa" no fim
+        "bloquear_duplicado": True,  # nao aceita o mesmo servidor duas vezes
+    },
     "bloquear_links": True,    # True = so as categorias de links_tipos podem mandar link (equipe sempre pode)
     "links_tipos": ["parceria"],  # chaves das categorias que aceitam link (o bot reposta se outro bot cortar)
     "formulario": True,        # True = pede assunto e detalhes antes de abrir · False = abre direto
@@ -1048,6 +1059,40 @@ LINK_RE = re.compile(
     re.IGNORECASE,
 )
 _LINKS_REPOSTADOS: list = []   # ids ja repostados (evita repostar duas vezes)
+
+# convite do discord (pega so o codigo)
+INVITE_RE = re.compile(r"(?:discord\.gg|discord(?:app)?\.com/invite)/([A-Za-z0-9-]{2,32})", re.IGNORECASE)
+EVERYONE_RE = re.compile(r"@(?:everyone|here)\b", re.IGNORECASE)
+ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
+
+# registro das parcerias ja postadas: {"guilds": {id_do_nosso_server: {id_do_server_parceiro: {...}}}}
+PARC_FILE = Path(os.getenv("TICKETS_PARCERIAS_FILE", "tickets_parcerias.json"))
+_parc = _read_json(PARC_FILE)
+_parc.setdefault("guilds", {})
+
+
+def _parc_save():
+    _write_json(PARC_FILE, _parc)
+
+
+def _parc_guild(guild_id) -> dict:
+    return _parc["guilds"].setdefault(str(guild_id), {})
+
+
+def _limpar_parceria(texto: str, p: dict) -> str:
+    # tira do texto o que o painel mandou tirar (everyone/here e cargos)
+    if p.get("remover_everyone", True):
+        texto = EVERYONE_RE.sub("", texto)
+    modo = p.get("cargos_modo", "todos")
+    if modo == "todos":
+        texto = ROLE_MENTION_RE.sub("", texto)
+    elif modo == "lista":
+        ids = {str(i) for i in (p.get("cargos_lista") or [])}
+        texto = ROLE_MENTION_RE.sub(lambda m: "" if m.group(1) in ids else m.group(0), texto)
+    texto = re.sub(r"[ \t]{2,}", " ", texto)
+    texto = re.sub(r"[ \t]+\n", "\n", texto)
+    texto = re.sub(r"\n{3,}", "\n\n", texto)
+    return texto.strip()
 
 
 # acoes que so a equipe faz (quem abriu o ticket nao)
@@ -2739,9 +2784,339 @@ class ConfigView(discord.ui.LayoutView):
         ]
 
 
+class ParceriaLiberarModal(discord.ui.Modal):
+    def __init__(self, painel):
+        super().__init__(title="Liberar servidor")
+        self.painel = painel
+        self.campo = discord.ui.TextInput(
+            label="ID do servidor, convite ou nome",
+            placeholder="123456789012345678 · discord.gg/abc · Nome",
+            max_length=100,
+        )
+        self.add_item(self.campo)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        txt = self.campo.value.strip()
+        m = INVITE_RE.search(txt)
+        cod = (m.group(1) if m else txt).strip("/ ").lower()
+        reg = _parc_guild(self.painel.guild.id)
+        achado = next((k for k, e in reg.items()
+                       if k == cod or str(e.get("codigo", "")).lower() == cod
+                       or str(e.get("nome", "")).lower() == txt.lower()), None)
+        if achado is None:
+            await self.painel.update(interaction, "⚠️ Não achei esse servidor no registro")
+            return
+        nome = reg.pop(achado).get("nome", achado)
+        _parc_save()
+        await self.painel.update(interaction, f"✅ {nome} liberado pra postar de novo")
+
+    async def on_error(self, interaction, error):
+        log.exception("erro na janela de liberar parceria", exc_info=error)
+        await _erro_card(interaction, "Algo deu errado", "Tente de novo.")
+
+
+def _cargos_txt(ids) -> str:
+    return " ".join(f"<@&{i}>" for i in ids) if ids else "*nenhum*"
+
+
+# painel minimalista da postagem automatica de parcerias (mesma cara do ,ptconfig)
+class ParceriaView(discord.ui.LayoutView):
+    def __init__(self, author_id: int, guild: discord.Guild):
+        super().__init__(timeout=600)
+        self.author_id, self.guild = author_id, guild
+        self.page, self.notice, self.sent = "home", "", None
+        self.render()
+
+    @classmethod
+    async def open(cls, ctx):
+        view = cls(ctx.author.id, ctx.guild)
+        view.sent = await ctx.send(view=view, allowed_mentions=NO_MENTIONS)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                view=Card("Esse painel é de outra pessoa", "Use `,ptparc` pra abrir o seu."), ephemeral=True)
+            return False
+        perms = getattr(interaction.user, "guild_permissions", None)
+        if not (perms is not None and perms.administrator) and not tem_acesso_total(interaction.user):
+            await _erro_card(interaction, "Sem permissão", "Só administradores mexem aqui.")
+            return False
+        return True
+
+    async def on_timeout(self):
+        if self.sent is None:
+            return
+        for item in self.walk_children():
+            if hasattr(item, "disabled"):
+                item.disabled = True
+        try:
+            await self.sent.edit(view=self)
+        except discord.HTTPException:
+            pass
+
+    async def on_error(self, interaction, error, item):
+        log.exception("erro no painel de parcerias", exc_info=error)
+        await _erro_card(interaction, "Algo deu errado", "Tente de novo.")
+
+    async def update(self, interaction, notice=""):
+        self.notice = notice
+        self.render()
+        if interaction.response.is_done():
+            await interaction.edit_original_response(view=self)
+        else:
+            await interaction.response.edit_message(view=self)
+
+    async def go(self, interaction, page):
+        self.page = page
+        await self.update(interaction)
+
+    def render(self):
+        cfg = get_cfg(self.guild.id)
+        children = getattr(self, f"_page_{self.page}")(cfg)
+        if self.notice:
+            children.append(discord.ui.TextDisplay(f"-# {self.notice}"))
+        self.clear_items()
+        self.add_item(discord.ui.Container(*children))
+
+    # ---- pecinhas
+
+    def _btn(self, label, fn, style=discord.ButtonStyle.secondary, emoji=None, disabled=False):
+        return _Btn(fn, label=label[:80], style=style, emoji=emoji, disabled=disabled)
+
+    def _goto(self, page):
+        async def h(interaction, item):
+            await self.go(interaction, page)
+        return h
+
+    def _voltar(self):
+        return discord.ui.ActionRow(self._btn("Voltar", self._goto("home"), emoji="⬅️"))
+
+    def _flip(self, path):
+        async def h(interaction, item):
+            atual = _dig(get_cfg(self.guild.id), path)
+            set_path(self.guild.id, path, not atual)
+            await self.update(interaction, "✅ Salvo")
+        return h
+
+    def _set(self, path, valor, aviso="✅ Salvo"):
+        async def h(interaction, item):
+            set_path(self.guild.id, path, valor)
+            await self.update(interaction, aviso)
+        return h
+
+    # ---- telas
+
+    def _page_home(self, cfg):
+        p = cfg["parceria"]
+        canal = f"<#{p['canal']}>" if p.get("canal") else "*não definido*"
+        ping = f"<@&{p['ping_cargo']}>" if p.get("ping_cargo") else "*sem ping*"
+        c = cat_of(cfg, p["tipo"])
+        n = len(_parc_guild(self.guild.id))
+        ativo = p["ativo"]
+
+        async def ligar(interaction, item):
+            atual = get_cfg(self.guild.id)["parceria"]
+            if not atual["ativo"] and not self.guild.get_channel(atual.get("canal") or 0):
+                await self.update(interaction, "⚠️ Escolha o canal das parcerias antes de ligar")
+                return
+            set_path(self.guild.id, ("parceria", "ativo"), not atual["ativo"])
+            await self.update(interaction, "✅ Desligada" if atual["ativo"] else "✅ Ligada")
+
+        return [
+            discord.ui.TextDisplay("## 🤝 Parcerias\n-# postagem automática e regras de link dos tickets"),
+            sep(),
+            discord.ui.TextDisplay(
+                f"**Status**  {'🟢 ligada' if ativo else '⚪ desligada'}\n"
+                f"**Canal**  {canal}\n"
+                f"**Ping**  {ping}\n"
+                f"**Ticket**  {_ico(c)}{c['label']}\n"
+                f"**Registradas**  {n}"
+            ),
+            sep(),
+            discord.ui.ActionRow(
+                self._btn("Desligar" if ativo else "Ligar", ligar,
+                          discord.ButtonStyle.secondary if ativo else discord.ButtonStyle.success),
+                self._btn("Destino", self._goto("destino"), emoji="📍"),
+                self._btn("Limpeza", self._goto("limpeza"), emoji="🧹"),
+            ),
+            discord.ui.ActionRow(
+                self._btn("Links", self._goto("links"), emoji="🔗"),
+                self._btn("Registro", self._goto("registro"), emoji="🗂️"),
+            ),
+        ]
+
+    def _page_destino(self, cfg):
+        p = cfg["parceria"]
+        g = self.guild
+
+        async def canal(interaction, item):
+            set_path(g.id, ("parceria", "canal"), item.values[0].id)
+            await self.update(interaction, "✅ Salvo")
+
+        async def cargo(interaction, item):
+            set_path(g.id, ("parceria", "ping_cargo"), item.values[0].id)
+            await self.update(interaction, "✅ Salvo")
+
+        async def tipo(interaction, item):
+            set_path(g.id, ("parceria", "tipo"), item.values[0])
+            await self.update(interaction, "✅ Salvo")
+
+        canal_txt = f"<#{p['canal']}>" if p.get("canal") else "*não definido*"
+        ping_txt = f"<@&{p['ping_cargo']}>" if p.get("ping_cargo") else "*sem ping*"
+        opcoes = [
+            discord.SelectOption(label=c["label"][:100], value=k, emoji=_ui_emoji(c["emoji"]),
+                                 default=(k == p["tipo"]))
+            for k, c in cfg["categorias"].items()
+        ]
+        return [
+            discord.ui.TextDisplay("## 📍 Destino\n-# onde postar, quem pingar e de qual ticket"),
+            sep(),
+            _sec("📢 Canal das parcerias", "agora: " + canal_txt),
+            discord.ui.ActionRow(_ChanSel(
+                canal, placeholder="Escolher o canal",
+                channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+                min_values=1, max_values=1)),
+            discord.ui.ActionRow(self._btn("Tirar canal", self._set(("parceria", "canal"), None, "✅ Removido"))),
+            sep(),
+            _sec("🔔 Cargo do ping", "agora: " + ping_txt),
+            discord.ui.ActionRow(_RoleSel(cargo, placeholder="Escolher o cargo", min_values=1, max_values=1)),
+            discord.ui.ActionRow(self._btn("Tirar ping", self._set(("parceria", "ping_cargo"), None, "✅ Removido"))),
+            sep(),
+            _sec("🎟️ Ticket que posta sozinho", "só o dono do ticket dessa categoria, e só convites"),
+            discord.ui.ActionRow(_Sel(tipo, placeholder="Escolher a categoria", options=opcoes)),
+            sep(),
+            self._voltar(),
+        ]
+
+    def _page_limpeza(self, cfg):
+        p = cfg["parceria"]
+        g = self.guild
+        modo = p.get("cargos_modo", "todos")
+
+        async def modo_sel(interaction, item):
+            set_path(g.id, ("parceria", "cargos_modo"), item.values[0])
+            await self.update(interaction, "✅ Salvo")
+
+        async def lista_sel(interaction, item):
+            set_path(g.id, ("parceria", "cargos_lista"), [r.id for r in item.values])
+            await self.update(interaction, "✅ Salvo")
+
+        sn = lambda v: "sim" if v else "não"
+        opcoes = [
+            discord.SelectOption(label="Todos os cargos", value="todos", default=modo == "todos",
+                                 description="nenhuma menção de cargo vai pro post"),
+            discord.SelectOption(label="Só os escolhidos", value="lista", default=modo == "lista",
+                                 description="tira apenas os cargos da lista abaixo"),
+            discord.SelectOption(label="Nenhum", value="nenhum", default=modo == "nenhum",
+                                 description="mantém o texto (sem ping)"),
+        ]
+        return [
+            discord.ui.TextDisplay("## 🧹 Limpeza\n-# o que o bot ajeita no texto antes de postar · ninguém é pingado além do cargo do ping"),
+            sep(),
+            _sec("📣 @everyone e @here", f"tirar do texto: {sn(p.get('remover_everyone', True))}"),
+            discord.ui.ActionRow(self._btn(
+                "Remover: sim" if p.get("remover_everyone", True) else "Remover: não",
+                self._flip(("parceria", "remover_everyone")))),
+            sep(),
+            _sec("🏷️ Cargos no texto", "tirar: " + {"todos": "todos", "lista": "só os escolhidos", "nenhum": "nenhum"}[modo]),
+            discord.ui.ActionRow(_Sel(modo_sel, placeholder="Escolher o modo", options=opcoes)),
+            sep(),
+            _sec("📋 Cargos escolhidos", f"valem no modo \"só os escolhidos\": {_cargos_txt(p.get('cargos_lista'))}"),
+            discord.ui.ActionRow(_RoleSel(lista_sel, placeholder="Escolher cargos", min_values=1, max_values=25)),
+            discord.ui.ActionRow(self._btn("Limpar lista", self._set(("parceria", "cargos_lista"), [], "✅ Lista limpa"))),
+            sep(),
+            _sec("🧾 Crédito", "linha pequena “enviado por @pessoa” no fim do post"),
+            discord.ui.ActionRow(self._btn(
+                "Mostrar: sim" if p.get("creditar", True) else "Mostrar: não",
+                self._flip(("parceria", "creditar")))),
+            sep(),
+            _sec("🔁 Servidor repetido", "não aceita o mesmo servidor duas vezes"),
+            discord.ui.ActionRow(self._btn(
+                "Bloquear: sim" if p.get("bloquear_duplicado", True) else "Bloquear: não",
+                self._flip(("parceria", "bloquear_duplicado")))),
+            sep(),
+            self._voltar(),
+        ]
+
+    def _page_links(self, cfg):
+        g = self.guild
+        liberados = cfg.get("links_tipos") or []
+
+        async def tipos(interaction, item):
+            set_path(g.id, ("links_tipos",), list(item.values))
+            await self.update(interaction, "✅ Salvo")
+
+        opcoes = [
+            discord.SelectOption(label=c["label"][:100], value=k, emoji=_ui_emoji(c["emoji"]),
+                                 default=(k in liberados))
+            for k, c in cfg["categorias"].items()
+        ]
+        nomes = ", ".join(cat_of(cfg, k)["label"] for k in liberados) or "nenhuma"
+        bloq = cfg.get("bloquear_links", True)
+        return [
+            discord.ui.TextDisplay("## 🔗 Links nos tickets\n-# a equipe sempre pode mandar link"),
+            sep(),
+            _sec("🚧 Bloquear links", "quem não é da equipe só manda link nas categorias liberadas"),
+            discord.ui.ActionRow(self._btn(
+                "Bloqueio: ligado" if bloq else "Bloqueio: desligado",
+                self._flip(("bloquear_links",)),
+                discord.ButtonStyle.success if bloq else discord.ButtonStyle.secondary)),
+            sep(),
+            _sec("✅ Categorias que aceitam link", f"agora: {nomes}  ·  se outro bot cortar o link, o bot reposta"),
+            discord.ui.ActionRow(_Sel(tipos, placeholder="Escolher categorias", options=opcoes,
+                                      min_values=0, max_values=len(opcoes))),
+            sep(),
+            self._voltar(),
+        ]
+
+    def _page_registro(self, cfg):
+        reg = _parc_guild(self.guild.id)
+        itens = sorted(reg.items(), key=lambda kv: kv[1].get("ts", 0), reverse=True)[:8]
+        linhas = "\n".join(
+            f"**{e.get('nome', k)}**  `{k}`  ·  <t:{e.get('ts', 0)}:d>  ·  <@{e.get('autor', 0)}>"
+            for k, e in itens
+        ) or "*nenhuma parceria registrada*"
+
+        async def liberar(interaction, item):
+            await interaction.response.send_modal(ParceriaLiberarModal(self))
+
+        return [
+            discord.ui.TextDisplay(
+                f"## 🗂️ Registro ({len(reg)})\n-# servidores já postados · apagar o post também libera o servidor"),
+            sep(),
+            discord.ui.TextDisplay(linhas + ("\n-# mostrando os 8 mais recentes" if len(reg) > 8 else "")),
+            sep(),
+            discord.ui.ActionRow(
+                self._btn("Liberar servidor", liberar, emoji="🔓"),
+                self._btn("Limpar tudo", self._goto("limpar"), discord.ButtonStyle.danger, "🗑️", disabled=not reg),
+            ),
+            self._voltar(),
+        ]
+
+    def _page_limpar(self, cfg):
+        async def apagar(interaction, item):
+            _parc_guild(self.guild.id).clear()
+            _parc_save()
+            self.page = "registro"
+            await self.update(interaction, "✅ Registro limpo")
+
+        return [
+            discord.ui.TextDisplay("## 🗑️ Limpar o registro?\n"
+                                   "Todos os servidores poderão postar parceria de novo. Os posts já feitos continuam no canal."),
+            discord.ui.ActionRow(
+                self._btn("Sim, limpar", apagar, discord.ButtonStyle.danger, "🗑️"),
+                self._btn("Cancelar", self._goto("registro")),
+            ),
+        ]
+
+
 class Tickets(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self._locks: dict = {}
+
+    def _lock(self, guild_id) -> asyncio.Lock:
+        return self._locks.setdefault(guild_id, asyncio.Lock())
 
     async def cog_load(self):
         register_views(self.bot)
@@ -2801,7 +3176,6 @@ class Tickets(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message):
-        # links: so as categorias liberadas (ex.: parceria) aceitam; a equipe sempre pode
         if message.author.bot or message.guild is None or message.webhook_id:
             return
         channel = message.channel
@@ -2810,15 +3184,22 @@ class Tickets(commands.Cog):
         data = state["tickets"].get(str(channel.id))   # so tickets registrados
         if not data or data.get("closing"):
             return
-        cfg = get_cfg(message.guild.id)
-        if not cfg.get("bloquear_links"):
-            return
         if not message.content or not LINK_RE.search(message.content):
             return
         autor = message.author
+        cfg = get_cfg(message.guild.id)
         if isinstance(autor, discord.Member) and is_staff(autor, cfg, data["tipo"]):
             return
 
+        # parceria: o dono do ticket manda o convite e o bot publica no canal de parcerias
+        p = cfg["parceria"]
+        if (p.get("ativo") and data["tipo"] == p.get("tipo") and autor.id == data["owner"]
+                and INVITE_RE.search(message.content)):
+            await self._auto_postar(message, data, cfg)
+            return
+
+        if not cfg.get("bloquear_links"):
+            return
         if data["tipo"] not in (cfg.get("links_tipos") or []):
             # categoria que nao aceita link: apaga e avisa rapidinho
             try:
@@ -2862,6 +3243,129 @@ class Tickets(commands.Cog):
             except discord.HTTPException as e:
                 log.warning("nao consegui repostar o link no ticket %s: %s", channel.id, e)
             return
+
+    async def _auto_postar(self, message, data, cfg):
+        p = cfg["parceria"]
+        guild, channel, autor = message.guild, message.channel, message.author
+
+        async def aviso(titulo, texto, ping=False):
+            try:
+                await channel.send(
+                    view=Card(titulo, texto),
+                    allowed_mentions=discord.AllowedMentions(users=[autor]) if ping else NO_MENTIONS,
+                )
+            except discord.HTTPException:
+                pass
+
+        codigos = []
+        for c in INVITE_RE.findall(message.content):
+            if c.lower() not in (x.lower() for x in codigos):
+                codigos.append(c)
+        if not codigos:
+            return
+        if len(codigos) > 1:
+            return await aviso("Um convite por vez", f"{autor.mention}, mande o convite de um servidor só.", True)
+
+        destino = guild.get_channel(p["canal"]) if p.get("canal") else None
+        if not isinstance(destino, discord.TextChannel):
+            return await aviso("Postagem automática indisponível",
+                               "O canal de parcerias não está configurado. A equipe vai publicar manualmente.")
+
+        try:
+            convite = await self.bot.fetch_invite(codigos[0], with_counts=False)
+        except discord.NotFound:
+            return await aviso("Convite inválido",
+                               f"{autor.mention}, esse convite não existe ou expirou. Mande um convite válido.", True)
+        except discord.HTTPException:
+            return await aviso("Não consegui verificar o convite", "Tente de novo em instantes.")
+        alvo = getattr(convite, "guild", None)
+        if alvo is None:
+            return await aviso("Convite inválido", f"{autor.mention}, mande o convite de um servidor.", True)
+        if alvo.id == guild.id:
+            return await aviso("Esse é o convite do nosso servidor",
+                               f"{autor.mention}, mande o convite do **seu** servidor.", True)
+        nome = getattr(alvo, "name", None) or str(alvo.id)
+
+        async with self._lock(guild.id):
+            reg = _parc_guild(guild.id)
+            if p.get("bloquear_duplicado", True) and str(alvo.id) in reg:
+                e = reg[str(alvo.id)]
+                return await aviso("Esse servidor já tem parceria postada",
+                                   f"**{nome}** foi publicada em <t:{e.get('ts', 0)}:D>. "
+                                   "Cada servidor só pode ter uma parceria postada.")
+
+            # monta o texto: limpa o que o painel mandou tirar, ping do cargo e credito
+            corpo = _limpar_parceria(message.content, p)
+            topo = f"<@&{p['ping_cargo']}>" if p.get("ping_cargo") else ""
+            rodape = f"-# enviado por {autor.mention}" if p.get("creditar", True) else ""
+            reserva = len(topo) + len(rodape) + 60
+            if len(corpo) > 2000 - reserva:
+                corpo = corpo[: 2000 - reserva].rstrip()
+                if codigos[0].lower() not in corpo.lower():
+                    corpo += f"\ndiscord.gg/{codigos[0]}"
+            conteudo = "\n".join(x for x in (topo, corpo, rodape) if x)[:2000]
+
+            # copia os anexos antes de apagar a mensagem original
+            arquivos = []
+            for a in message.attachments[:4]:
+                if a.size <= guild.filesize_limit:
+                    try:
+                        arquivos.append(await a.to_file())
+                    except discord.HTTPException:
+                        pass
+            kwargs = {"files": arquivos} if arquivos else {}
+            ping_roles = [discord.Object(p["ping_cargo"])] if p.get("ping_cargo") else False
+            try:
+                post = await destino.send(
+                    conteudo,
+                    allowed_mentions=discord.AllowedMentions(everyone=False, users=False, roles=ping_roles),
+                    **kwargs,
+                )
+            except discord.HTTPException as e:
+                log.warning("nao consegui postar a parceria em #%s: %s", destino.name, e)
+                return await aviso("Não consegui publicar",
+                                   "O bot precisa de permissão pra enviar mensagens no canal de parcerias. "
+                                   "A equipe vai ver isso.")
+
+            reg[str(alvo.id)] = {
+                "nome": nome, "codigo": codigos[0], "autor": autor.id,
+                "ts": int(datetime.now().timestamp()), "canal": destino.id, "msg": post.id,
+            }
+            _parc_save()
+
+        try:
+            await message.delete()
+        except discord.HTTPException as e:
+            log.warning("nao consegui apagar a mensagem original da parceria no ticket %s: %s", channel.id, e)
+        await aviso("Parceria publicada", f"{autor.mention}, sua parceria foi publicada: {post.jump_url}", True)
+
+    @commands.Cog.listener()
+    async def on_raw_message_delete(self, payload):
+        # apagou o post da parceria no canal: o servidor sai do registro e pode postar de novo
+        if payload.guild_id is None:
+            return
+        reg = _parc["guilds"].get(str(payload.guild_id))
+        if not reg:
+            return
+        for k, e in list(reg.items()):
+            if e.get("msg") == payload.message_id:
+                del reg[k]
+                _parc_save()
+                log.info("parceria %s saiu do registro (post apagado)", e.get("nome", k))
+
+    @commands.group(
+        name="ptparc",
+        aliases=("parcerias",),
+        invoke_without_command=True,
+        extras={
+            "categoria": "Utilidades",
+            "uso": ",ptparc",
+            "descricao": "Painel da postagem automática de parcerias e dos links dos tickets.",
+        },
+    )
+    @commands.guild_only()
+    async def ptparc(self, ctx):
+        await ParceriaView.open(ctx)
 
     async def _updated(self, ctx, title, text=""):
         n = await refresh_panels(ctx.guild)
