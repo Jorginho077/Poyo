@@ -1,6 +1,7 @@
 # cog de tickets com components v2 - totalmente configuravel por servidor
 import os
 import io
+import math
 import secrets
 import re
 import copy
@@ -8,15 +9,16 @@ import json
 import asyncio
 import difflib
 import logging
+import time
 import unicodedata
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 import discord
 
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 try:
     from ._acesso import tem_acesso_total as _acesso_base   # cargo com acesso a todos os comandos
@@ -183,6 +185,53 @@ DEFAULTS = {
         "avaliacao": True,         # pede nota de 1 a 5 estrelas pro dono do ticket, na DM, ao encerrar
         "pontos_ticket": 10,       # pontos por ticket atendido e encerrado
         "pontos_estrela": 2,       # pontos extras por estrela recebida (nota 5 = 10 extras)
+        "xp_ativo": True,          # XP e niveis (permanentes, diferente dos pontos do mes)
+        "xp_ticket": 50,           # XP por ticket atendido e encerrado
+        "xp_estrela": 10,          # XP extra por estrela recebida (nota 5 = 50 extras)
+        "xp_base": 100,            # XP pro nivel 1; cada nivel seguinte pede mais (curva em _xp_para_nivel)
+        "nivel_dm": True,          # avisa na DM quando sobe de nivel
+        "nivel_canal": True,       # avisa num canal quando sobe de nivel
+        "canal_niveis": None,      # canal dos avisos de nivel (vazio = usa o canal do placar)
+    },
+    # extras do atendimento (tudo liga e desliga em ,ptrank > Extras)
+    "extras": {
+        "anti": {                      # anti-farm: ticket falso nao rende ponto nem XP
+            "ativo": True,
+            "msgs_ativo": True, "min_msgs": 3,            # atendente mandou no minimo N mensagens
+            "tempo_ativo": True, "min_minutos": 10,       # ou o ticket ficou aberto X minutos
+            "exigir_ambos": False,                        # True = precisa passar nos dois
+            "dia_ativo": True, "max_dia": 3,              # tickets que pontuam por dono por dia
+            "par_ativo": True, "max_par": 3, "par_dias": 30,   # mesmo dono pro mesmo atendente
+            "avisar_log": True,                           # avisa no log quando barra
+        },
+        "cargos": {                    # cargo automatico por nivel
+            "ativo": False,
+            "niveis": {},              # {"5": id_do_cargo, "10": id_do_cargo}
+            "remover_anterior": True,  # troca o cargo do nivel anterior pelo novo
+        },
+        "parado": {                    # ticket parado
+            "lembrete_ativo": False, "lembrete_min": 15,  # dono respondeu e o atendente nao
+            "ping_ativo": False, "ping_min": 10,          # ninguem assumiu: chama a equipe
+            "fechar_ativo": False, "fechar_horas": 48, "aviso_horas": 6,
+        },
+        "motiv": {                     # motivacao
+            "rapida_ativo": False, "rapida_min": 5, "rapida_xp": 20,
+            "seq_ativo": False, "seq_xp": 5, "seq_max": 7,
+            "conq_ativo": False,
+            "mes_ativo": False, "mes_cargo": None,
+            "meta_ativo": False, "meta_tickets": 200, "meta_xp": 100,
+        },
+        "qual": {                      # qualidade
+            "tempo_ativo": True,
+            "alerta_ativo": False, "alerta_nota": 2, "alerta_cargo": None,
+            "comentario_ativo": False,
+            "ausente_ativo": True,
+        },
+        "parc": {                      # parcerias
+            "dm_ativo": False,
+            "min_ativo": False, "min_membros": 50,
+            "bonus_ativo": False, "bonus_xp": 30, "bonus_pts": 5,
+        },
     },
     "bloquear_links": True,    # True = so as categorias de links_tipos podem mandar link (equipe sempre pode)
     "links_tipos": ["parceria"],  # chaves das categorias que aceitam link (o bot reposta se outro bot cortar)
@@ -362,6 +411,18 @@ def _load() -> dict:
 
 def _save():
     _write_json(STATE_FILE, state)
+
+
+_ultimo_save = 0.0
+
+
+def _save_soft(intervalo: int = 20):
+    # contador de mensagem muda toda hora: grava no maximo a cada N segundos
+    global _ultimo_save
+    agora = time.monotonic()
+    if agora - _ultimo_save >= intervalo:
+        _ultimo_save = agora
+        _save()
 
 
 state = _load()
@@ -1047,6 +1108,7 @@ async def create_ticket(interaction: discord.Interaction, tipo: str, assunto: st
         "owner": user.id, "tipo": tipo, "assunto": assunto.strip(), "descricao": descricao.strip(),
         "opened": int(datetime.now().timestamp()), "claimed": None,
         "avatar": user.display_avatar.url, "parent": parent.id,
+        "msgs_por": {}, "ultima_msg": int(datetime.now().timestamp()), "anti_v": 1,
     }
     # salva os dados do ticket
     state["tickets"][str(channel.id)] = data
@@ -1323,7 +1385,7 @@ async def _menu_action(interaction: discord.Interaction, acao: str):
             # quem abriu o ticket chama o atendente (ou a equipe, se ninguem assumiu ainda)
             data["notificado"] = agora
             _save()
-            if claimed:
+            if claimed and not _esta_ausente(guild.id, claimed, cfg):
                 allowed = discord.AllowedMentions(users=[discord.Object(claimed)])
                 publico = ("Atendente notificado", f"<@{claimed}>, {user.mention} está aguardando você neste ticket.")
 
@@ -1331,10 +1393,13 @@ async def _menu_action(interaction: discord.Interaction, acao: str):
                     await _dm(interaction.client, claimed,
                               f"{user.display_name} está esperando por você no ticket {channel.mention} em **{guild.name}**.")
             else:
-                roles = staff_roles(guild, cfg, data["tipo"])
-                allowed = discord.AllowedMentions(roles=roles or False)
-                quem = " ".join(r.mention for r in roles) or "Equipe"
-                publico = ("Equipe notificada", f"{quem}, {user.mention} está aguardando atendimento.")
+                # sem atendente (ou atendente ausente): chama a equipe de plantao
+                quem, allowed = _ping_equipe(guild, cfg, data["tipo"])
+                if claimed:
+                    publico = ("Atendente ausente",
+                               f"{quem}, <@{claimed}> está ausente e {user.mention} está aguardando atendimento.")
+                else:
+                    publico = ("Equipe notificada", f"{quem}, {user.mention} está aguardando atendimento.")
         else:
             # a equipe chama quem abriu: DM pro dono (se a DM estiver fechada, marca no ticket)
             data["notificado"] = agora
@@ -1538,6 +1603,7 @@ class _TransferSelect(discord.ui.UserSelect):
         except discord.HTTPException:
             return await aviso("Não consegui transferir", "Confira as permissões do bot neste ticket.")
         data["claimed"] = m.id
+        data["resp_base"] = int(datetime.now().timestamp())   # o tempo de resposta do novo atendente comeca agora
         _save()
         await aviso("Pronto", f"O atendimento agora é de {m.mention}.")
         await _refresh_card(channel, self.msg_id, data, cfg)
@@ -1805,6 +1871,8 @@ async def close_ticket(channel, closer):
         # ranking: conta o atendimento e pede a nota pro dono (na DM, porque o ticket vai ser apagado)
         try:
             rid = _rank_registrar(channel.guild.id, data, cfg)
+            if not rid and data.get("rank_bloq"):
+                await _avisar_bloqueio(channel, data, cfg)
             if rid:
                 if cfg["ranking"].get("avaliacao") and not data.get("rank_dm"):
                     dono_m = channel.guild.get_member(data["owner"])
@@ -1815,13 +1883,24 @@ async def close_ticket(channel, closer):
                         except discord.HTTPException:
                             pass  # dm fechada: o ponto do ticket conta igual, so fica sem nota
                 await atualizar_ranking(channel.guild)
+                nv = data.get("rank_nivel")
+                if nv and nv[1] > nv[0] and not data.get("rank_nivel_avisado"):
+                    data["rank_nivel_avisado"] = True
+                    await avisar_nivel(channel.guild, data["claimed"], nv[0], nv[1], cfg)
+                await avisar_conquistas(channel.guild, data["claimed"], cfg)
         except Exception:
             log.exception("erro ao registrar o atendimento no ranking")
 
         wait = f"**{delay} segundos**" if delay else "instantes"
+        xp_g = data.get("rank_xp")
+        xp_txt = f"\n{_poyo('xp', '✨')} +{xp_g} XP pra <@{data['claimed']}>" if xp_g and data.get("claimed") else ""
+        for b in data.get("rank_bonus") or []:
+            xp_txt += f"\n{b}"
+        if data.get("rank_bloq"):
+            xp_txt += f"\n🛡️ Este atendimento não pontuou: {data['rank_bloq']}."
         try:
             await channel.send(
-                view=Card("Ticket encerrado", f"Encerrado por {closer.mention}. Este {'tópico' if isinstance(channel, discord.Thread) else 'canal'} será apagado em {wait}."),
+                view=Card("Ticket encerrado", f"Encerrado por {closer.mention}. Este {'tópico' if isinstance(channel, discord.Thread) else 'canal'} será apagado em {wait}.{xp_txt}"),
                 allowed_mentions=NO_MENTIONS,
             )
         except discord.HTTPException:
@@ -3643,6 +3722,145 @@ def _poyo_ui(nome: str, fallback: str):
     return (_ui_emoji(custom) if custom else None) or fallback
 
 
+# ---------------------------------------------------------------- XP e niveis
+
+# titulos por faixa de nivel: (nivel minimo, nome, emoji de reserva)
+TITULOS_NIVEL = [(0, "Recruta", "🌱"), (5, "Atendente", "🎧"), (10, "Veterano", "🛡️"),
+                 (20, "Mestre", "👑"), (35, "Lenda", "🌟")]
+
+
+def _xp_para_nivel(n: int, base: int) -> int:
+    # XP total pra chegar no nivel n: base, 3*base, 6*base, 10*base... (cada nivel pede 1 base a mais que o anterior)
+    return max(1, int(base)) * n * (n + 1) // 2
+
+
+def _nivel_de(xp: int, base: int) -> int:
+    base = max(1, int(base))
+    n = max(0, int((math.sqrt(8 * max(0, xp) / base + 1) - 1) / 2))
+    while _xp_para_nivel(n + 1, base) <= xp:
+        n += 1
+    while n > 0 and _xp_para_nivel(n, base) > xp:
+        n -= 1
+    return n
+
+
+def _titulo_nivel(n: int):
+    nome, emoji = TITULOS_NIVEL[0][1], TITULOS_NIVEL[0][2]
+    for minimo, t, e in TITULOS_NIVEL:
+        if n >= minimo:
+            nome, emoji = t, e
+    return nome, emoji
+
+
+def _barra_xp(pct: float, tam: int = 12) -> str:
+    cheio = max(0, min(tam, int(pct * tam)))
+    return "▰" * cheio + "▱" * (tam - cheio)
+
+
+def _xp_guild(guild_id, cfg) -> dict:
+    """XP acumulado por atendente. Na primeira vez, monta a partir dos atendimentos ja registrados."""
+    g = _rank_guild(guild_id)
+    if not isinstance(g.get("xp"), dict):
+        r = cfg["ranking"]
+        xt, xe = int(r.get("xp_ticket", 50)), int(r.get("xp_estrela", 10))
+        xp = {}
+        for x in g["registros"]:
+            n = x.get("nota")
+            v = xt + (n * xe if isinstance(n, int) and 1 <= n <= 5 else 0)
+            xp[str(x["staff"])] = xp.get(str(x["staff"]), 0) + v
+        g["xp"] = xp
+        _rank_save()
+    return g["xp"]
+
+
+def _xp_add(guild_id, staff, qtd, cfg):
+    """soma XP e devolve (nivel_antes, nivel_depois), ou None se o XP estiver desligado"""
+    r = cfg["ranking"]
+    if not r.get("xp_ativo", True) or qtd <= 0:
+        return None
+    xp = _xp_guild(guild_id, cfg)
+    antes = xp.get(str(staff), 0)
+    xp[str(staff)] = antes + int(qtd)
+    _rank_save()
+    base = r.get("xp_base", 100)
+    return _nivel_de(antes, base), _nivel_de(antes + int(qtd), base)
+
+
+def _xp_info(guild_id, cfg, uid):
+    base = int(cfg["ranking"].get("xp_base", 100))
+    xp = _xp_guild(guild_id, cfg).get(str(uid), 0)
+    n = _nivel_de(xp, base)
+    ini, fim = _xp_para_nivel(n, base), _xp_para_nivel(n + 1, base)
+    return {"xp": xp, "nivel": n, "ini": ini, "fim": fim,
+            "pct": (xp - ini) / (fim - ini) if fim > ini else 1.0, "falta": fim - xp}
+
+
+def _xp_top(guild_id, cfg, limite=5):
+    xp = _xp_guild(guild_id, cfg)
+    return sorted(((int(u), v) for u, v in xp.items() if v > 0), key=lambda kv: (-kv[1], kv[0]))[:limite]
+
+
+def build_nivel_view(guild, cfg, uid, nome=None):
+    i = _xp_info(guild.id, cfg, uid)
+    titulo, emoji = _titulo_nivel(i["nivel"])
+    base = int(cfg["ranking"].get("xp_base", 100))
+    pos = next((k + 1 for k, (u, _) in enumerate(_xp_top(guild.id, cfg, 1000)) if u == uid), None)
+    linhas = [
+        f"{_poyo('nivel', '🎖️')} **Nível {i['nivel']}** · {_poyo('xp', '✨')} **{i['xp']} XP**",
+        f"{_barra_xp(i['pct'])}  {i['xp'] - i['ini']}/{i['fim'] - i['ini']}",
+        f"faltam **{i['falta']} XP** pro nível {i['nivel'] + 1}"
+        f" ({_xp_para_nivel(i['nivel'] + 1, base)} XP no total)",
+    ]
+    if pos:
+        linhas.append(f"{_poyo('trofeu', '🏆')} **{pos}º** no ranking geral de XP")
+    itens = [
+        discord.ui.TextDisplay(f"### {_poyo('xp', emoji)} {titulo} · <@{uid}>"),
+        discord.ui.Separator(),
+        discord.ui.TextDisplay("\n".join(linhas)),
+    ]
+    if cfg["extras"]["motiv"].get("conq_ativo"):
+        s = _stats_de(guild.id, uid)
+        tem = [c for c in CONQUISTAS if c[4](s)]
+        lista = "\n".join(f"{e} **{n}**" for _id, n, e, _d, _f in tem) or "*nenhuma ainda*"
+        itens += [
+            discord.ui.Separator(),
+            discord.ui.TextDisplay(f"**🏅 Conquistas** {len(tem)}/{len(CONQUISTAS)}\n{lista}"),
+        ]
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(discord.ui.Container(*itens))
+    return view
+
+
+async def avisar_nivel(guild, uid, antes, depois, cfg):
+    """avisa que o atendente subiu de nivel (DM e/ou canal, conforme o painel)"""
+    r = cfg["ranking"]
+    i = _xp_info(guild.id, cfg, uid)
+    titulo, emoji = _titulo_nivel(depois)
+    de = f"do nível {antes} " if depois - antes > 1 else ""
+    cargo_novo = await aplicar_cargo_nivel(guild, uid, depois, cfg)   # cargo automatico do nivel
+    texto = (f"{_poyo('nivel', '🎖️')} Você subiu {de}pro **nível {depois}** · **{titulo}** {emoji}\n"
+             f"{_poyo('xp', '✨')} {i['xp']} XP · faltam **{i['falta']} XP** pro nível {depois + 1}\n"
+             f"{_barra_xp(i['pct'])}")
+    if cargo_novo is not None:
+        texto += f"\n🎭 Cargo novo: **{cargo_novo.name}**"
+    membro = guild.get_member(uid)
+    if r.get("nivel_dm", True) and membro is not None:
+        try:
+            await membro.send(view=Card(f"Level up em {guild.name}!", texto))
+        except discord.HTTPException:
+            pass  # dm fechada
+    if r.get("nivel_canal", True):
+        canal = guild.get_channel(r.get("canal_niveis") or r.get("canal") or 0)
+        if isinstance(canal, discord.TextChannel):
+            try:
+                await canal.send(
+                    view=Card(f"Level up! <@{uid}> chegou no nível {depois}", texto),
+                    allowed_mentions=discord.AllowedMentions(users=[discord.Object(uid)]),
+                )
+            except discord.HTTPException as e:
+                log.warning("nao consegui avisar o nivel em #%s: %s", canal.name, e)
+
+
 def _rank_registrar(guild_id, data, cfg):
     """grava o atendimento no ranking e devolve o id do registro (None se nao conta)"""
     if not cfg["ranking"].get("ativo"):
@@ -3652,16 +3870,65 @@ def _rank_registrar(guild_id, data, cfg):
     staff, dono = data.get("claimed"), data.get("owner")
     if not staff or staff == dono:      # sem atendente, ou atendeu o proprio ticket: nao pontua
         return None
-    g = _rank_guild(guild_id)
-    rid = secrets.token_hex(5)
     agora = int(datetime.now().timestamp())
-    g["registros"].append({
+    motivo = _anti_motivo(guild_id, data, cfg, staff, dono, agora)
+    if motivo:                          # anti-farm barrou: nao pontua e nao pede nota
+        data["rank_bloq"] = motivo
+        _save()
+        return None
+    g = _rank_guild(guild_id)
+    _xp_guild(guild_id, cfg)            # garante o XP antigo montado antes de contar este ticket
+    st = _stats_de(guild_id, staff)     # idem pras estatisticas das conquistas
+    ex = cfg["extras"]
+    resp = _tempo_resposta(data, staff)
+    rid = secrets.token_hex(5)
+    reg = {
         "id": rid, "staff": staff, "owner": dono,
         "tipo": data.get("tipo", "outros"), "ts": agora, "nota": None,
-    })
+    }
+    if resp is not None:
+        reg["resp"] = resp
+    ganho = int(cfg["ranking"].get("xp_ticket", 50))
+    bonus = []
+
+    # resposta rapida
+    mv = ex["motiv"]
+    rapida = resp is not None and resp <= int(mv.get("rapida_min", 5)) * 60
+    st["tickets"] += 1
+    if rapida:
+        st["rapidas"] += 1
+        xr = int(mv.get("rapida_xp", 0))
+        if mv.get("rapida_ativo") and xr > 0:
+            ganho += xr
+            bonus.append(f"⚡ resposta rápida +{xr} XP")
+
+    # sequencia de dias atendendo (o bonus vem no 1o ticket de cada dia)
+    dias, subiu_hoje = _streak_tocar(g, staff, st)
+    xs = int(mv.get("seq_xp", 0))
+    if mv.get("seq_ativo") and subiu_hoje and dias >= 2 and xs > 0:
+        extra = min(dias, int(mv.get("seq_max", 7))) * xs
+        ganho += extra
+        bonus.append(f"🔥 {dias} dias seguidos atendendo +{extra} XP")
+
+    # parceria postada no ticket
+    pc = ex["parc"]
+    if pc.get("bonus_ativo") and data.get("parc_postada"):
+        xp_parc = int(pc.get("bonus_xp", 0))
+        ganho += xp_parc
+        if int(pc.get("bonus_pts", 0)) > 0:
+            reg["bonus_pts"] = int(pc["bonus_pts"])
+        if xp_parc > 0:
+            bonus.append(f"🤝 parceria fechada +{xp_parc} XP")
+
+    g["registros"].append(reg)
     corte = agora - 400 * 86400         # guarda mais de um ano, o resto sai
     g["registros"] = [x for x in g["registros"] if x.get("ts", 0) >= corte]
     data["rank_id"] = rid
+    nv = _xp_add(guild_id, staff, ganho, cfg)
+    if nv is not None:
+        data["rank_xp"] = ganho
+        data["rank_nivel"] = list(nv)
+        data["rank_bonus"] = bonus
     _save()
     _rank_save()
     return rid
@@ -3693,41 +3960,66 @@ def _rank_tabela(guild_id, cfg, ini, fim) -> list:
     for x in _rank_guild(guild_id)["registros"]:
         if not ini <= x.get("ts", 0) < fim:
             continue
-        t = tab.setdefault(x["staff"], {"pts": 0, "tickets": 0, "soma": 0, "notas": 0})
+        t = tab.setdefault(x["staff"], {"pts": 0, "tickets": 0, "soma": 0, "notas": 0, "resp_soma": 0, "resp_n": 0})
         t["tickets"] += 1
-        t["pts"] += pt
+        t["pts"] += pt + int(x.get("bonus_pts", 0) or 0)
         n = x.get("nota")
         if isinstance(n, int) and 1 <= n <= 5:
             t["pts"] += n * pe
             t["soma"] += n
             t["notas"] += 1
+        rs = x.get("resp")
+        if isinstance(rs, int):
+            t["resp_soma"] += rs
+            t["resp_n"] += 1
     return sorted(tab.items(), key=lambda kv: (-kv[1]["pts"], -kv[1]["tickets"], kv[0]))
 
 
 def build_ranking_view(guild, cfg, meses_atras: int = 0):
     ini, fim, mes = _rank_periodo(meses_atras)
     tabela = _rank_tabela(guild.id, cfg, ini, fim)
+    ex = cfg["extras"]
     medalhas = [_poyo("rank_1", "🥇"), _poyo("rank_2", "🥈"), _poyo("rank_3", "🥉")]
     estrela = _poyo("estrela", "⭐")
     linhas = []
     for i, (uid, t) in enumerate(tabela[:10]):
         pos = medalhas[i] if i < 3 else f"`{i + 1}º`"
         media = f"  ·  {estrela} {t['soma'] / t['notas']:.1f}" if t["notas"] else ""
+        tempo = (f"  ·  ⏱️ {_dur(t['resp_soma'] / t['resp_n'])}"
+                 if ex["qual"].get("tempo_ativo", True) and t.get("resp_n") else "")
+        nivel = (f"  ·  {_poyo('nivel', '🎖️')} Nv {_xp_info(guild.id, cfg, uid)['nivel']}"
+                 if cfg["ranking"].get("xp_ativo", True) else "")
+        ausente = " 🌴" if _esta_ausente(guild.id, uid, cfg) else ""
         linhas.append(
-            f"{pos} <@{uid}>  **{t['pts']} pts**  ·  {t['tickets']} ticket{'s' if t['tickets'] != 1 else ''}{media}")
+            f"{pos} <@{uid}>{ausente}  **{t['pts']} pts**  ·  {t['tickets']} ticket{'s' if t['tickets'] != 1 else ''}"
+            f"{media}{tempo}{nivel}")
     corpo = "\n".join(linhas) or "*ninguém atendeu ticket neste mês ainda*"
     r = cfg["ranking"]
     regra = f"cada ticket atendido vale {r.get('pontos_ticket', 10)} pts"
     if r.get("avaliacao") and r.get("pontos_estrela"):
         regra += f" · cada estrela recebida soma +{r['pontos_estrela']}"
-    view = discord.ui.LayoutView(timeout=None)
-    view.add_item(discord.ui.Container(
+    extras = []
+    mv = ex["motiv"]
+    if mv.get("meta_ativo") and meses_atras == 0 and int(mv.get("meta_tickets", 0)) > 0:
+        total = sum(t["tickets"] for _, t in tabela)
+        meta = int(mv["meta_tickets"])
+        extras.append(f"🎯 **Meta do mês**  {min(total, meta)}/{meta}  {_barra_xp(min(1.0, total / meta))}")
+    sm = _rank_guild(guild.id).get("staff_mes")
+    if mv.get("mes_ativo") and isinstance(sm, dict) and sm.get("uid"):
+        extras.append(f"👑 **Staff do mês passado**  <@{sm['uid']}>")
+    itens = [
         discord.ui.TextDisplay(f"## {_poyo('trofeu', '🏆')} Ranking da equipe\n-# {mes}"),
         discord.ui.Separator(),
         discord.ui.TextDisplay(corpo),
+    ]
+    if extras:
+        itens += [discord.ui.Separator(), discord.ui.TextDisplay("\n".join(extras))]
+    itens += [
         discord.ui.Separator(),
         discord.ui.TextDisplay(f"-# {regra}\n-# atualizado <t:{int(datetime.now().timestamp())}:R>"),
-    ))
+    ]
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(discord.ui.Container(*itens))
     return view
 
 
@@ -3764,7 +4056,447 @@ async def atualizar_ranking(guild) -> bool:
         return True
 
 
+# ---------------------------------------------------------------- extras do ranking
+# anti-farm, cargos por nivel, ticket parado, motivacao, qualidade e parcerias
+# tudo liga e desliga em ,ptrank > Extras
+
+def _dur(seg) -> str:
+    # 45s · 4min · 2h10 · 1d03h
+    seg = int(max(0, seg))
+    if seg < 60:
+        return f"{seg}s"
+    if seg < 3600:
+        return f"{seg // 60}min"
+    h, m = divmod(seg // 60, 60)
+    if h < 24:
+        return f"{h}h{m:02d}" if m else f"{h}h"
+    d, h = divmod(h, 24)
+    return f"{d}d{h:02d}h" if h else f"{d}d"
+
+
+# ---- ausentes (de folga: nao recebem lembrete nem ping)
+
+def _ausentes(guild_id) -> dict:
+    g = _rank_guild(guild_id)
+    if not isinstance(g.get("ausentes"), dict):
+        g["ausentes"] = {}
+    return g["ausentes"]
+
+
+def _esta_ausente(guild_id, uid, cfg) -> bool:
+    return bool(cfg["extras"]["qual"].get("ausente_ativo", True)) and str(uid) in _ausentes(guild_id)
+
+
+def _ping_equipe(guild, cfg, tipo):
+    """texto de mencao da equipe + AllowedMentions. Com ausentes, chama so quem esta de plantao."""
+    roles = staff_roles(guild, cfg, tipo)
+    aus = _ausentes(guild.id) if cfg["extras"]["qual"].get("ausente_ativo", True) else {}
+    if aus and roles:
+        membros = {m for r in roles for m in r.members if not m.bot}
+        livres = [m for m in membros if str(m.id) not in aus]
+        if membros and livres and len(livres) <= 15:
+            return " ".join(m.mention for m in livres), discord.AllowedMentions(users=livres)
+    quem = " ".join(r.mention for r in roles) or "Equipe"
+    return quem, discord.AllowedMentions(roles=roles or False)
+
+
+# ---- log da administracao
+
+async def _log_card(guild, cfg, titulo, texto, ping_cargo=None):
+    canal = find_channel(guild, cfg["log"])
+    if canal is None:
+        return
+    cargo = guild.get_role(ping_cargo) if ping_cargo else None
+    corpo = (f"{cargo.mention}\n" if cargo else "") + texto
+    try:
+        await canal.send(
+            view=Card(titulo, corpo),
+            allowed_mentions=discord.AllowedMentions(roles=[cargo]) if cargo else NO_MENTIONS,
+        )
+    except discord.HTTPException as e:
+        log.warning("nao consegui escrever no log: %s", e)
+
+
+async def _alertar_nota_baixa(guild, rec, nota, cfg):
+    q = cfg["extras"]["qual"]
+    await _log_card(
+        guild, cfg, f"Avaliação baixa · {nota}/5",
+        f"<@{rec['owner']}> deu **{nota}/5** pro atendimento de <@{rec['staff']}> "
+        f"(categoria: {cat_of(cfg, rec.get('tipo', 'outros'))['label']}).",
+        q.get("alerta_cargo"),
+    )
+
+
+async def _avisar_bloqueio(channel, data, cfg):
+    if not cfg["extras"]["anti"].get("avisar_log", True):
+        return
+    await _log_card(
+        channel.guild, cfg, "Anti-farm: atendimento sem pontos",
+        f"O ticket **{channel.name}** (dono <@{data['owner']}>, atendente <@{data['claimed']}>) "
+        f"não pontuou: {data.get('rank_bloq')}.",
+    )
+
+
+# ---- anti-farm
+
+def _tempo_resposta(data, staff):
+    # segundos entre abrir (ou transferir) o ticket e a 1a mensagem do atendente
+    t = (data.get("resp_por") or {}).get(str(staff))
+    if not t:
+        return None
+    base = int(data.get("resp_base") or data.get("opened") or t)
+    return max(0, int(t) - base)
+
+
+def _anti_motivo(guild_id, data, cfg, staff, dono, agora):
+    """devolve o motivo (texto) se o atendimento nao deve pontuar, ou None se esta tudo certo"""
+    a = cfg["extras"]["anti"]
+    if not a.get("ativo"):
+        return None
+    checks = []   # (passou, texto da falha)
+    min_msgs = int(a.get("min_msgs", 0))
+    # tickets antigos (abertos antes da contagem existir) nao tem como provar as mensagens
+    if a.get("msgs_ativo", True) and min_msgs > 0 and data.get("anti_v"):
+        n = int((data.get("msgs_por") or {}).get(str(staff), 0))
+        checks.append((n >= min_msgs, f"o atendente mandou só {n} de {min_msgs} mensagens exigidas"))
+    min_min = int(a.get("min_minutos", 0))
+    if a.get("tempo_ativo", True) and min_min > 0:
+        aberto = max(0, agora - int(data.get("opened") or agora)) // 60
+        checks.append((aberto >= min_min, f"o ticket ficou aberto só {aberto} de {min_min} min"))
+    if checks:
+        oks = [c[0] for c in checks]
+        passou = all(oks) if a.get("exigir_ambos") else any(oks)
+        if not passou:
+            return " e ".join(c[1] for c in checks if not c[0])
+    regs = _rank_guild(guild_id)["registros"]
+    max_dia = int(a.get("max_dia", 0))
+    if a.get("dia_ativo", True) and max_dia > 0:
+        hoje0 = int(datetime.now(TZ).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+        n = sum(1 for x in regs if x.get("owner") == dono and x.get("ts", 0) >= hoje0)
+        if n >= max_dia:
+            return f"o dono já rendeu pontos em {n} ticket(s) hoje (limite {max_dia})"
+    max_par = int(a.get("max_par", 0))
+    if a.get("par_ativo", True) and max_par > 0:
+        dias = max(1, int(a.get("par_dias", 30)))
+        corte = agora - dias * 86400
+        n = sum(1 for x in regs if x.get("owner") == dono and x.get("staff") == staff and x.get("ts", 0) >= corte)
+        if n >= max_par:
+            return f"o mesmo dono já rendeu pontos pro mesmo atendente {n} vez(es) em {dias} dia(s) (limite {max_par})"
+    return None
+
+
+# ---- estatisticas por atendente (alimentam as conquistas)
+
+def _stats_novo() -> dict:
+    return {"tickets": 0, "rapidas": 0, "n5": 0, "seq5": 0, "seq5_max": 0, "streak_max": 0}
+
+
+def _stats_guild(guild_id) -> dict:
+    g = _rank_guild(guild_id)
+    if not isinstance(g.get("stats"), dict):
+        st = {}
+        for x in sorted(g["registros"], key=lambda r: r.get("ts", 0)):
+            s = st.setdefault(str(x["staff"]), _stats_novo())
+            s["tickets"] += 1
+            n = x.get("nota")
+            if n == 5:
+                s["n5"] += 1
+                s["seq5"] += 1
+                s["seq5_max"] = max(s["seq5_max"], s["seq5"])
+            elif isinstance(n, int):
+                s["seq5"] = 0
+        g["stats"] = st
+        _rank_save()
+    return g["stats"]
+
+
+def _stats_de(guild_id, uid) -> dict:
+    s = _stats_guild(guild_id).setdefault(str(uid), _stats_novo())
+    for k, v in _stats_novo().items():
+        s.setdefault(k, v)
+    return s
+
+
+def _stats_nota(guild_id, staff, nota):
+    s = _stats_de(guild_id, staff)
+    if nota == 5:
+        s["n5"] += 1
+        s["seq5"] += 1
+        s["seq5_max"] = max(s["seq5_max"], s["seq5"])
+    else:
+        s["seq5"] = 0
+
+
+def _streak_tocar(g, staff, st):
+    """conta mais um dia seguido atendendo. Devolve (dias_seguidos, se_subiu_hoje)"""
+    hoje = datetime.now(TZ).date()
+    s = g.setdefault("streak", {}).setdefault(str(staff), {"dia": "", "n": 0})
+    if s.get("dia") == hoje.isoformat():
+        return s["n"], False
+    ontem = (hoje - timedelta(days=1)).isoformat()
+    s["n"] = s.get("n", 0) + 1 if s.get("dia") == ontem else 1
+    s["dia"] = hoje.isoformat()
+    st["streak_max"] = max(st.get("streak_max", 0), s["n"])
+    return s["n"], True
+
+
+# ---- conquistas: (id, nome, emoji, descricao, regra)
+CONQUISTAS = [
+    ("t1", "Primeiro atendimento", "🎫", "atender 1 ticket", lambda s: s.get("tickets", 0) >= 1),
+    ("t10", "Pegando o jeito", "📨", "atender 10 tickets", lambda s: s.get("tickets", 0) >= 10),
+    ("t50", "Cinquentão", "📬", "atender 50 tickets", lambda s: s.get("tickets", 0) >= 50),
+    ("t100", "Centurião", "💯", "atender 100 tickets", lambda s: s.get("tickets", 0) >= 100),
+    ("t500", "Lenda do suporte", "🏛️", "atender 500 tickets", lambda s: s.get("tickets", 0) >= 500),
+    ("n5x10", "Perfeição em série", "🌟", "10 notas 5 seguidas", lambda s: s.get("seq5_max", 0) >= 10),
+    ("n5x50", "Queridinho da galera", "💖", "50 notas 5 no total", lambda s: s.get("n5", 0) >= 50),
+    ("dia7", "Semana de ouro", "🔥", "7 dias seguidos atendendo", lambda s: s.get("streak_max", 0) >= 7),
+    ("dia30", "Mês de ouro", "🌋", "30 dias seguidos atendendo", lambda s: s.get("streak_max", 0) >= 30),
+    ("rap25", "Relâmpago", "⚡", "25 respostas rápidas", lambda s: s.get("rapidas", 0) >= 25),
+]
+
+
+def _conq_novas(guild_id, uid):
+    g = _rank_guild(guild_id)
+    s = _stats_de(guild_id, uid)
+    tem = g.setdefault("conq", {}).setdefault(str(uid), [])
+    novas = [c for c in CONQUISTAS if c[0] not in tem and c[4](s)]
+    for c in novas:
+        tem.append(c[0])
+    if novas:
+        _rank_save()
+    return novas
+
+
+async def _avisar_geral(guild, uid, titulo_dm, titulo_canal, texto, cfg):
+    # mesmo caminho dos avisos de nivel: DM e/ou canal, conforme o painel
+    r = cfg["ranking"]
+    membro = guild.get_member(uid)
+    if r.get("nivel_dm", True) and membro is not None:
+        try:
+            await membro.send(view=Card(titulo_dm, texto))
+        except discord.HTTPException:
+            pass  # dm fechada
+    if r.get("nivel_canal", True):
+        canal = guild.get_channel(r.get("canal_niveis") or r.get("canal") or 0)
+        if isinstance(canal, discord.TextChannel):
+            try:
+                await canal.send(
+                    view=Card(titulo_canal, texto),
+                    allowed_mentions=discord.AllowedMentions(users=[discord.Object(uid)]),
+                )
+            except discord.HTTPException as e:
+                log.warning("nao consegui avisar em #%s: %s", canal.name, e)
+
+
+async def avisar_conquistas(guild, uid, cfg):
+    if not cfg["extras"]["motiv"].get("conq_ativo"):
+        return
+    novas = _conq_novas(guild.id, uid)
+    if not novas:
+        return
+    linhas = "\n".join(f"{e} **{nome}** · {desc}" for _id, nome, e, desc, _fn in novas)
+    await _avisar_geral(guild, uid, f"Conquista desbloqueada em {guild.name}!",
+                        f"Conquista desbloqueada! <@{uid}>", linhas, cfg)
+
+
+# ---- cargo automatico por nivel
+
+def _cargos_mapa(c) -> dict:
+    # {nivel: id do cargo}
+    mapa = {}
+    for k, v in (c.get("niveis") or {}).items():
+        if str(k).isdigit() and isinstance(v, int):
+            mapa[int(k)] = v
+    return mapa
+
+
+async def aplicar_cargo_nivel(guild, uid, nivel, cfg):
+    """da o cargo do nivel (e tira o anterior, se o painel mandar). Devolve o cargo novo, se deu algum."""
+    c = cfg["extras"]["cargos"]
+    if not c.get("ativo"):
+        return None
+    mapa = _cargos_mapa(c)
+    membro = guild.get_member(uid)
+    if not mapa or membro is None:
+        return None
+    elegiveis = [n for n in mapa if n <= nivel]
+    todos = {r for r in (guild.get_role(v) for v in mapa.values()) if r is not None}
+    if c.get("remover_anterior", True):
+        topo = guild.get_role(mapa[max(elegiveis)]) if elegiveis else None
+        quero = {topo} if topo is not None else set()
+    else:
+        quero = {r for r in (guild.get_role(mapa[n]) for n in elegiveis) if r is not None}
+    falta = [r for r in quero if r not in membro.roles]
+    sobra = [r for r in todos if r not in quero and r in membro.roles]
+    try:
+        if falta:
+            await membro.add_roles(*falta, reason=f"Ticket: nível {nivel}")
+        if sobra:
+            await membro.remove_roles(*sobra, reason=f"Ticket: nível {nivel}")
+    except discord.HTTPException as e:
+        log.warning("nao consegui ajustar os cargos de nivel de %s: %s "
+                    "(o cargo do bot precisa ficar acima dos cargos de nivel)", membro, e)
+        return None
+    return max(falta, key=lambda r: r.position) if falta else None
+
+
+async def sincronizar_cargos(guild, cfg) -> int:
+    base = int(cfg["ranking"].get("xp_base", 100))
+    feitos = 0
+    for uid, xp in list(_xp_guild(guild.id, cfg).items()):
+        if guild.get_member(int(uid)) is None:
+            continue
+        await aplicar_cargo_nivel(guild, int(uid), _nivel_de(xp, base), cfg)
+        feitos += 1
+        await asyncio.sleep(0.3)   # respeita o limite do discord
+    return feitos
+
+
+async def criar_cargos_titulos(guild):
+    """cria (ou acha) os cargos Atendente, Veterano... e devolve ({nivel: id}, criados, erro)"""
+    mapa, criados = {}, 0
+    for minimo, nome, _emoji in TITULOS_NIVEL:
+        if minimo <= 0:
+            continue
+        cargo = discord.utils.find(lambda r: r.name.casefold() == nome.casefold(), guild.roles)
+        if cargo is None:
+            try:
+                cargo = await guild.create_role(name=nome, reason="Ticket: cargo de nível")
+                criados += 1
+            except discord.Forbidden:
+                return mapa, criados, "O bot precisa da permissão **Gerenciar cargos**."
+            except discord.HTTPException as e:
+                return mapa, criados, f"O Discord recusou criar o cargo ({e.code})."
+        mapa[str(minimo)] = cargo.id
+    return mapa, criados, None
+
+
+# ---- motivacao: staff do mes e meta coletiva
+
+def _mes_chave(meses_atras: int = 0):
+    ini, fim, _ = _rank_periodo(meses_atras)
+    return datetime.fromtimestamp(ini, TZ).strftime("%Y-%m"), ini, fim
+
+
+async def staff_do_mes(guild, cfg):
+    """vira o mes: o 1o lugar do mes que passou recebe o cargo temporario e vai pro canal"""
+    mv = cfg["extras"]["motiv"]
+    if not mv.get("mes_ativo"):
+        return
+    g = _rank_guild(guild.id)
+    chave, ini, fim = _mes_chave(1)
+    if g.get("mes_fechado") == chave:
+        return
+    g["mes_fechado"] = chave
+    _rank_save()
+    tabela = _rank_tabela(guild.id, cfg, ini, fim)
+    if not tabela:
+        return
+    uid, t = tabela[0]
+    cargo = guild.get_role(mv.get("mes_cargo") or 0)
+    if cargo is not None:
+        try:
+            for membro in list(cargo.members):
+                if membro.id != uid:
+                    await membro.remove_roles(cargo, reason="Ticket: virou o mês")
+            novo = guild.get_member(uid)
+            if novo is not None:
+                await novo.add_roles(cargo, reason="Ticket: staff do mês")
+        except discord.HTTPException as e:
+            log.warning("nao consegui passar o cargo de staff do mes: %s", e)
+    g["staff_mes"] = {"mes": chave, "uid": uid}
+    _rank_save()
+    nome_mes = _rank_periodo(1)[2]
+    canal = guild.get_channel(cfg["ranking"].get("canal") or 0)
+    if isinstance(canal, discord.TextChannel):
+        try:
+            await canal.send(
+                view=Card(
+                    f"{_poyo('trofeu', '🏆')} Staff do mês · {nome_mes}",
+                    f"Parabéns, <@{uid}>! Foi quem mais brilhou no atendimento: "
+                    f"**{t['pts']} pts** em {t['tickets']} ticket(s)."
+                    + (f"\nCargo temporário: {cargo.mention}" if cargo is not None else ""),
+                ),
+                allowed_mentions=discord.AllowedMentions(users=[discord.Object(uid)]),
+            )
+        except discord.HTTPException as e:
+            log.warning("nao consegui anunciar o staff do mes: %s", e)
+
+
+async def meta_do_mes(guild, cfg):
+    """meta coletiva: bateu o total de tickets do mes, todo mundo da equipe ganha XP"""
+    mv = cfg["extras"]["motiv"]
+    if not mv.get("meta_ativo"):
+        return
+    meta = int(mv.get("meta_tickets", 200))
+    chave, ini, fim = _mes_chave(0)
+    g = _rank_guild(guild.id)
+    if meta <= 0 or g.get("meta_ok") == chave:
+        return
+    do_mes = [x for x in g["registros"] if ini <= x.get("ts", 0) < fim]
+    if len(do_mes) < meta:
+        return
+    g["meta_ok"] = chave
+    _rank_save()
+    premio = int(mv.get("meta_xp", 100))
+    xp_on = cfg["ranking"].get("xp_ativo", True) and premio > 0
+    if xp_on:
+        receptores = {int(x["staff"]) for x in do_mes}
+        for r in staff_roles(guild, cfg):
+            receptores |= {m.id for m in r.members if not m.bot}
+        for uid in receptores:
+            nv = _xp_add(guild.id, uid, premio, cfg)
+            if nv and nv[1] > nv[0]:
+                await avisar_nivel(guild, uid, nv[0], nv[1], cfg)
+    canal = guild.get_channel(cfg["ranking"].get("canal") or 0)
+    if isinstance(canal, discord.TextChannel):
+        try:
+            await canal.send(
+                view=Card(
+                    f"{_poyo('trofeu', '🏆')} Meta do mês batida!",
+                    f"A equipe fechou **{len(do_mes)}** tickets (meta: {meta})."
+                    + (f"\nTodo mundo da equipe ganhou **+{premio} XP**." if xp_on else ""),
+                ),
+                allowed_mentions=NO_MENTIONS,
+            )
+        except discord.HTTPException as e:
+            log.warning("nao consegui anunciar a meta do mes: %s", e)
+    await atualizar_ranking(guild)
+
+
 # nota de 1 a 5 estrelas: o id do botao leva o registro e a nota, entao vale depois de reiniciar
+class RateCommentModal(discord.ui.Modal):
+    # nota baixa: campo opcional pra contar o que aconteceu (vai pro log da administracao)
+    def __init__(self, gid, rec, nota):
+        super().__init__(title="Quer contar o que aconteceu?")
+        self.gid, self.rec, self.nota = gid, rec, nota
+        self.campo = discord.ui.TextInput(
+            label="Comentário (opcional)", style=discord.TextStyle.paragraph,
+            required=False, max_length=800,
+            placeholder="Isso ajuda a administração a melhorar o atendimento.",
+        )
+        self.add_item(self.campo)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        estrelas = _poyo("estrela", "⭐") * self.nota
+        await interaction.response.edit_message(
+            view=Card("Obrigado pela avaliação", f"{estrelas}\nSua nota ajuda a equipe a melhorar."))
+        texto = self.campo.value.strip()
+        guild = interaction.client.get_guild(self.gid)
+        if texto and guild is not None:
+            cfg = get_cfg(self.gid)
+            await _log_card(
+                guild, cfg, f"Comentário da nota {self.nota}/5",
+                f"<@{self.rec['owner']}> sobre o atendimento de <@{self.rec['staff']}>:\n> "
+                + texto.replace("\n", "\n> "),
+                cfg["extras"]["qual"].get("alerta_cargo"),
+            )
+
+    async def on_error(self, interaction, error):
+        log.exception("erro no comentario da avaliacao", exc_info=error)
+        await _erro_card(interaction, "Algo deu errado", "Tente de novo.")
+
+
 class RateButton(
     discord.ui.DynamicItem[discord.ui.Button],
     template=r"tk:rate:(?P<rid>[a-z0-9]+):(?P<n>[1-5])",
@@ -3795,14 +4527,29 @@ class RateButton(
         if rec.get("nota"):
             await interaction.response.edit_message(view=Card("Você já avaliou", "Obrigado!"))
             return
+        cfg_g = get_cfg(gid)
+        _xp_guild(gid, cfg_g)           # garante o XP antigo montado antes de contar esta nota
+        _stats_guild(gid)               # idem pras estatisticas das conquistas
         rec["nota"] = self.n
+        _stats_nota(gid, rec["staff"], self.n)
+        subiu = _xp_add(gid, rec["staff"], self.n * int(cfg_g["ranking"].get("xp_estrela", 10)), cfg_g)
         _rank_save()
-        estrelas = _poyo("estrela", "⭐") * self.n
-        await interaction.response.edit_message(
-            view=Card("Obrigado pela avaliação", f"{estrelas}\nSua nota ajuda a equipe a melhorar."))
         guild = interaction.client.get_guild(gid)
+        q = cfg_g["extras"]["qual"]
+        baixa = self.n <= int(q.get("alerta_nota", 2))
+        if q.get("alerta_ativo") and baixa and guild is not None:
+            await _alertar_nota_baixa(guild, rec, self.n, cfg_g)
+        estrelas = _poyo("estrela", "⭐") * self.n
+        if q.get("comentario_ativo") and baixa:
+            await interaction.response.send_modal(RateCommentModal(gid, rec, self.n))
+        else:
+            await interaction.response.edit_message(
+                view=Card("Obrigado pela avaliação", f"{estrelas}\nSua nota ajuda a equipe a melhorar."))
         if guild is not None:
             await atualizar_ranking(guild)
+            if subiu and subiu[1] > subiu[0]:
+                await avisar_nivel(guild, rec["staff"], subiu[0], subiu[1], cfg_g)
+            await avisar_conquistas(guild, rec["staff"], cfg_g)
 
 
 def build_rate_view(rid, staff_id, guild_name):
@@ -3847,12 +4594,389 @@ class RankPontosModal(discord.ui.Modal):
         await _erro_card(interaction, "Algo deu errado", "Tente de novo.")
 
 
+class RankXpModal(discord.ui.Modal):
+    def __init__(self, painel):
+        super().__init__(title="XP e níveis")
+        self.painel = painel
+        r = get_cfg(painel.guild.id)["ranking"]
+        self.xt = discord.ui.TextInput(
+            label="XP por ticket atendido (0 a 10000)", default=str(r.get("xp_ticket", 50)), max_length=5)
+        self.xe = discord.ui.TextInput(
+            label="XP extra por estrela (0 a 1000)", default=str(r.get("xp_estrela", 10)), max_length=4)
+        self.xb = discord.ui.TextInput(
+            label="XP pro nível 1 (10 a 100000)", default=str(r.get("xp_base", 100)), max_length=6)
+        for c in (self.xt, self.xe, self.xb):
+            self.add_item(c)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            xt, xe, xb = (int(c.value.strip()) for c in (self.xt, self.xe, self.xb))
+        except ValueError:
+            await _erro_card(interaction, "Nada foi salvo", "Mande só números inteiros.")
+            return
+        if not (0 <= xt <= 10000 and 0 <= xe <= 1000 and 10 <= xb <= 100000):
+            await _erro_card(interaction, "Nada foi salvo",
+                             "Use 0 a 10000 no ticket, 0 a 1000 na estrela e 10 a 100000 no nível 1.")
+            return
+        for chave, v in (("xp_ticket", xt), ("xp_estrela", xe), ("xp_base", xb)):
+            set_path(self.painel.guild.id, ("ranking", chave), v)
+        await self.painel.update(interaction, "✅ XP salvo", refresh=True)
+
+    async def on_error(self, interaction, error):
+        log.exception("erro na janela de xp", exc_info=error)
+        await _erro_card(interaction, "Algo deu errado", "Tente de novo.")
+
+
+# ---------------------------------------------------------------- painel dos extras (,ptrank > Extras)
+
+# cada grupo: liga/desliga (toggles) + numeros (campos: chave, rotulo ate 45 letras, minimo, maximo)
+EXTRAS_GRUPOS = {
+    "anti": {
+        "nome": "Anti-farm", "titulo": "🛡️ Anti-farm",
+        "sub": "impede ticket falso de render ponto e XP",
+        "texto": (
+            "Um atendimento só pontua se passar nas regras ligadas abaixo. "
+            "Quem não passa fecha normal, só não rende ponto, XP nem pede nota.\n"
+            "-# \"Mín. mensagens\" e \"Mín. tempo\": basta passar em um. Ligue \"Exigir os dois\" pra pedir os dois."),
+        "toggles": [
+            ("ativo", "Anti-farm"), ("msgs_ativo", "Mín. mensagens"), ("tempo_ativo", "Mín. tempo"),
+            ("exigir_ambos", "Exigir os dois"), ("dia_ativo", "Limite por dia"),
+            ("par_ativo", "Limite por par"), ("avisar_log", "Avisar no log"),
+        ],
+        "campos": [
+            ("min_msgs", "Mensagens mínimas do atendente", 0, 500),
+            ("min_minutos", "Minutos mínimos com o ticket aberto", 0, 10080),
+            ("max_dia", "Máx. de tickets que pontuam por dono/dia", 0, 100),
+            ("max_par", "Máx. do mesmo dono pro mesmo atendente", 0, 1000),
+            ("par_dias", "Janela desse limite (dias)", 1, 365),
+        ],
+    },
+    "cargos": {
+        "nome": "Cargos", "titulo": "🎭 Cargo automático por nível",
+        "sub": "o cargo mais visível, dado pelo bot",
+        "texto": (
+            "Quando o atendente sobe de nível, o bot dá o cargo daquele nível. "
+            "O cargo do bot precisa ficar **acima** dos cargos de nível na lista de cargos."),
+        "toggles": [("ativo", "Cargos por nível"), ("remover_anterior", "Trocar o cargo anterior")],
+        "campos": [],
+    },
+    "parado": {
+        "nome": "Ticket parado", "titulo": "⏰ Ticket parado",
+        "sub": "lembretes, ping da equipe e fechamento por inatividade",
+        "texto": (
+            "**Lembrete**: o dono respondeu e o atendente não, o atendente recebe DM.\n"
+            "**Ping**: ninguém assumiu em X minutos, a equipe é chamada no ticket (até 3 vezes).\n"
+            "**Fechar**: sem nenhuma mensagem por X horas, o ticket fecha sozinho, com aviso antes."),
+        "toggles": [("lembrete_ativo", "Lembrete ao atendente"), ("ping_ativo", "Ping da equipe"),
+                    ("fechar_ativo", "Fechar por inatividade")],
+        "campos": [
+            ("lembrete_min", "Minutos até lembrar o atendente", 1, 1440),
+            ("ping_min", "Minutos sem ninguém assumir", 1, 1440),
+            ("fechar_horas", "Horas sem mensagem pra fechar", 1, 720),
+            ("aviso_horas", "Horas de aviso antes de fechar (0 = sem)", 0, 168),
+        ],
+    },
+    "motiv": {
+        "nome": "Motivação", "titulo": "🎉 Motivação",
+        "sub": "bônus, conquistas, staff do mês e meta coletiva",
+        "texto": (
+            "Os bônus de XP só funcionam com o **XP ligado** e entram no 1º ticket que pontuar.\n"
+            "**Staff do mês** e **Meta** postam no canal do placar."),
+        "toggles": [
+            ("rapida_ativo", "Resposta rápida"), ("seq_ativo", "Sequência de dias"),
+            ("conq_ativo", "Conquistas"), ("mes_ativo", "Staff do mês"), ("meta_ativo", "Meta coletiva"),
+        ],
+        "campos": [
+            ("rapida_min", "Minutos pra contar como rápida", 1, 1440),
+            ("rapida_xp", "XP do bônus de resposta rápida", 0, 10000),
+            ("seq_xp", "XP por dia de sequência", 0, 1000),
+            ("seq_max", "Teto de dias da sequência", 1, 60),
+            ("meta_tickets", "Tickets da meta do mês", 1, 100000),
+            ("meta_xp", "XP de prêmio pra cada atendente", 0, 100000),
+        ],
+    },
+    "qual": {
+        "nome": "Qualidade", "titulo": "📈 Qualidade",
+        "sub": "tempo de resposta, notas baixas e folgas",
+        "texto": (
+            "**Tempo de resposta**: média por atendente no placar.\n"
+            "**Nota baixa**: avisa a administração no canal de log, e pode pedir um comentário.\n"
+            "**Ausente**: quem usa `,ptausente` não recebe DM nem ping."),
+        "toggles": [
+            ("tempo_ativo", "Tempo no placar"), ("alerta_ativo", "Alerta de nota baixa"),
+            ("comentario_ativo", "Pedir comentário"), ("ausente_ativo", "Status ausente"),
+        ],
+        "campos": [("alerta_nota", "Alertar em notas até (1 a 4)", 1, 4)],
+    },
+    "parc": {
+        "nome": "Parcerias", "titulo": "🤝 Parcerias",
+        "sub": "renovação, tamanho mínimo e bônus pra equipe",
+        "texto": (
+            "**DM de renovação**: avisa quem postou quando o servidor puder renovar.\n"
+            "**Mínimo de membros**: barra convite de servidor pequeno demais.\n"
+            "**Bônus**: o atendente que encerra um ticket com parceria postada ganha XP e pontos."),
+        "toggles": [("dm_ativo", "DM de renovação"), ("min_ativo", "Mínimo de membros"),
+                    ("bonus_ativo", "Bônus ao fechar parceria")],
+        "campos": [
+            ("min_membros", "Mínimo de membros do servidor", 1, 1000000),
+            ("bonus_xp", "XP por parceria fechada", 0, 10000),
+            ("bonus_pts", "Pontos do mês por parceria fechada", 0, 1000),
+        ],
+    },
+}
+
+# grupos que mexem no que o placar mostra: atualizam o placar ao salvar
+_EXTRAS_REFRESH = {"motiv", "qual"}
+
+
+class ExtraNumModal(discord.ui.Modal):
+    # janela de numeros de um grupo (o discord aceita no max 5 campos por janela)
+    def __init__(self, painel, grupo, campos):
+        super().__init__(title=f"Valores: {EXTRAS_GRUPOS[grupo]['nome']}"[:45])
+        self.painel, self.grupo, self.campos = painel, grupo, campos
+        atual = get_cfg(painel.guild.id)["extras"][grupo]
+        self.entradas = []
+        for chave, rotulo, lo, hi in campos:
+            ti = discord.ui.TextInput(
+                label=rotulo[:45], default=str(atual.get(chave, "")),
+                placeholder=f"{lo} a {hi}", max_length=8)
+            self.entradas.append(ti)
+            self.add_item(ti)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        novos = {}
+        for (chave, rotulo, lo, hi), ti in zip(self.campos, self.entradas):
+            try:
+                v = int(ti.value.strip())
+            except ValueError:
+                await _erro_card(interaction, "Nada foi salvo", "Mande só números inteiros.")
+                return
+            if not lo <= v <= hi:
+                await _erro_card(interaction, "Nada foi salvo", f"**{rotulo}**: use de {lo} a {hi}.")
+                return
+            novos[chave] = v
+        if self.grupo == "parado":
+            atual = get_cfg(self.painel.guild.id)["extras"]["parado"]
+            fechar = novos.get("fechar_horas", atual.get("fechar_horas", 48))
+            aviso = novos.get("aviso_horas", atual.get("aviso_horas", 6))
+            if aviso >= fechar:
+                await _erro_card(interaction, "Nada foi salvo",
+                                 "O aviso precisa ser menor que o tempo pra fechar.")
+                return
+        for chave, v in novos.items():
+            set_path(self.painel.guild.id, ("extras", self.grupo, chave), v)
+        await self.painel.update(interaction, "✅ Valores salvos", refresh=self.grupo in _EXTRAS_REFRESH)
+
+    async def on_error(self, interaction, error):
+        log.exception("erro na janela de valores dos extras", exc_info=error)
+        await _erro_card(interaction, "Algo deu errado", "Tente de novo.")
+
+
+class CargosNiveisModal(discord.ui.Modal):
+    def __init__(self, painel):
+        super().__init__(title="Cargo de cada nível")
+        self.painel = painel
+        mapa = _cargos_mapa(get_cfg(painel.guild.id)["extras"]["cargos"])
+        padrao = "\n".join(f"{n} {rid}" for n, rid in sorted(mapa.items()))
+        self.campo = discord.ui.TextInput(
+            label="Uma linha por nível: nível e cargo", style=discord.TextStyle.paragraph,
+            placeholder="5 Atendente\n10 Veterano\n20 123456789012345678",
+            default=padrao[:1000] or None, required=False, max_length=1000)
+        self.add_item(self.campo)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        novo = {}
+        for linha in self.campo.value.splitlines():
+            if not linha.strip():
+                continue
+            m = re.match(r"^\s*(\d{1,3})\s*[=:>\-]*\s*(.+?)\s*$", linha)
+            if not m or not 1 <= int(m.group(1)) <= 999:
+                await _erro_card(interaction, "Nada foi salvo",
+                                 f"Não entendi a linha `{linha[:40]}`. Use `nível cargo`, tipo `5 Atendente`.")
+                return
+            ids, erro = await _parse_cargos(m.group(2), self.painel.guild)
+            if erro:
+                await _erro_card(interaction, "Nada foi salvo", erro)
+                return
+            novo[str(int(m.group(1)))] = ids[0]
+        if len(novo) > 20:
+            await _erro_card(interaction, "Nada foi salvo", "O máximo são 20 níveis.")
+            return
+        set_path(self.painel.guild.id, ("extras", "cargos", "niveis"), novo)
+        await self.painel.update(interaction, f"✅ {len(novo)} nível(is) com cargo")
+
+    async def on_error(self, interaction, error):
+        log.exception("erro na janela de cargos por nivel", exc_info=error)
+        await _erro_card(interaction, "Algo deu errado", "Tente de novo.")
+
+
+class _ExtrasMixin:
+    # telas extras do RankView (o resto vem dele: update, _btn, _flip, _goto)
+
+    def _tela_hub(self, cfg):
+        ex = cfg["extras"]
+        linhas = []
+        for grupo, spec in EXTRAS_GRUPOS.items():
+            ligados = sum(1 for k, _ in spec["toggles"] if ex[grupo].get(k))
+            linhas.append(f"{'🟢' if ligados else '⚪'} **{spec['titulo']}**  {ligados}/{len(spec['toggles'])} ligado(s)"
+                          f"\n-# {spec['sub']}")
+        botoes = [self._btn(spec["nome"], self._goto(grupo)) for grupo, spec in EXTRAS_GRUPOS.items()]
+        return [
+            discord.ui.TextDisplay("## 🧩 Extras do atendimento\n-# tudo aqui liga e desliga, cada coisa separada"),
+            sep(),
+            discord.ui.TextDisplay("\n".join(linhas)),
+            sep(),
+            discord.ui.ActionRow(*botoes[:3]),
+            discord.ui.ActionRow(*botoes[3:]),
+            sep(),
+            self._voltar(),
+        ]
+
+    def _tela_extra(self, cfg, grupo):
+        spec = EXTRAS_GRUPOS[grupo]
+        a = cfg["extras"][grupo]
+        verde, cinza = discord.ButtonStyle.success, discord.ButtonStyle.secondary
+        refresh = grupo in _EXTRAS_REFRESH
+        linhas = [f"{'🟢' if a.get(k) else '⚪'} {rot}" for k, rot in spec["toggles"]]
+        linhas += [f"**{rot}**  {a.get(k)}" for k, rot, _lo, _hi in spec["campos"]]
+        comps = [
+            discord.ui.TextDisplay(f"## {spec['titulo']}\n-# {spec['sub']}"),
+            sep(),
+            discord.ui.TextDisplay(spec["texto"]),
+            sep(),
+            discord.ui.TextDisplay("\n".join(linhas)),
+            sep(),
+        ]
+        botoes = [
+            self._btn(f"{rot}: {'sim' if a.get(k) else 'não'}",
+                      self._flip(("extras", grupo, k), refresh=refresh), verde if a.get(k) else cinza)
+            for k, rot in spec["toggles"]
+        ]
+        for i in range(0, len(botoes), 3):
+            comps.append(discord.ui.ActionRow(*botoes[i:i + 3]))
+        campos = spec["campos"]
+        if campos:
+            blocos = [campos[i:i + 5] for i in range(0, len(campos), 5)]
+
+            def abrir(bloco):
+                async def h(interaction, item):
+                    await interaction.response.send_modal(ExtraNumModal(self, grupo, bloco))
+                return h
+
+            comps.append(discord.ui.ActionRow(*(
+                self._btn("Valores" + (f" {n + 1}" if len(blocos) > 1 else ""), abrir(b), emoji="🎯")
+                for n, b in enumerate(blocos)
+            )))
+        extra = getattr(self, f"_extra_{grupo}", None)
+        if extra is not None:
+            comps += extra(cfg)
+        comps += [sep(), discord.ui.ActionRow(self._btn("Voltar", self._goto("extras"), emoji="◀️"))]
+        return comps
+
+    def _extra_cargos(self, cfg):
+        g = self.guild
+        mapa = _cargos_mapa(cfg["extras"]["cargos"])
+        txt = "\n".join(f"nível **{n}** → <@&{rid}>" for n, rid in sorted(mapa.items())) or "*nenhum cargo definido*"
+
+        async def definir(interaction, item):
+            await interaction.response.send_modal(CargosNiveisModal(self))
+
+        async def criar(interaction, item):
+            await interaction.response.defer()
+            novo, criados, erro = await criar_cargos_titulos(g)
+            if erro and not novo:
+                await self.update(interaction, f"⚠️ {erro}")
+                return
+            atual = dict(get_cfg(g.id)["extras"]["cargos"].get("niveis") or {})
+            atual.update(novo)
+            set_path(g.id, ("extras", "cargos", "niveis"), atual)
+            await self.update(interaction, f"✅ {criados} cargo(s) criado(s) · {len(novo)} ligado(s) aos níveis"
+                              + (f" · ⚠️ {erro}" if erro else ""))
+
+        async def sincronizar(interaction, item):
+            await interaction.response.defer()
+            if not get_cfg(g.id)["extras"]["cargos"].get("ativo"):
+                await self.update(interaction, "⚠️ Ligue os cargos por nível primeiro")
+                return
+            n = await sincronizar_cargos(g, get_cfg(g.id))
+            await self.update(interaction, f"🔄 {n} atendente(s) conferido(s)")
+
+        return [
+            sep(),
+            _sec("🎖️ Cargo de cada nível", "sugestão: 5 Atendente · 10 Veterano · 20 Mestre · 35 Lenda"),
+            discord.ui.TextDisplay(txt),
+            discord.ui.ActionRow(
+                self._btn("Definir níveis", definir, emoji="✏️"),
+                self._btn("Criar cargos dos títulos", criar, emoji="✨"),
+                self._btn("Sincronizar agora", sincronizar, emoji="🔄"),
+            ),
+        ]
+
+    def _extra_motiv(self, cfg):
+        g = self.guild
+        m = cfg["extras"]["motiv"]
+        cargo = f"<@&{m['mes_cargo']}>" if m.get("mes_cargo") else "*nenhum*"
+
+        async def escolher(interaction, item):
+            set_path(g.id, ("extras", "motiv", "mes_cargo"), item.values[0].id)
+            await self.update(interaction, "✅ Salvo")
+
+        async def tirar(interaction, item):
+            set_path(g.id, ("extras", "motiv", "mes_cargo"), None)
+            await self.update(interaction, "✅ Removido")
+
+        lista = "\n".join(f"{e} **{nome}** · {desc}" for _i, nome, e, desc, _f in CONQUISTAS)
+        return [
+            sep(),
+            _sec("👑 Cargo do Staff do mês", f"atual: {cargo} · quem fecha o mês em 1º recebe e o anterior perde"),
+            discord.ui.ActionRow(_RoleSel(escolher, placeholder="Escolher o cargo", min_values=1, max_values=1)),
+            discord.ui.ActionRow(self._btn("Tirar cargo", tirar)),
+            sep(),
+            _sec("🏅 Conquistas", "avisadas na DM e no canal dos níveis"),
+            discord.ui.TextDisplay(lista),
+        ]
+
+    def _extra_qual(self, cfg):
+        g = self.guild
+        q = cfg["extras"]["qual"]
+        cargo = f"<@&{q['alerta_cargo']}>" if q.get("alerta_cargo") else "*ninguém (só o aviso no log)*"
+        aus = _ausentes(g.id)
+        lista = "\n".join(
+            f"<@{u}>" + (f" · {v.get('motivo')}" if isinstance(v, dict) and v.get("motivo") else "")
+            for u, v in list(aus.items())[:15]
+        ) or "*ninguém ausente*"
+
+        async def escolher(interaction, item):
+            set_path(g.id, ("extras", "qual", "alerta_cargo"), item.values[0].id)
+            await self.update(interaction, "✅ Salvo")
+
+        async def tirar(interaction, item):
+            set_path(g.id, ("extras", "qual", "alerta_cargo"), None)
+            await self.update(interaction, "✅ Removido")
+
+        async def limpar(interaction, item):
+            _ausentes(g.id).clear()
+            _rank_save()
+            await self.update(interaction, "✅ Ninguém mais está ausente", refresh=True)
+
+        return [
+            sep(),
+            _sec("🚨 Quem é chamado nas notas baixas", f"atual: {cargo} · o aviso vai pro canal de log"),
+            discord.ui.ActionRow(_RoleSel(escolher, placeholder="Escolher o cargo", min_values=1, max_values=1)),
+            discord.ui.ActionRow(self._btn("Tirar cargo", tirar)),
+            sep(),
+            _sec("🌴 Atendentes ausentes", "cada um liga e desliga com ,ptausente"),
+            discord.ui.TextDisplay(lista),
+            discord.ui.ActionRow(self._btn("Limpar ausentes", limpar)),
+        ]
+
+
 # painel do ranking (mesma cara do ,ptconfig e do ,ptparc)
-class RankView(discord.ui.LayoutView):
+class RankView(_ExtrasMixin, discord.ui.LayoutView):
     def __init__(self, author_id: int, guild: discord.Guild):
         super().__init__(timeout=900)
         self.author_id, self.guild = author_id, guild
-        self.notice, self.sent, self.meses_atras = "", None, 0
+        self.notice, self.sent, self.meses_atras, self.page = "", None, 0, "home"
         self.render()
 
     @classmethod
@@ -3917,7 +5041,88 @@ class RankView(discord.ui.LayoutView):
             await self.update(interaction, "✅ Salvo", refresh=refresh)
         return h
 
+    def _goto(self, page):
+        async def h(interaction, item):
+            self.page = page
+            await self.update(interaction)
+        return h
+
+    def _voltar(self):
+        return discord.ui.ActionRow(self._btn("Voltar", self._goto("home"), emoji="◀️"))
+
+    def _tela_xp(self, cfg):
+        g = self.guild
+        r = cfg["ranking"]
+        base = int(r.get("xp_base", 100))
+        on = r.get("xp_ativo", True)
+        verde, cinza = discord.ButtonStyle.success, discord.ButtonStyle.secondary
+        canal = (f"<#{r['canal_niveis']}>" if r.get("canal_niveis")
+                 else f"<#{r['canal']}> *(o do placar)*" if r.get("canal") else "*nenhum*")
+
+        async def valores(interaction, item):
+            await interaction.response.send_modal(RankXpModal(self))
+
+        async def escolher_canal(interaction, item):
+            set_path(g.id, ("ranking", "canal_niveis"), item.values[0].id)
+            await self.update(interaction, "✅ Salvo")
+
+        async def usar_placar(interaction, item):
+            set_path(g.id, ("ranking", "canal_niveis"), None)
+            await self.update(interaction, "✅ Vai usar o canal do placar")
+
+        top = _xp_top(g.id, cfg)
+        medalhas = [_poyo("rank_1", "🥇"), _poyo("rank_2", "🥈"), _poyo("rank_3", "🥉")]
+        top_txt = "\n".join(
+            f"{medalhas[k] if k < 3 else f'`{k + 1}º`'} <@{u}>  Nv **{_nivel_de(v, base)}**  ·  {v} XP"
+            for k, (u, v) in enumerate(top)
+        ) or "*ninguém tem XP ainda*"
+        curva = "  ·  ".join(f"nv {n}: {_xp_para_nivel(n, base)}" for n in (1, 5, 10, 20, 35))
+        return [
+            discord.ui.TextDisplay(
+                f"## {_poyo('xp', '✨')} XP e níveis\n"
+                "-# cada ticket atendido dá XP pro atendente · o nível nunca zera"),
+            sep(),
+            discord.ui.TextDisplay(
+                f"**Status**  {'🟢 ligado' if on else '⚪ desligado'}\n"
+                f"**Ticket atendido**  +{r.get('xp_ticket', 50)} XP\n"
+                f"**Cada estrela**  +{r.get('xp_estrela', 10)} XP\n"
+                f"**Aviso na DM**  {'🟢 sim' if r.get('nivel_dm', True) else '⚪ não'}\n"
+                f"**Aviso no canal**  {'🟢 sim' if r.get('nivel_canal', True) else '⚪ não'}  ·  {canal}\n"
+                f"-# XP total pra chegar em: {curva}"
+            ),
+            sep(),
+            _sec(f"{_poyo('trofeu', '🏆')} Ranking geral de XP", "todos os tempos"),
+            discord.ui.TextDisplay(top_txt),
+            sep(),
+            discord.ui.ActionRow(
+                self._btn("XP: sim" if on else "XP: não", self._flip(("ranking", "xp_ativo")),
+                          verde if on else cinza, _poyo_ui("xp", "✨")),
+                self._btn("Valores", valores, emoji="🎯"),
+            ),
+            discord.ui.ActionRow(
+                self._btn("DM: sim" if r.get("nivel_dm", True) else "DM: não", self._flip(("ranking", "nivel_dm")),
+                          verde if r.get("nivel_dm", True) else cinza, "💌"),
+                self._btn("Canal: sim" if r.get("nivel_canal", True) else "Canal: não",
+                          self._flip(("ranking", "nivel_canal")),
+                          verde if r.get("nivel_canal", True) else cinza, "📣"),
+            ),
+            sep(),
+            _sec("📍 Canal dos avisos de nível", "vazio = usa o canal do placar"),
+            discord.ui.ActionRow(_ChanSel(
+                escolher_canal, placeholder="Escolher o canal",
+                channel_types=[discord.ChannelType.text], min_values=1, max_values=1)),
+            discord.ui.ActionRow(self._btn("Usar o do placar", usar_placar)),
+            sep(),
+            self._voltar(),
+        ]
+
     def _tela(self, cfg):
+        if self.page == "xp":
+            return self._tela_xp(cfg)
+        if self.page == "extras":
+            return self._tela_hub(cfg)
+        if self.page in EXTRAS_GRUPOS:
+            return self._tela_extra(cfg, self.page)
         g = self.guild
         r = cfg["ranking"]
         ativo = r["ativo"]
@@ -3987,6 +5192,8 @@ class RankView(discord.ui.LayoutView):
             discord.ui.ActionRow(
                 self._btn("Atualizar placar", atualizar, discord.ButtonStyle.primary, "🔄"),
                 self._btn("Ver este mês" if self.meses_atras else "Ver mês passado", virar_mes, emoji="📅"),
+                self._btn("XP e níveis", self._goto("xp"), emoji=_poyo_ui("xp", "✨")),
+                self._btn("Extras", self._goto("extras"), emoji="🧩"),
             ),
             sep(),
             _sec("📍 Canal do placar", "uma mensagem que se atualiza sozinha a cada ticket encerrado"),
@@ -4009,6 +5216,158 @@ class Tickets(commands.Cog):
     async def cog_load(self):
         register_views(self.bot)
         self._ler_emojis()      # se o bot ja estiver ligado (reload da cog)
+        if not self._vigia.is_running():
+            self._vigia.start()
+
+    async def cog_unload(self):
+        self._vigia.cancel()
+
+    # ---- vigia: roda a cada minuto (ticket parado, renovacao de parceria, staff do mes e meta)
+    @tasks.loop(seconds=60)
+    async def _vigia(self):
+        try:
+            await self._varrer_tickets()
+            await self._avisar_renovacoes()
+            for guild in self.bot.guilds:
+                cfg = get_cfg(guild.id)
+                if cfg["ranking"].get("ativo"):
+                    await staff_do_mes(guild, cfg)
+                    await meta_do_mes(guild, cfg)
+        except Exception:
+            log.exception("erro na vigia dos tickets")
+
+    @_vigia.before_loop
+    async def _vigia_antes(self):
+        await self.bot.wait_until_ready()
+
+    def _contar_msg(self, message, data):
+        # conta mensagem de cada pessoa no ticket (anti-farm, tempo de resposta e inatividade)
+        agora = int(datetime.now().timestamp())
+        uid = message.author.id
+        por = data.setdefault("msgs_por", {})
+        por[str(uid)] = por.get(str(uid), 0) + 1
+        data["ultima_msg"] = agora
+        data["aviso_fechar"] = 0          # falou alguem: o aviso de fechamento cai
+        if uid == data.get("owner"):
+            data["ultima_dono"] = agora
+        elif uid == data.get("claimed"):
+            data["ultima_atend"] = agora
+            data.setdefault("resp_por", {}).setdefault(str(uid), agora)
+        _save_soft()
+
+    async def _varrer_tickets(self):
+        agora = int(datetime.now().timestamp())
+        for guild in self.bot.guilds:
+            cfg = get_cfg(guild.id)
+            pd = cfg["extras"]["parado"]
+            if not (pd.get("lembrete_ativo") or pd.get("ping_ativo") or pd.get("fechar_ativo")):
+                continue
+            for cid, d in list(state["tickets"].items()):
+                if d.get("closing"):
+                    continue
+                ch = guild.get_channel_or_thread(int(cid))
+                if ch is None:
+                    continue
+                try:
+                    await self._vigiar_ticket(guild, cfg, ch, d, agora)
+                except Exception:
+                    log.exception("erro vigiando o ticket %s", cid)
+
+    async def _vigiar_ticket(self, guild, cfg, ch, d, agora):
+        pd = cfg["extras"]["parado"]
+        dono, claimed = d["owner"], d.get("claimed")
+        if not d.get("ultima_msg"):
+            d["ultima_msg"] = agora       # ticket antigo: o relogio comeca na 1a vez que o bot o ve
+            _save()
+        opened = int(d.get("opened") or agora)
+
+        # 1) ninguem assumiu: chama a equipe
+        if pd.get("ping_ativo") and not claimed:
+            espera = max(1, int(pd.get("ping_min", 10))) * 60
+            base = int(d.get("ping_ts") or opened)
+            if agora - base >= espera and int(d.get("ping_n", 0)) < 3:
+                d["ping_ts"] = agora
+                d["ping_n"] = int(d.get("ping_n", 0)) + 1
+                _save()
+                quem, allowed = _ping_equipe(guild, cfg, d["tipo"])
+                await ch.send(
+                    view=Card("Ninguém assumiu ainda",
+                              f"{quem}, <@{dono}> está esperando atendimento há {_dur(agora - opened)}."),
+                    allowed_mentions=allowed)
+                return
+
+        # 2) o dono respondeu e o atendente nao
+        if pd.get("lembrete_ativo") and claimed:
+            ud, ua = int(d.get("ultima_dono") or 0), int(d.get("ultima_atend") or 0)
+            espera = max(1, int(pd.get("lembrete_min", 15))) * 60
+            if ud and ud > ua and agora - ud >= espera and int(d.get("lembrete_para") or 0) != ud:
+                d["lembrete_para"] = ud
+                _save()
+                if _esta_ausente(guild.id, claimed, cfg):
+                    # atendente de folga: chama a equipe de plantao em vez de pingar ele
+                    quem, allowed = _ping_equipe(guild, cfg, d["tipo"])
+                    await ch.send(
+                        view=Card("Atendente ausente",
+                                  f"{quem}, <@{dono}> respondeu há {_dur(agora - ud)} e <@{claimed}> está ausente."),
+                        allowed_mentions=allowed)
+                else:
+                    ok = await _dm(self.bot, claimed,
+                                   f"💬 <@{dono}> respondeu no ticket {ch.mention} em **{guild.name}** "
+                                   f"e está esperando você há {_dur(agora - ud)}.")
+                    if not ok:
+                        await ch.send(
+                            view=Card("Atendente, o dono respondeu",
+                                      f"<@{claimed}>, <@{dono}> está esperando você há {_dur(agora - ud)}."),
+                            allowed_mentions=discord.AllowedMentions(users=[discord.Object(claimed)]))
+                return
+
+        # 3) fechamento por inatividade, com aviso antes
+        if pd.get("fechar_ativo"):
+            lim = max(1, int(pd.get("fechar_horas", 48))) * 3600
+            aviso = max(0, int(pd.get("aviso_horas", 6))) * 3600
+            ultima = int(d.get("ultima_msg") or agora)
+            inativo = agora - ultima
+            av = int(d.get("aviso_fechar") or 0)
+            if aviso and not av and inativo >= lim - aviso:
+                d["aviso_fechar"] = agora
+                _save()
+                alvos = [discord.Object(dono)] + ([discord.Object(claimed)] if claimed else [])
+                await ch.send(
+                    view=Card("Ticket parado",
+                              f"<@{dono}>, este ticket fecha <t:{ultima + lim}:R> por falta de mensagens. "
+                              "Escreva aqui pra mantê-lo aberto."),
+                    allowed_mentions=discord.AllowedMentions(users=alvos))
+                return
+            if inativo >= lim and (not aviso or (av and agora - av >= min(aviso, 1800))):
+                await close_ticket(ch, guild.me)
+
+    async def _avisar_renovacoes(self):
+        # DM pro parceiro quando o servidor dele pode renovar a parceria
+        agora = int(datetime.now().timestamp())
+        for guild in self.bot.guilds:
+            cfg = get_cfg(guild.id)
+            p = cfg["parceria"]
+            if not cfg["extras"]["parc"].get("dm_ativo"):
+                continue
+            dias = int(p.get("renovar_dias", 5) or 0)
+            if dias <= 0 or not p.get("bloquear_duplicado", True):
+                continue
+            mudou = False
+            for k, e in list(_parc_guild(guild.id).items()):
+                if e.get("avisado") or not e.get("autor"):
+                    continue
+                libera = int(e.get("ts", 0) or 0) + dias * 86400
+                if agora < libera:
+                    continue
+                e["avisado"] = True
+                mudou = True
+                if agora - libera > 86400:
+                    continue              # liberou faz tempo (antes de ligar o recurso): nao incomoda
+                await _dm(self.bot, int(e["autor"]),
+                          f"🤝 Oi! A parceria de **{e.get('nome', 'seu servidor')}** com **{guild.name}** "
+                          f"já pode ser renovada. Abra um ticket de parceria quando quiser.")
+            if mudou:
+                _parc_save()
 
     def _ler_emojis(self):
         # guarda os emojis poyo_* de todos os servidores onde o bot esta
@@ -4030,6 +5389,8 @@ class Tickets(commands.Cog):
     async def cog_check(self, ctx):
         if ctx.guild is None:
             raise commands.NoPrivateMessage()
+        if ctx.command is not None and ctx.command.name == "ptausente":
+            return True   # a equipe usa; quem pode e conferido dentro do comando
         if not (ctx.author.guild_permissions.administrator or tem_acesso_total(ctx.author)):
             raise commands.MissingPermissions(["administrator"])
         return True
@@ -4072,6 +5433,7 @@ class Tickets(commands.Cog):
         data = state["tickets"].get(str(channel.id))   # so tickets registrados
         if not data or data.get("closing"):
             return
+        self._contar_msg(message, data)   # mensagens, tempo de resposta e inatividade
         if not message.content or not LINK_RE.search(message.content):
             return
         autor = message.author
@@ -4200,7 +5562,7 @@ class Tickets(commands.Cog):
                                "O canal de parcerias não está configurado. A equipe vai publicar manualmente.")
 
         try:
-            convite = await self.bot.fetch_invite(codigos[0], with_counts=False)
+            convite = await self.bot.fetch_invite(codigos[0], with_counts=True)
         except discord.NotFound:
             return await aviso("Convite inválido",
                                f"{autor.mention}, esse convite não existe ou expirou. Mande um convite válido.", True)
@@ -4213,6 +5575,16 @@ class Tickets(commands.Cog):
             return await aviso("Esse é o convite do nosso servidor",
                                f"{autor.mention}, mande o convite do **seu** servidor.", True)
         nome = getattr(alvo, "name", None) or str(alvo.id)
+
+        # servidor pequeno demais pra parceria (so confere se o discord informou a contagem)
+        pe = cfg["extras"]["parc"]
+        if pe.get("min_ativo"):
+            minimo = int(pe.get("min_membros", 0))
+            qtd = getattr(convite, "approximate_member_count", None)
+            if minimo > 0 and isinstance(qtd, int) and qtd < minimo:
+                return await aviso("Servidor pequeno demais",
+                                   f"{autor.mention}, **{nome}** tem **{qtd}** membros e o mínimo pra parceria "
+                                   f"é **{minimo}**. Quando crescer, mande o convite de novo.", True)
 
         async with self._lock(guild.id):
             dup = self._dup_parceria(guild, p, alvo.id, nome)
@@ -4271,6 +5643,8 @@ class Tickets(commands.Cog):
                     "salvo_em": int(datetime.now().timestamp()),
                 }
                 _parc_save()
+                data["parc_postada"] = True   # o atendente que encerrar este ticket pode ganhar o bonus
+                _save()
 
             try:
                 await message.delete()
@@ -4340,6 +5714,51 @@ class Tickets(commands.Cog):
     @commands.guild_only()
     async def ptrank(self, ctx):
         await RankView.open(ctx)
+
+    @commands.command(
+        name="ptnivel",
+        aliases=("ptxp",),
+        extras={
+            "categoria": "Utilidades",
+            "uso": ",ptnivel [@membro]",
+            "descricao": "Mostra o nível e o XP de atendimento de tickets (o seu ou de outro membro).",
+        },
+    )
+    @commands.guild_only()
+    async def ptnivel(self, ctx, membro: Optional[discord.Member] = None):
+        cfg = get_cfg(ctx.guild.id)
+        if not cfg["ranking"].get("ativo") or not cfg["ranking"].get("xp_ativo", True):
+            return await _say(ctx, "XP desligado", "A equipe ainda não ligou o ranking com XP.", ok=False)
+        alvo = membro or ctx.author
+        await ctx.send(view=build_nivel_view(ctx.guild, cfg, alvo.id), allowed_mentions=NO_MENTIONS)
+
+    @commands.command(
+        name="ptausente",
+        aliases=("ausente",),
+        extras={
+            "categoria": "Utilidades",
+            "uso": ",ptausente [motivo]",
+            "descricao": "Liga ou desliga o seu status de ausente (de folga): sem lembretes nem pings.",
+        },
+    )
+    @commands.guild_only()
+    async def ptausente(self, ctx, *, motivo: str = ""):
+        cfg = get_cfg(ctx.guild.id)
+        if not cfg["extras"]["qual"].get("ausente_ativo", True):
+            return await _say(ctx, "Status ausente desligado", "A administração desligou esse recurso.", ok=False)
+        if not is_staff(ctx.author, cfg):
+            return await _say(ctx, "Só pra equipe", "Esse comando é dos atendentes.", ok=False)
+        aus = _ausentes(ctx.guild.id)
+        chave = str(ctx.author.id)
+        if chave in aus:
+            del aus[chave]
+            _rank_save()
+            await _say(ctx, "Bem-vindo de volta", "Você voltou a receber lembretes e pings.")
+        else:
+            aus[chave] = {"desde": int(datetime.now().timestamp()), "motivo": motivo.strip()[:100]}
+            _rank_save()
+            await _say(ctx, "Você está ausente", "Sem lembretes nem pings até você usar `,ptausente` de novo.")
+        await atualizar_ranking(ctx.guild)
 
     async def _updated(self, ctx, title, text=""):
         n = await refresh_panels(ctx.guild)
