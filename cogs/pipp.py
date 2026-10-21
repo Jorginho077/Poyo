@@ -1,14 +1,20 @@
-"""Comando ,pipp — mostra o IP público e a(s) porta(s) da VM.
+"""Comando ,pipp e /pipp — mostra o IP público e a(s) porta(s) da VM.
 
-Colocar em cogs/pipp.py (o bot carrega tudo em cogs/ sozinho).
+Colocar em cogs/pipp.py (o bot carrega tudo em cogs/ sozinho, só precisa reiniciar).
 
+Funciona de dois jeitos: `,pipp` (prefixo) e `/pipp` (slash).
 Segurança: só o dono do bot usa, e a resposta vai na DM (IP não deve ficar
-num canal de servidor). No canal, o bot só reage com ✅.
+num canal de servidor). No canal só aparece um aviso curto que some sozinho.
+
+Quem é "dono do bot": quem está em SITE_DONOS_DO_BOT (a mesma lista da API do site)
+ou o dono da aplicação no Discord. Se o comando parecer "mudo", olhe o console do
+bot: ele imprime `[pipp] negado ...` com o ID de quem tentou.
 
 .env (opcional):
-    SITE_API_PORT=8787          # já existe, é a porta da API do site
+    SITE_DONOS_DO_BOT=123,456   # IDs autorizados (já usado pela API do site)
+    SITE_API_PORT=8787          # porta da API do site
+    SITE_API_URL=https://...    # endereço público da API, se tiver
     PIPP_PORTAS=25565,3000      # outras portas que você queira listar
-    SITE_DONOS_DO_BOT=123,456   # já existe, IDs extras autorizados
 """
 
 from __future__ import annotations
@@ -19,6 +25,12 @@ import aiohttp
 import discord
 from discord.ext import commands
 
+try:  # mesma fonte de verdade da API do site
+    from ._site_config import API_URL, DONOS_DO_BOT, HOST, PORT
+except Exception:  # cog funciona mesmo se a API do site não existir
+    API_URL, DONOS_DO_BOT, HOST = "", (), "127.0.0.1"
+    PORT = int(os.getenv("SITE_API_PORT", "8787"))
+
 SERVICOS_IP = (
     "https://api.ipify.org",
     "https://ifconfig.me/ip",
@@ -27,7 +39,7 @@ SERVICOS_IP = (
 
 
 def _portas() -> list[str]:
-    portas = [os.getenv("SITE_API_PORT", "8787").strip()]
+    portas = [str(PORT)]
     extras = os.getenv("PIPP_PORTAS", "")
     portas += [p.strip() for p in extras.split(",") if p.strip()]
     vistas: list[str] = []
@@ -38,7 +50,7 @@ def _portas() -> list[str]:
 
 
 def _autorizados() -> set[int]:
-    ids = set()
+    ids = {int(i) for i in DONOS_DO_BOT if str(i).isdigit()}
     for p in os.getenv("SITE_DONOS_DO_BOT", "").split(","):
         p = p.strip()
         if p.isdigit():
@@ -66,12 +78,30 @@ class Pipp(commands.Cog):
         self.bot = bot
 
     async def _pode(self, usuario: discord.abc.User) -> bool:
-        return usuario.id in _autorizados() or await self.bot.is_owner(usuario)
+        if usuario.id in _autorizados():
+            return True
+        try:
+            return await self.bot.is_owner(usuario)
+        except Exception:
+            return False
 
-    @commands.command(name="pipp")
+    @commands.hybrid_command(
+        name="pipp",
+        description="IP público e porta da VM (só o dono do bot, via DM).",
+        hidden=True,
+    )
     async def pipp(self, ctx: commands.Context):
-        """Mostra IP público e porta da VM (só dono do bot, via DM)."""
+        """IP público e porta da VM (só o dono do bot, via DM)."""
         if not await self._pode(ctx.author):
+            print(
+                f"[pipp] negado para {ctx.author} ({ctx.author.id}). "
+                "Pra liberar, ponha esse ID em SITE_DONOS_DO_BOT no .env."
+            )
+            if ctx.interaction is not None:  # o bot já deu defer; não deixa "pensando..."
+                try:
+                    await ctx.interaction.delete_original_response()
+                except discord.HTTPException:
+                    pass
             return  # silencioso: não revela que o comando existe
 
         async with ctx.typing():
@@ -91,22 +121,32 @@ class Pipp(commands.Cog):
                 value="\n".join(f"`{ip}:{p}`" for p in portas),
                 inline=False,
             )
+        if API_URL:
+            emb.add_field(name="URL pública da API", value=f"`{API_URL}`", inline=False)
+        if HOST in ("127.0.0.1", "localhost"):
+            emb.add_field(
+                name="⚠️ Atenção",
+                value=(
+                    f"A API do site escuta só em `{HOST}:{PORT}`, então `IP:porta` "
+                    "**não** abre de fora. Use túnel/proxy (Caddy, Cloudflare Tunnel) "
+                    "ou troque `SITE_API_HOST` e libere a porta no firewall da Oracle."
+                ),
+                inline=False,
+            )
         emb.set_footer(text="IP pode mudar se a VM não tiver IP reservado.")
 
         try:
             await ctx.author.send(embed=emb)
         except discord.Forbidden:
-            await ctx.reply(
+            await ctx.send(
                 "Não consegui te chamar na DM. Libere DMs deste servidor e tente de novo.",
-                mention_author=False,
+                delete_after=10,
             )
             return
 
+        # a mensagem do comando já foi apagada pelo bot, então avisa com texto que some
         if ctx.guild:
-            try:
-                await ctx.message.add_reaction("✅")
-            except discord.HTTPException:
-                pass
+            await ctx.send("✅ Mandei na sua DM.", delete_after=6)
 
 
 async def setup(bot: commands.Bot):
