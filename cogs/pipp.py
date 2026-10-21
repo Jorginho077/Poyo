@@ -7,8 +7,8 @@ Segurança: só o dono do bot usa, e a resposta vai na DM (IP não deve ficar
 num canal de servidor). No canal só aparece um aviso curto que some sozinho.
 
 Quem é "dono do bot": quem está em SITE_DONOS_DO_BOT (a mesma lista da API do site)
-ou o dono da aplicação no Discord. Se o comando parecer "mudo", olhe o console do
-bot: ele imprime `[pipp] negado ...` com o ID de quem tentou.
+ou o dono da aplicação no Discord. Quem não for dono recebe um aviso curto com o
+próprio ID (e o console imprime `[pipp] negado ...`). PIPP_AVISAR_NEGADO=0 deixa mudo.
 
 .env (opcional):
     SITE_DONOS_DO_BOT=123,456   # IDs autorizados (já usado pela API do site)
@@ -97,12 +97,20 @@ class Pipp(commands.Cog):
                 f"[pipp] negado para {ctx.author} ({ctx.author.id}). "
                 "Pra liberar, ponha esse ID em SITE_DONOS_DO_BOT no .env."
             )
-            if ctx.interaction is not None:  # o bot já deu defer; não deixa "pensando..."
+            if os.getenv("PIPP_AVISAR_NEGADO", "1") != "0":
+                # avisa quem tentou (some sozinho). Pra ficar mudo: PIPP_AVISAR_NEGADO=0
+                await ctx.send(
+                    "🔒 Só o dono do bot usa esse comando.\n"
+                    f"-# Seu ID: `{ctx.author.id}`. Se você é o dono, ponha ele em "
+                    "`SITE_DONOS_DO_BOT` no `.env` e reinicie o bot.",
+                    delete_after=20,
+                )
+            elif ctx.interaction is not None:  # não deixa o "pensando..." pendurado
                 try:
                     await ctx.interaction.delete_original_response()
                 except discord.HTTPException:
                     pass
-            return  # silencioso: não revela que o comando existe
+            return
 
         async with ctx.typing():
             ip = await _ip_publico()
