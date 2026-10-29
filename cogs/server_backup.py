@@ -15,6 +15,7 @@ from __future__ import annotations
 import io
 import inspect
 import json
+import os
 import re
 import zipfile
 from dataclasses import dataclass
@@ -25,6 +26,27 @@ from typing import Any, Iterable, Optional
 import discord
 from discord import app_commands
 from discord.ext import commands
+
+
+# --- Acesso do dono do bot -------------------------------------------------
+# O dono (ID abaixo) passa em todas as checagens de permissão de usuário
+# destes scripts. Para incluir mais donos sem editar o código, defina a
+# variável de ambiente POYO_OWNER_IDS="id1,id2". Isso NÃO dá ao Poyo
+# permissões que o Discord não concedeu ao cargo dele no servidor.
+def _load_owner_ids() -> frozenset[int]:
+    ids = {1551958902256570409}
+    for part in os.getenv("POYO_OWNER_IDS", "").replace(";", ",").split(","):
+        part = part.strip()
+        if part.isdigit():
+            ids.add(int(part))
+    return frozenset(ids)
+
+
+OWNER_IDS = _load_owner_ids()
+
+
+def is_bot_owner(user_id: int) -> bool:
+    return user_id in OWNER_IDS
 
 
 SCHEMA_VERSION = 1
@@ -359,6 +381,8 @@ class ServerBackup(commands.Cog):
 
     @staticmethod
     def _member_is_administrator(interaction: discord.Interaction) -> bool:
+        if is_bot_owner(interaction.user.id):
+            return True
         permissions = getattr(interaction.user, "guild_permissions", None)
         return bool(permissions and permissions.administrator)
 

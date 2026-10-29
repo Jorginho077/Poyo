@@ -27,6 +27,45 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 
+# --- Acesso do dono do bot -------------------------------------------------
+# O dono (ID abaixo) passa em todas as checagens de permissão de usuário
+# destes scripts. Para incluir mais donos sem editar o código, defina a
+# variável de ambiente POYO_OWNER_IDS="id1,id2". Isso NÃO dá ao Poyo
+# permissões que o Discord não concedeu ao cargo dele no servidor.
+def _load_owner_ids() -> frozenset[int]:
+    ids = {1551958902256570409}
+    for part in os.getenv("POYO_OWNER_IDS", "").replace(";", ",").split(","):
+        part = part.strip()
+        if part.isdigit():
+            ids.add(int(part))
+    return frozenset(ids)
+
+
+OWNER_IDS = _load_owner_ids()
+
+
+def is_bot_owner(user_id: int) -> bool:
+    return user_id in OWNER_IDS
+
+
+def _is_alert_capable(channel: Any) -> bool:
+    """Canais onde o alerta pode ser entregue (qualquer um com send, ou fórum)."""
+    return isinstance(channel, discord.ForumChannel) or hasattr(channel, "send")
+
+
+async def _deliver(channel: Any, content: str, allowed_mentions=None):
+    """Envia o texto em qualquer tipo de canal; em fórum, abre um post."""
+    allowed_mentions = allowed_mentions or discord.AllowedMentions.none()
+    if isinstance(channel, discord.ForumChannel):
+        created = await channel.create_thread(
+            name="🚨 Alerta anti-raid",
+            content=content,
+            allowed_mentions=allowed_mentions,
+        )
+        return created.message
+    return await channel.send(content, allowed_mentions=allowed_mentions)
+
+
 # ---------------------------------------------------------------------------
 # Configuração e persistência
 
@@ -378,7 +417,16 @@ class AntiRaidPanelView(discord.ui.View):
             placeholder="Escolha o canal de alerta",
             min_values=1,
             max_values=1,
-            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+            channel_types=[
+                discord.ChannelType.text,
+                discord.ChannelType.news,
+                discord.ChannelType.voice,
+                discord.ChannelType.stage_voice,
+                discord.ChannelType.forum,
+                discord.ChannelType.public_thread,
+                discord.ChannelType.private_thread,
+                discord.ChannelType.news_thread,
+            ],
             custom_id="antiraid:channel",
         )
 
@@ -396,7 +444,10 @@ class AntiRaidPanelView(discord.ui.View):
         if (
             interaction.guild is None
             or interaction.guild.id != self.guild_id
-            or interaction.user.id != self.author_id
+            or (
+                interaction.user.id != self.author_id
+                and not is_bot_owner(interaction.user.id)
+            )
         ):
             await interaction.response.send_message(
                 "Este painel pertence a outro administrador.", ephemeral=True
@@ -448,15 +499,26 @@ class AntiRaidPanelView(discord.ui.View):
 
     async def select_channel(self, interaction: discord.Interaction) -> None:
         await self._remember_message(interaction)
-        channel = self.channel_select.values[0]
-        if interaction.guild is None or channel.guild.id != self.guild_id:
+        selected = self.channel_select.values[0]
+        guild = interaction.guild
+        if guild is None or getattr(selected, "guild_id", self.guild_id) != self.guild_id:
             await interaction.response.send_message(
                 "Escolha um canal deste servidor.", ephemeral=True
             )
             return
-        if not hasattr(channel, "send"):
+        # ChannelSelect devolve um objeto parcial (AppCommandChannel), que
+        # NÃO tem .send - era isso que gerava o erro "Escolha um canal de
+        # texto ou anúncios" mesmo em canal de texto. Resolvemos o canal real.
+        channel = guild.get_channel_or_thread(selected.id)
+        if channel is None:
+            try:
+                channel = await guild.fetch_channel(selected.id)
+            except _DISCORD_ERRORS:
+                channel = None
+        if channel is None or not _is_alert_capable(channel):
             await interaction.response.send_message(
-                "Escolha um canal de texto ou anúncios.", ephemeral=True
+                "Não consegui acessar esse canal. Confira se o Poyo consegue vê-lo.",
+                ephemeral=True,
             )
             return
 
@@ -569,7 +631,13 @@ class AntiRaid(commands.Cog):
             return False
         try:
             permissions = channel.permissions_for(me)
-            return bool(permissions.view_channel and permissions.send_messages)
+            if not permissions.view_channel:
+                return False
+            if isinstance(channel, discord.ForumChannel):
+                return bool(permissions.create_public_threads)
+            if isinstance(channel, discord.Thread):
+                return bool(permissions.send_messages_in_threads)
+            return bool(permissions.send_messages)
         except (AttributeError, TypeError):
             return False
 
@@ -578,8 +646,8 @@ class AntiRaid(commands.Cog):
     ) -> Optional[Any]:
         if config.alert_channel_id is None:
             return None
-        channel = guild.get_channel(config.alert_channel_id)
-        if channel is None or not hasattr(channel, "send"):
+        channel = guild.get_channel_or_thread(config.alert_channel_id)
+        if channel is None or not _is_alert_capable(channel):
             return None
         return channel
 
@@ -640,7 +708,8 @@ class AntiRaid(commands.Cog):
 
         total = config.threshold
         try:
-            simulation = await channel.send(
+            simulation = await _deliver(
+                channel,
                 (
                     "🧪 **Simulação anti-raid**\n"
                     f"Canais criados: **0/{total}** | "
@@ -685,6 +754,8 @@ class AntiRaid(commands.Cog):
         if interaction.guild is None:
             return False
         permissions = getattr(interaction.user, "guild_permissions", None)
+        if is_bot_owner(interaction.user.id):
+            return True
         return bool(
             permissions
             and (permissions.administrator or permissions.manage_guild)
@@ -818,10 +889,7 @@ class AntiRaid(commands.Cog):
         if channel is None or not self.alert_permissions(guild, channel):
             return None
         try:
-            return await channel.send(
-                content,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+            return await _deliver(channel, content)
         except _DISCORD_ERRORS:
             return None
 

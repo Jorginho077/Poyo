@@ -21,6 +21,27 @@ from discord import app_commands
 from discord.ext import commands
 
 
+# --- Acesso do dono do bot -------------------------------------------------
+# O dono (ID abaixo) passa em todas as checagens de permissão de usuário
+# destes scripts. Para incluir mais donos sem editar o código, defina a
+# variável de ambiente POYO_OWNER_IDS="id1,id2". Isso NÃO dá ao Poyo
+# permissões que o Discord não concedeu ao cargo dele no servidor.
+def _load_owner_ids() -> frozenset[int]:
+    ids = {1551958902256570409}
+    for part in os.getenv("POYO_OWNER_IDS", "").replace(";", ",").split(","):
+        part = part.strip()
+        if part.isdigit():
+            ids.add(int(part))
+    return frozenset(ids)
+
+
+OWNER_IDS = _load_owner_ids()
+
+
+def is_bot_owner(user_id: int) -> bool:
+    return user_id in OWNER_IDS
+
+
 IP_SERVICES = (
     "https://api.ipify.org",
     "https://ifconfig.me/ip",
@@ -213,6 +234,8 @@ class HostingInfo(commands.Cog):
         return f"ativo em `{self._http_host}:{self._http_port}`"
 
     def _is_admin(self, interaction: discord.Interaction) -> bool:
+        if is_bot_owner(interaction.user.id):
+            return True
         permissions = getattr(interaction.user, "guild_permissions", None)
         return bool(permissions and permissions.administrator)
 
@@ -252,7 +275,10 @@ class HostingInfo(commands.Cog):
     )
     @commands.guild_only()
     async def hostinginfo_prefix(self, ctx: commands.Context) -> None:
-        if not ctx.author.guild_permissions.administrator:
+        if not (
+            is_bot_owner(ctx.author.id)
+            or ctx.author.guild_permissions.administrator
+        ):
             return
         try:
             await ctx.author.send(await self._build_info_text())
@@ -267,7 +293,10 @@ class HostingInfo(commands.Cog):
     )
     @commands.guild_only()
     async def hostinghttp_prefix(self, ctx: commands.Context, acao: str = "status") -> None:
-        if not ctx.author.guild_permissions.administrator:
+        if not (
+            is_bot_owner(ctx.author.id)
+            or ctx.author.guild_permissions.administrator
+        ):
             return
         acao = acao.casefold().strip()
         if acao == "iniciar":
