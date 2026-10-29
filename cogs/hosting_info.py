@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 import discord
+from aiohttp import web
 from discord import app_commands
 from discord.ext import commands
 
@@ -129,6 +130,141 @@ def _public_ip_sync() -> str | None:
 class HostingInfo(commands.Cog):
     """Exibe dados básicos da máquina que executa o processo do bot."""
 
+    hostinghttp = app_commands.Group(
+        name="hostinghttp",
+        description="Controla o servidor HTTP opcional do bot.",
+    )
+
+    def __init__(self, bot: commands.Bot) -> None:
+        self.bot = bot
+        self._http_runner: web.AppRunner | None = None
+        self._http_site: web.TCPSite | None = None
+        self._http_host: str | None = None
+        self._http_port: int | None = None
+
+    def cog_unload(self) -> None:
+        # discord.py chama cog_unload de forma síncrona.
+        if self._http_runner is not None:
+            asyncio.create_task(self.stop_http())
+
+    @staticmethod
+    async def _http_index(request: web.Request) -> web.Response:
+        return web.Response(
+            text=(
+                "Poyo HTTP online\n"
+                "Use /health para verificar a saúde do serviço.\n"
+            ),
+            content_type="text/plain",
+        )
+
+    @staticmethod
+    async def _http_health(request: web.Request) -> web.Response:
+        return web.json_response({"status": "ok", "service": "poyo"})
+
+    async def start_http(self) -> tuple[bool, str]:
+        """Inicia o HTTP somente quando solicitado por comando/configuração."""
+        if self._http_runner is not None:
+            return False, f"já está ativo em {self._http_host}:{self._http_port}"
+
+        host = os.getenv("HTTP_BIND_HOST", "0.0.0.0").strip() or "0.0.0.0"
+        raw_port = os.getenv("PORT", os.getenv("HTTP_PORT", "8080")).strip()
+        try:
+            port = int(raw_port)
+        except ValueError:
+            return False, f"porta inválida: `{raw_port}`"
+        if not 1 <= port <= 65535:
+            return False, "a porta precisa estar entre 1 e 65535"
+
+        application = web.Application()
+        application.router.add_get("/", self._http_index)
+        application.router.add_get("/health", self._http_health)
+        runner = web.AppRunner(application, access_log=None)
+
+        try:
+            await runner.setup()
+            site = web.TCPSite(runner, host=host, port=port)
+            await site.start()
+        except (OSError, RuntimeError) as error:
+            await runner.cleanup()
+            return False, f"não foi possível abrir `{host}:{port}`: {error}"
+
+        self._http_runner = runner
+        self._http_site = site
+        self._http_host = host
+        self._http_port = port
+        return True, f"iniciado em `{host}:{port}`"
+
+    async def stop_http(self) -> tuple[bool, str]:
+        if self._http_runner is None:
+            return False, "não está ativo"
+        address = f"{self._http_host}:{self._http_port}"
+        try:
+            await self._http_runner.cleanup()
+        finally:
+            self._http_runner = None
+            self._http_site = None
+            self._http_host = None
+            self._http_port = None
+        return True, f"parado; a porta `{address}` foi liberada"
+
+    def http_status(self) -> str:
+        if self._http_runner is None:
+            return "desligado"
+        return f"ativo em `{self._http_host}:{self._http_port}`"
+
+    def _is_admin(self, interaction: discord.Interaction) -> bool:
+        permissions = getattr(interaction.user, "guild_permissions", None)
+        return bool(permissions and permissions.administrator)
+
+    @hostinghttp.command(
+        name="iniciar",
+        description="Inicia o servidor HTTP usando PORT ou HTTP_PORT.",
+    )
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def hostinghttp_start(self, interaction: discord.Interaction) -> None:
+        if not self._is_admin(interaction):
+            await interaction.response.send_message("Somente administradores.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        started, message = await self.start_http()
+        await interaction.followup.send(
+            ("✅ " if started else "ℹ️ ") + message,
+            ephemeral=True,
+        )
+
+    @hostinghttp.command(
+        name="parar",
+        description="Para o servidor HTTP opcional.",
+    )
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def hostinghttp_stop(self, interaction: discord.Interaction) -> None:
+        if not self._is_admin(interaction):
+            await interaction.response.send_message("Somente administradores.", ephemeral=True)
+            return
+        stopped, message = await self.stop_http()
+        await interaction.response.send_message(
+            ("✅ " if stopped else "ℹ️ ") + message,
+            ephemeral=True,
+        )
+
+    @hostinghttp.command(
+        name="status",
+        description="Mostra o status do servidor HTTP opcional.",
+    )
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def hostinghttp_status(self, interaction: discord.Interaction) -> None:
+        if not self._is_admin(interaction):
+            await interaction.response.send_message("Somente administradores.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"Servidor HTTP: **{self.http_status()}**\n"
+            "Endpoints: `/` e `/health`.",
+            ephemeral=True,
+        )
+
     @app_commands.command(
         name="hostinginfo",
         description="Mostra IP público, hostname, URL e portas da hospedagem.",
@@ -136,8 +272,7 @@ class HostingInfo(commands.Cog):
     @app_commands.guild_only()
     @app_commands.default_permissions(administrator=True)
     async def hostinginfo(self, interaction: discord.Interaction) -> None:
-        permissions = getattr(interaction.user, "guild_permissions", None)
-        if not permissions or not permissions.administrator:
+        if not self._is_admin(interaction):
             await interaction.response.send_message(
                 "Somente administradores podem consultar os dados da hospedagem.",
                 ephemeral=True,
@@ -182,4 +317,8 @@ class HostingInfo(commands.Cog):
 
 
 async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(HostingInfo(bot))
+    cog = HostingInfo(bot)
+    await bot.add_cog(cog)
+    if os.getenv("AUTO_START_HTTP", "0").strip().lower() in {"1", "true", "yes", "sim"}:
+        started, message = await cog.start_http()
+        print(f"Servidor HTTP automático: {'OK' if started else 'falhou'} — {message}")
