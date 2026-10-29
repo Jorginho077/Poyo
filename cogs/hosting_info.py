@@ -216,6 +216,72 @@ class HostingInfo(commands.Cog):
         permissions = getattr(interaction.user, "guild_permissions", None)
         return bool(permissions and permissions.administrator)
 
+    async def _build_info_text(self) -> str:
+        public_ip = await asyncio.to_thread(_public_ip_sync)
+        hostname = socket.gethostname()
+        local_host = os.getenv("HOST", os.getenv("HOSTNAME", "não informado"))
+        ports = await asyncio.to_thread(_local_listening_ports)
+        public_url, url_source = _discover_public_url()
+        public_port, port_source = _discover_port(ports)
+
+        port_text = ", ".join(str(port) for port in ports) if ports else "nenhuma detectada"
+        ip_text = public_ip or "não foi possível detectar"
+        url_text = public_url or "não determinável automaticamente"
+
+        return (
+            "## Informações da hospedagem\n"
+            f"**IP público:** `{ip_text}`\n"
+            f"**Hostname:** `{hostname}`\n"
+            f"**Host configurado:** `{local_host}`\n"
+            f"**URL pública:** `{url_text}`\n"
+            f"**Origem da URL:** `{url_source}`\n"
+            f"**Porta provável:** `{public_port}`\n"
+            f"**Origem da porta:** `{port_source}`\n"
+            f"**Portas TCP locais em escuta:** `{port_text}`\n\n"
+            "A URL e a porta pública dependem do provedor. O comando tenta detectar "
+            "metadados conhecidos automaticamente, mas não inventa uma URL quando o "
+            "provedor não a informa. Se o bot apenas se conecta ao Discord, normalmente "
+            "não existe uma porta pública do bot. As portas listadas são apenas as que "
+            "estão abertas localmente; NAT, proxy ou firewall podem impedir acesso externo."
+        )
+
+    @commands.command(
+        name="hostinginfo",
+        help="Envia por DM o IP, URL, hostname e portas da hospedagem.",
+        extras={"categoria": "Utilidades", "uso": ",hostinginfo"},
+    )
+    @commands.guild_only()
+    async def hostinginfo_prefix(self, ctx: commands.Context) -> None:
+        if not ctx.author.guild_permissions.administrator:
+            return
+        try:
+            await ctx.author.send(await self._build_info_text())
+            await ctx.reply("Enviei as informações da hospedagem por mensagem privada.", delete_after=10)
+        except discord.Forbidden:
+            await ctx.reply("Não consegui enviar mensagem privada para você.", delete_after=10)
+
+    @commands.command(
+        name="hostinghttp",
+        help="Inicia, para ou mostra o status do servidor HTTP. Uso: ,hostinghttp iniciar|parar|status",
+        extras={"categoria": "Utilidades", "uso": ",hostinghttp <iniciar|parar|status>"},
+    )
+    @commands.guild_only()
+    async def hostinghttp_prefix(self, ctx: commands.Context, acao: str = "status") -> None:
+        if not ctx.author.guild_permissions.administrator:
+            return
+        acao = acao.casefold().strip()
+        if acao == "iniciar":
+            sucesso, mensagem = await self.start_http()
+            resposta = ("✅ " if sucesso else "ℹ️ ") + mensagem
+        elif acao == "parar":
+            sucesso, mensagem = await self.stop_http()
+            resposta = ("✅ " if sucesso else "ℹ️ ") + mensagem
+        elif acao == "status":
+            resposta = f"Servidor HTTP: **{self.http_status()}**. Endpoints: `/` e `/health`."
+        else:
+            resposta = "Use `,hostinghttp iniciar`, `,hostinghttp parar` ou `,hostinghttp status`."
+        await ctx.reply(resposta, delete_after=15)
+
     @hostinghttp.command(
         name="iniciar",
         description="Inicia o servidor HTTP usando PORT ou HTTP_PORT.",
@@ -280,34 +346,7 @@ class HostingInfo(commands.Cog):
             return
 
         await interaction.response.defer(ephemeral=True, thinking=True)
-        public_ip = await asyncio.to_thread(_public_ip_sync)
-        hostname = socket.gethostname()
-        local_host = os.getenv("HOST", os.getenv("HOSTNAME", "não informado"))
-        ports = await asyncio.to_thread(_local_listening_ports)
-        public_url, url_source = _discover_public_url()
-        public_port, port_source = _discover_port(ports)
-
-        port_text = ", ".join(str(port) for port in ports) if ports else "nenhuma detectada"
-        ip_text = public_ip or "não foi possível detectar"
-        url_text = public_url or "não determinável automaticamente"
-
-        text = (
-            "## Informações da hospedagem\n"
-            f"**IP público:** `{ip_text}`\n"
-            f"**Hostname:** `{hostname}`\n"
-            f"**Host configurado:** `{local_host}`\n"
-            f"**URL pública:** `{url_text}`\n"
-            f"**Origem da URL:** `{url_source}`\n"
-            f"**Porta provável:** `{public_port}`\n"
-            f"**Origem da porta:** `{port_source}`\n"
-            f"**Portas TCP locais em escuta:** `{port_text}`\n\n"
-            "A URL e a porta pública dependem do provedor. O comando tenta detectar "
-            "metadados conhecidos automaticamente, mas não inventa uma URL quando o "
-            "provedor não a informa. Se o bot apenas se conecta ao Discord, normalmente "
-            "não existe uma porta pública do bot. "
-            "As portas listadas são apenas as que estão abertas localmente; NAT, "
-            "proxy ou firewall podem impedir acesso externo."
-        )
+        text = await self._build_info_text()
 
         await interaction.followup.send(
             text,
