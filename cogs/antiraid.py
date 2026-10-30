@@ -89,6 +89,8 @@ DEFAULTS = {
     "janela": 10,               # segundos que contam pro raid
     "limite_canais": 3,         # canais criados na janela (0 = nao conta canais)
     "limite_everyone": 3,       # mensagens com @everyone/@here na janela (0 = nao conta)
+    "limite_punicoes_staff": 2,  # banimentos/expulsões feitos pela mesma pessoa
+    "janela_punicoes_staff": 300, # 5 minutos
     "gatilho": "qualquer",      # qualquer = um dos dois ja basta | ambos = precisa dos dois juntos
     "limpar": True,             # apaga os canais e as mensagens que o raid criou
     "log": None,                # id do canal onde o aviso do raid cai
@@ -723,6 +725,7 @@ class AntiRaidView(discord.ui.LayoutView):
             discord.ui.TextDisplay(
                 "**Bot**  tira todos os cargos e bane\n"
                 "**Membro**  tira todos os cargos e deixa de castigo\n"
+                f"**Staff**  {cfg.get('limite_punicoes_staff', 2)} banimentos/expulsões em {cfg.get('janela_punicoes_staff', 300) // 60} min: remove os cargos atribuíveis\n"
                 "**Trancado**  quem foi punido só é liberado com a senha (`,antiraid liberar`)\n"
                 "**Limpeza do raid**  sempre ativa: apaga os canais e mensagens registrados na janela"
             ),
@@ -776,6 +779,7 @@ class AntiRaid(commands.Cog):
         # (guild_id, user_id) -> deque de (momento, id_do_canal) / (momento, id_do_canal, id_da_mensagem)
         self._canais: dict = {}
         self._pings: dict = {}
+        self._punicoes_staff: dict = {}  # guild/user -> deque de (momento, acao, alvo)
         self._punindo: set = set()
         self._calmo: dict = {}   # (guild_id, user_id) -> momento ate quando ignorar
 
@@ -844,6 +848,11 @@ class AntiRaid(commands.Cog):
 
     @commands.Cog.listener()
     async def on_audit_log_entry_create(self, entry: discord.AuditLogEntry):
+        # A mesma pessoa fazendo 2 banimentos/expulsões em 5 minutos perde
+        # todos os cargos que o bot consegue remover.
+        if entry.action in (discord.AuditLogAction.ban, discord.AuditLogAction.kick):
+            await self._registrar_punicao_staff(entry)
+            return
         # canal criado (quem criou vem do registro de auditoria)
         if entry.action is not discord.AuditLogAction.channel_create:
             return
@@ -859,6 +868,75 @@ class AntiRaid(commands.Cog):
         canal_id = getattr(entry.target, "id", None)
         self._canais.setdefault(key, deque()).append((time.monotonic(), canal_id))
         await self._checar(guild, uid, cfg, quem=entry.user)
+
+    async def _registrar_punicao_staff(self, entry: discord.AuditLogEntry):
+        guild, uid = entry.guild, entry.user_id
+        alvo = getattr(entry.target, "id", None)
+        if guild is None or uid is None or alvo is None:
+            return
+        cfg = get_cfg(guild.id)
+        if not cfg["ativo"] or self._ignorado(guild, uid, cfg):
+            return
+        # O bot não deve remover seus próprios cargos ao registrar uma ação.
+        if self.bot.user is not None and uid == self.bot.user.id:
+            return
+        key = (guild.id, uid)
+        fila = self._punicoes_staff.setdefault(key, deque())
+        agora = time.monotonic()
+        janela = int(cfg.get("janela_punicoes_staff", 300))
+        while fila and agora - fila[0][0] > janela:
+            fila.popleft()
+        acao = "banimento" if entry.action is discord.AuditLogAction.ban else "expulsão"
+        fila.append((agora, acao, alvo))
+        limite = int(cfg.get("limite_punicoes_staff", 2))
+        if len(fila) < limite:
+            return
+        self._punicoes_staff.pop(key, None)
+        await self._punir_staff(guild, uid, list(fila), cfg)
+
+    async def _punir_staff(self, guild: discord.Guild, uid: int, eventos: list, cfg: dict):
+        membro = guild.get_member(uid)
+        if membro is None:
+            try:
+                membro = await guild.fetch_member(uid)
+            except discord.HTTPException:
+                membro = None
+        if membro is None:
+            return
+        remover = [r for r in membro.roles if not r.is_default() and not r.managed and r.is_assignable()]
+        linhas = [
+            f"**Motivo:** {len(eventos)} banimentos/expulsões em até {cfg.get('janela_punicoes_staff', 300)} segundos.",
+            f"**Ações registradas:** {', '.join(a for _, a, _ in eventos)}",
+        ]
+        if remover:
+            try:
+                await membro.remove_roles(*remover, reason="Anti-raid: sequência anormal de banimentos/expulsões")
+                linhas.append(f"✅ {len(remover)} cargo(s) removido(s) da staff")
+            except discord.Forbidden:
+                linhas.append("⚠️ não consegui remover todos os cargos; verifique a hierarquia do bot")
+            except discord.HTTPException as e:
+                linhas.append(f"⚠️ erro ao remover os cargos ({e.status})")
+        else:
+            linhas.append("ℹ️ não havia cargos atribuíveis que o bot pudesse remover")
+        log.warning("anti-raid staff: removi cargos de %s em %s | %s", uid, guild.id, "; ".join(linhas))
+        await self._avisar_staff(guild, cfg, uid, linhas)
+
+    async def _avisar_staff(self, guild, cfg, uid, linhas):
+        texto = f"**Moderador:** <@{uid}> · `{uid}`\n" + "\n".join(linhas)
+        canal = guild.get_channel(cfg["log"]) if cfg["log"] else None
+        if canal is not None:
+            try:
+                await canal.send(view=Card("⚠️ Ação de staff bloqueada", texto), allowed_mentions=NO_MENTIONS)
+            except discord.HTTPException as e:
+                log.warning("não consegui avisar a ação da staff: %s", e)
+        for avisado in cfg.get("avisar_usuarios", []):
+            destinatario = guild.get_member(avisado)
+            if destinatario is None:
+                continue
+            try:
+                await destinatario.send(view=Card("⚠️ Anti-raid: ação de staff", f"Servidor: **{guild.name}**\n" + texto), allowed_mentions=NO_MENTIONS)
+            except discord.HTTPException:
+                pass
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
