@@ -90,11 +90,13 @@ DEFAULTS = {
     "limite_canais": 3,         # canais criados na janela (0 = nao conta canais)
     "limite_everyone": 3,       # mensagens com @everyone/@here na janela (0 = nao conta)
     "gatilho": "qualquer",      # qualquer = um dos dois ja basta | ambos = precisa dos dois juntos
-    "limpar": False,            # apaga os canais e as mensagens que o raid criou
+    "limpar": True,             # apaga os canais e as mensagens que o raid criou
     "log": None,                # id do canal onde o aviso do raid cai
+    "avisar_usuarios": [],      # IDs que recebem aviso por DM quando o raid dispara
     "ignorar_usuarios": [],     # lista branca: pessoas/bots que nunca sao punidos
     "ignorar_cargos": [],       # lista branca: quem tem esses cargos nunca e punido
     "senha": None,              # {"salt": hex, "hash": hex} - nunca guarda a senha em texto
+    "bloqueio_global": None,     # registro persistente do bloqueio global
 }
 
 # castigo maximo do discord e 28 dias; fica um pouco abaixo pra nao ser recusado
@@ -120,6 +122,25 @@ def get_cfg(guild_id) -> dict:
 def set_cfg(guild_id, key, value):
     _state.setdefault("guilds", {}).setdefault(str(guild_id), {})[key] = value
     _write_json(CONFIG_FILE, _state)
+
+
+def bloqueio_global(guild_id) -> Optional[dict]:
+    """Retorna o bloqueio global persistente, se o servidor estiver travado."""
+    valor = get_cfg(guild_id).get("bloqueio_global")
+    return valor if isinstance(valor, dict) and valor.get("ativo") else None
+
+
+def ativar_bloqueio_global(guild_id, motivo: str, user_id: int):
+    set_cfg(guild_id, "bloqueio_global", {
+        "ativo": True,
+        "em": int(time.time()),
+        "user_id": int(user_id),
+        "motivo": motivo[:500],
+    })
+
+
+def desativar_bloqueio_global(guild_id):
+    set_cfg(guild_id, "bloqueio_global", None)
 
 
 # ---------------------------------------------------------------- senha
@@ -433,6 +454,37 @@ class LiberarModal(discord.ui.Modal):
         )
 
 
+class LiberarGlobalModal(discord.ui.Modal):
+    def __init__(self, guild: discord.Guild):
+        super().__init__(title="🔓 Desbloquear o bot inteiro")
+        self.guild = guild
+        self.senha = discord.ui.TextInput(label="Senha do anti-raid", max_length=64, required=True)
+        self.add_item(self.senha)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        key = (self.guild.id, interaction.user.id)
+        await interaction.response.defer(ephemeral=True)
+        espera = _espera_senha(key)
+        if espera:
+            await _erro_card(interaction, "Calma", f"Muitas tentativas erradas. Espere {espera}s.")
+            return
+        if bloqueio_global(self.guild.id) is None:
+            await _erro_card(interaction, "Já desbloqueado", "O bloqueio global não está ativo.")
+            return
+        ok = await asyncio.to_thread(_confere_senha, self.guild.id, str(self.senha.value))
+        if not ok:
+            _errou_senha(key)
+            await _erro_card(interaction, "Senha errada", "O bot continua bloqueado.")
+            return
+        _tentativas.pop(key, None)
+        desativar_bloqueio_global(self.guild.id)
+        log.warning("anti-raid: bloqueio global liberado por %s em %s", interaction.user.id, self.guild.id)
+        await interaction.followup.send(
+            view=Card("🔓 Bot desbloqueado", "A senha foi aceita e os comandos voltaram a funcionar."),
+            ephemeral=True, allowed_mentions=NO_MENTIONS,
+        )
+
+
 class LiberarView(discord.ui.LayoutView):
     def __init__(self, author_id: int, guild: discord.Guild, uid: int):
         super().__init__(timeout=300)
@@ -460,6 +512,29 @@ class LiberarView(discord.ui.LayoutView):
 
     async def _abrir(self, interaction, item):
         await interaction.response.send_modal(LiberarModal(self))
+
+
+class _GlobalUnlockView(discord.ui.LayoutView):
+    def __init__(self, author_id: int, guild: discord.Guild):
+        super().__init__(timeout=300)
+        self.author_id, self.guild = author_id, guild
+        btn = _Btn(self._abrir, label="Digitar senha", style=discord.ButtonStyle.danger, emoji="🔓")
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("### 🔒 Desbloqueio global\nSó a senha definida no painel remove este bloqueio."),
+            discord.ui.ActionRow(btn),
+        ))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await _erro_card(interaction, "Essa tela é de outra pessoa", "Use `,antiraid liberar global` para abrir a sua.")
+            return False
+        if not _admin(interaction.user):
+            await _erro_card(interaction, "Sem permissão", "Só administradores liberam o bot.")
+            return False
+        return True
+
+    async def _abrir(self, interaction, item):
+        await interaction.response.send_modal(LiberarGlobalModal(self.guild))
 
 
 # ---------------------------------------------------------------- painel interativo (botoes)
@@ -558,6 +633,10 @@ class AntiRaidView(discord.ui.LayoutView):
         set_cfg(self.guild.id, "ignorar_usuarios", [u.id for u in item.values])
         await self.update(interaction, "✅ Salvo")
 
+    async def _pick_avisar(self, interaction, item):
+        set_cfg(self.guild.id, "avisar_usuarios", [u.id for u in item.values])
+        await self.update(interaction, "✅ Destinatários dos alertas salvos")
+
     async def _senha(self, interaction, item):
         await interaction.response.send_modal(SenhaModal(self))
 
@@ -567,7 +646,7 @@ class AntiRaidView(discord.ui.LayoutView):
         g = self.guild
         verde, cinza = discord.ButtonStyle.success, discord.ButtonStyle.secondary
         vermelho = discord.ButtonStyle.danger
-        ativo, limpar, ambos = cfg["ativo"], cfg["limpar"], cfg["gatilho"] == "ambos"
+        ativo, ambos = cfg["ativo"], cfg["gatilho"] == "ambos"
 
         canais = f"**{cfg['limite_canais']}** canais" if cfg["limite_canais"] else "canais (ignorado)"
         everyone = f"**{cfg['limite_everyone']}** @everyone" if cfg["limite_everyone"] else "@everyone (ignorado)"
@@ -581,6 +660,8 @@ class AntiRaidView(discord.ui.LayoutView):
         users_ok = [u for u in cfg["ignorar_usuarios"] if g.get_member(u)]
         cargos_sel = [g.get_role(c) for c in cargos_ok]
         users_sel = [g.get_member(u) for u in users_ok]
+        avisar_ok = [u for u in cfg.get("avisar_usuarios", []) if g.get_member(u)]
+        avisar_sel = [g.get_member(u) for u in avisar_ok]
         canal_log = g.get_channel(cfg["log"]) if cfg["log"] else None
         tem_senha = bool(cfg["senha"])
         trancados = lista_trancados(g.id)
@@ -597,6 +678,10 @@ class AntiRaidView(discord.ui.LayoutView):
             self._pick_log, placeholder="Escolha o canal de logs",
             channel_types=[discord.ChannelType.text], min_values=1, max_values=1,
             default_values=[canal_log] if canal_log else [],
+        )
+        select_avisar = _UserSel(
+            self._pick_avisar, placeholder="Quem recebe alerta por DM",
+            min_values=0, max_values=25, default_values=avisar_sel,
         )
 
         return [
@@ -639,12 +724,11 @@ class AntiRaidView(discord.ui.LayoutView):
                 "**Bot**  tira todos os cargos e bane\n"
                 "**Membro**  tira todos os cargos e deixa de castigo\n"
                 "**Trancado**  quem foi punido só é liberado com a senha (`,antiraid liberar`)\n"
-                f"**Limpar a bagunça**  {'sim, apaga os canais e as mensagens do raid' if limpar else 'não'}"
+                "**Limpeza do raid**  sempre ativa: apaga os canais e mensagens registrados na janela"
             ),
             discord.ui.ActionRow(
-                self._btn(f"Limpar a bagunça: {'sim' if limpar else 'não'}",
-                          self._toggle("limpar", "✅ Limpeza ligada", "⏸️ Limpeza desligada"),
-                          verde if limpar else cinza, "🧹"),
+                self._btn("Limpeza automática obrigatória", self._toggle("limpar"),
+                          verde, "🧹", disabled=True),
             ),
             sep(),
 
@@ -662,10 +746,12 @@ class AntiRaidView(discord.ui.LayoutView):
             discord.ui.TextDisplay(
                 f"**Cargos**  {_lista(cargos_ok, '<@&{}>')}\n"
                 f"**Pessoas e bots**  {_lista(users_ok, '<@{}>')}\n"
-                "-# o dono do servidor e o próprio Poyo já são ignorados sempre"
+                f"**Alertas por DM**  {_lista(avisar_ok, '<@{}>')}\n"
+                "-# ninguém é ignorado automaticamente; use a lista branca somente se realmente necessário"
             ),
             discord.ui.ActionRow(select_cargos),
             discord.ui.ActionRow(select_users),
+            discord.ui.ActionRow(select_avisar),
             sep(),
 
             # parte 6
@@ -696,10 +782,6 @@ class AntiRaid(commands.Cog):
     # ---- regras
 
     def _ignorado(self, guild: discord.Guild, user_id: int, cfg: dict, membro=None) -> bool:
-        if self.bot.user is not None and user_id == self.bot.user.id:
-            return True
-        if user_id == guild.owner_id:
-            return True
         if user_id in cfg["ignorar_usuarios"]:
             return True
         if cfg["ignorar_cargos"]:
@@ -733,9 +815,9 @@ class AntiRaid(commands.Cog):
 
         criterios = []
         if cfg["limite_canais"] > 0:
-            criterios.append(n_c >= cfg["limite_canais"])
+            criterios.append(n_c > cfg["limite_canais"])
         if cfg["limite_everyone"] > 0:
-            criterios.append(n_p >= cfg["limite_everyone"])
+            criterios.append(n_p > cfg["limite_everyone"])
         if not criterios:
             return False, ""
         disparou = all(criterios) if cfg["gatilho"] == "ambos" else any(criterios)
@@ -841,10 +923,19 @@ class AntiRaid(commands.Cog):
             except discord.HTTPException:
                 usuario = None
         eh_bot = bool(getattr(usuario, "bot", False))
+        eh_proprio_bot = self.bot.user is not None and user_id == self.bot.user.id
         nome = str(usuario) if usuario is not None else str(user_id)
         razao = f"Anti-raid: {motivo}"[:480]
 
         linhas = []
+
+        # Trava o bot inteiro antes de executar a contenção. O registro é
+        # persistente, portanto continua valendo mesmo se o processo reiniciar.
+        if cfg["senha"]:
+            ativar_bloqueio_global(guild.id, motivo, user_id)
+            linhas.append("🔒 **bot inteiro bloqueado**: só `,antiraid liberar global` com a senha desbloqueia")
+        else:
+            linhas.append("🚨 **bloqueio global não ativado: defina uma senha no painel antes de usar esta proteção**")
 
         # 0) tranca: guarda os cargos dele ANTES de tirar (e antes de qualquer outra coisa),
         #    assim a vigia ja protege e a liberacao sabe o que devolver
@@ -887,7 +978,7 @@ class AntiRaid(commands.Cog):
                 linhas.append(f"⚠️ erro ao aplicar o castigo ({e.status})")
 
         # 2) bot: bane
-        if eh_bot:
+        if eh_bot and not eh_proprio_bot:
             try:
                 await guild.ban(membro or discord.Object(id=user_id), reason=razao, delete_message_seconds=0)
                 linhas.append("✅ bot banido")
@@ -895,11 +986,14 @@ class AntiRaid(commands.Cog):
                 linhas.append("⚠️ não consegui banir o bot (o cargo dele está acima do meu ou me falta permissão)")
             except discord.HTTPException as e:
                 linhas.append(f"⚠️ erro ao banir o bot ({e.status})")
+        elif eh_proprio_bot:
+            linhas.append("ℹ️ o próprio bot foi detectado; não me bana para preservar o desbloqueio")
 
         # 3) limpeza opcional
-        if cfg["limpar"]:
+        # A limpeza faz parte da contenção e não depende mais de um botão.
+        if True:
             apagados_canais = apagadas_msgs = 0
-            for _, canal_id in canais_raid[:MAX_LIMPEZA]:
+            for _, canal_id in canais_raid:
                 canal = guild.get_channel(canal_id) if canal_id else None
                 if canal is None:
                     continue
@@ -908,7 +1002,7 @@ class AntiRaid(commands.Cog):
                     apagados_canais += 1
                 except discord.HTTPException:
                     pass
-            for _, canal_id, msg_id in msgs_raid[:MAX_LIMPEZA]:
+            for _, canal_id, msg_id in msgs_raid:
                 canal = guild.get_channel_or_thread(canal_id)
                 parcial = getattr(canal, "get_partial_message", None)
                 if parcial is None:
@@ -925,18 +1019,26 @@ class AntiRaid(commands.Cog):
 
     async def _avisar(self, guild, cfg, user_id, nome, eh_bot, motivo, linhas):
         canal = guild.get_channel(cfg["log"]) if cfg["log"] else None
-        if canal is None:
-            return
         tipo = "bot" if eh_bot else "membro"
         texto = (
             f"**Quem**  <@{user_id}> · `{nome}` · `{user_id}` ({tipo})\n"
             f"**Motivo**  {motivo}\n"
             f"**O que eu fiz**\n" + "\n".join(linhas)
         )
-        try:
-            await canal.send(view=Card("🚨 Raid detectado", texto), allowed_mentions=NO_MENTIONS)
-        except discord.HTTPException as e:
-            log.warning("nao consegui avisar no canal de logs: %s", e)
+        if canal is not None:
+            try:
+                await canal.send(view=Card("🚨 Raid detectado", texto), allowed_mentions=NO_MENTIONS)
+            except discord.HTTPException as e:
+                log.warning("nao consegui avisar no canal de logs: %s", e)
+        aviso_dm = Card("🚨 Anti-raid acionado", f"Servidor: **{guild.name}**\n" + texto)
+        for uid in cfg.get("avisar_usuarios", []):
+            destinatario = guild.get_member(uid)
+            if destinatario is None:
+                continue
+            try:
+                await destinatario.send(view=aviso_dm, allowed_mentions=NO_MENTIONS)
+            except discord.HTTPException as e:
+                log.warning("nao consegui avisar %s por DM: %s", uid, e)
 
     # ---- comando
 
@@ -972,6 +1074,13 @@ class AntiRaid(commands.Cog):
         if not get_cfg(ctx.guild.id)["senha"]:
             await _say(ctx, "Sem senha definida", "Defina a senha no `,antiraid` primeiro.", ok=False)
             return
+        if (alvo or "").strip().lower() in {"global", "bot", "tudo", "total"}:
+            await ctx.send(view=Card(
+                "🔒 Bot bloqueado",
+                "Desbloquear o bot inteiro exige a senha do anti-raid."
+            ), allowed_mentions=NO_MENTIONS)
+            await ctx.send(view=_GlobalUnlockView(ctx.author.id, ctx.guild), allowed_mentions=NO_MENTIONS)
+            return
         achou = re.search(r"\d{15,20}", alvo or "")
         if achou is None:
             presos = lista_trancados(ctx.guild.id)
@@ -986,4 +1095,22 @@ class AntiRaid(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
+    async def anti_raid_global_check(ctx: commands.Context) -> bool:
+        if ctx.guild is None or bloqueio_global(ctx.guild.id) is None:
+            return True
+        comando = getattr(ctx.command, "qualified_name", "")
+        # A única porta de saída é o fluxo que pede a senha; o callback
+        # continua exigindo administrador e senha correta.
+        if comando == "antiraid liberar":
+            return True
+        await ctx.send(
+            view=Card("🔒 Bot bloqueado", "O anti-raid detectou uma possível invasão. "
+                      "Todos os comandos estão temporariamente bloqueados. "
+                      "Use `,antiraid liberar <@pessoa ou id>` e informe a senha."),
+            allowed_mentions=NO_MENTIONS,
+            delete_after=12,
+        )
+        return False
+
+    bot.add_check(anti_raid_global_check)
     await bot.add_cog(AntiRaid(bot))
