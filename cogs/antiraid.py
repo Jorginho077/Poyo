@@ -1103,6 +1103,10 @@ async def setup(bot: commands.Bot):
         # continua exigindo administrador e senha correta.
         if comando == "antiraid liberar":
             return True
+        # Recuperação segura de uma instalação antiga que travou sem senha:
+        # permite somente abrir o painel para definir a primeira senha.
+        if comando == "antiraid" and not get_cfg(ctx.guild.id)["senha"]:
+            return True
         await ctx.send(
             view=Card("🔒 Bot bloqueado", "O anti-raid detectou uma possível invasão. "
                       "Todos os comandos estão temporariamente bloqueados. "
