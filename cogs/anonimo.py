@@ -2,207 +2,55 @@ from __future__ import annotations
 
 import asyncio
 import io
-import json
 import textwrap
 import urllib.request
-from pathlib import Path
 from typing import Optional
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-EMOJI_HEADER  = discord.PartialEmoji(name="poyo_tk_renomear", id=1561077420835086346)
-EMOJI_SEND    = discord.PartialEmoji(name="4outros",          id=1557614626441666602)
-EMOJI_YES     = discord.PartialEmoji(name="zev",              id=1522067662996242593)
-EMOJI_NO      = discord.PartialEmoji(name="zev",              id=1522067748786667733)
-EMOJI_CONFIRM = discord.PartialEmoji(name="poyo_tk_call",     id=1561077098397831249)
+# Emojis personalizados pedidos
+EMOJI_HEADER = discord.PartialEmoji(name="poyo_tk_renomear", id=1561077420835086346)
+EMOJI_SEND = discord.PartialEmoji(name="4outros", id=1557614626441666602)
+EMOJI_YES = discord.PartialEmoji(name="zev", id=1522067662996242593)
+EMOJI_NO = discord.PartialEmoji(name="zev", id=1522067748786667733)
+EMOJI_CONFIRM = discord.PartialEmoji(name="poyo_tk_call", id=1561077098397831249)
 
-BANNER_URL        = "https://raw.githubusercontent.com/Jorginho077/Poyo/main/assets/Tumblr-l-67143811701311.gif"
-BANNER_FILENAME   = "poyo-anonimo-banner.gif"
+# GIF rosa que já existe na pasta assets do repositório.
+BANNER_URL = (
+    "https://raw.githubusercontent.com/Jorginho077/Poyo/main/"
+    "assets/Tumblr-l-67143811701311.gif"
+)
+BANNER_FILENAME = "poyo-anonimo-banner.gif"
 BANNER_ATTACHMENT = f"attachment://{BANNER_FILENAME}"
-DATA_FILE         = Path("data/anonimo_canais.json")
 
-
-# ── persistência ─────────────────────────────────────────────────────────────
-def carregar_canais() -> dict[int, int]:
-    try:
-        DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-        if DATA_FILE.exists():
-            return {int(k): int(v) for k, v in json.loads(DATA_FILE.read_text()).items()}
-    except Exception:
-        pass
-    return {}
-
-def salvar_canais(canais: dict[int, discord.TextChannel]):
-    try:
-        DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-        DATA_FILE.write_text(json.dumps({str(k): v.id for k, v in canais.items()}))
-    except Exception:
-        pass
-
-
-# ── utilidades ────────────────────────────────────────────────────────────────
-def limitar(texto: str, limite: int = 1800) -> str:
-    texto = texto.strip()
-    return texto[: limite - 1] + "…" if len(texto) > limite else texto
 
 async def baixar_banner() -> Optional[discord.File]:
-    def _get() -> bytes:
-        req = urllib.request.Request(BANNER_URL, headers={"User-Agent": "PoyoBot/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return r.read()
+    """Baixa o banner animado para anexá-lo ao painel."""
+    def baixar() -> bytes:
+        request = urllib.request.Request(
+            BANNER_URL, headers={"User-Agent": "PoyoBot/1.0"}
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return response.read()
+
     try:
-        return discord.File(io.BytesIO(await asyncio.to_thread(_get)), filename=BANNER_FILENAME)
+        data = await asyncio.to_thread(baixar)
+        return discord.File(io.BytesIO(data), filename=BANNER_FILENAME)
     except Exception:
         return None
 
-async def _baixar_bytes(url: str) -> Optional[bytes]:
-    def _get() -> bytes:
-        req = urllib.request.Request(url, headers={"User-Agent": "PoyoBot/1.0"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            return r.read()
-    try:
-        return await asyncio.to_thread(_get)
-    except Exception:
-        return None
 
-def _circle(data: bytes, size: int):
-    from PIL import Image, ImageDraw
-    src  = Image.open(io.BytesIO(data)).convert("RGBA").resize((size, size))
-    mask = Image.new("L", (size, size), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
-    out  = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    out.paste(src, mask=mask)
-    return out
-
-def _fallback_circle(size: int, letter: str):
-    from PIL import Image, ImageDraw, ImageFont
-    layer = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d     = ImageDraw.Draw(layer)
-    d.ellipse((0, 0, size, size), fill=(88, 101, 242))
-    try:
-        fnt = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size // 2)
-    except OSError:
-        fnt = ImageFont.load_default()
-    d.text((size // 2, size // 2), letter.upper(), fill=(255, 255, 255), font=fnt, anchor="mm")
-    return layer
-
-
-# ── geração do cartão ─────────────────────────────────────────────────────────
-async def gerar_cartao_png(
-    autor: discord.abc.User,
-    destinatario: discord.abc.User,
-    mensagem: str,
-    anonima: bool,
-) -> Optional[discord.File]:
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-    except ImportError:
-        return None
-
-    def _font(paths: list[str], size: int):
-        for p in paths:
-            try:
-                return ImageFont.truetype(p, size)
-            except OSError:
-                pass
-        return ImageFont.load_default()
-
-    SANS_BOLD = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-                 "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"]
-    SANS_REG  = ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                 "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"]
-
-    f_bold  = _font(SANS_BOLD, 30)
-    f_reg   = _font(SANS_REG,  26)
-    f_small = _font(SANS_REG,  20)
-
-    W, PAD, AV, DAV = 1000, 40, 72, 40
-
-    lines: list[str] = []
-    for para in (mensagem.splitlines() or [mensagem]):
-        lines.extend(textwrap.wrap(para, width=52) or [""])
-    lines = lines[:30]
-
-    SEP_Y      = PAD + AV + 14
-    TEXT_START = SEP_Y + PAD
-    LINE_H     = 36
-    FOOTER_H   = 44
-    H          = TEXT_START + max(len(lines) * LINE_H, LINE_H) + PAD + FOOTER_H
-
-    WHITE    = (255, 255, 255)
-    BLACK    = (28,  30,  34)
-    GRAY     = (110, 115, 125)
-    SEP_C    = (220, 222, 226)
-    CHIP_BG  = (30,  31,  34)
-    CHIP_TXT = (255, 255, 255)
-    FOOT_C   = (170, 173, 180)
-
-    img  = Image.new("RGB", (W, H), WHITE)
-    draw = ImageDraw.Draw(img)
-
-    # avatar autor
-    av_data = None if anonima else await _baixar_bytes(
-        str(autor.display_avatar.replace(size=256, format="png"))
-    )
-    av_img = _circle(av_data, AV) if av_data else _fallback_circle(
-        AV, "?" if anonima else (autor.display_name[0] if autor.display_name else "?")
-    )
-    img.paste(av_img, (PAD, PAD), av_img)
-
-    # nome e handle
-    NX = PAD + AV + 14
-    draw.text((NX, PAD + 6),  "Anônimo" if anonima else autor.display_name[:36], fill=BLACK, font=f_bold)
-    draw.text((NX, PAD + 42), "@anonimo" if anonima else f"@{autor.name[:40]}",  fill=GRAY,  font=f_small)
-
-    # bloco mencionados (canto direito)
-    MX = W - PAD - 230
-    draw.text((MX, PAD + 4), "Mencionados", fill=GRAY, font=f_small)
-
-    chip_txt = destinatario.display_name[:20]
-    chip_w   = int(draw.textlength(chip_txt, font=f_small)) + 20
-    chip_y   = PAD + 30
-    draw.rounded_rectangle([MX, chip_y, MX + chip_w, chip_y + 28], radius=6, fill=CHIP_BG)
-    draw.text((MX + 10, chip_y + 4), chip_txt, fill=CHIP_TXT, font=f_small)
-
-    # mini avatar destinatário
-    mini_x    = MX + chip_w + 8
-    dest_data = await _baixar_bytes(str(destinatario.display_avatar.replace(size=128, format="png")))
-    mini_img  = _circle(dest_data, DAV) if dest_data else _fallback_circle(
-        DAV, destinatario.display_name[0] if destinatario.display_name else "?"
-    )
-    img.paste(mini_img, (mini_x, chip_y - 4), mini_img)
-
-    # separador
-    draw.line((PAD, SEP_Y, W - PAD, SEP_Y), fill=SEP_C, width=2)
-
-    # texto
-    ty = TEXT_START + 8
-    for line in lines:
-        draw.text((PAD, ty), line, fill=BLACK, font=f_reg)
-        ty += LINE_H
-
-    # rodapé
-    FY = H - FOOTER_H
-    draw.line((PAD, FY, W - PAD, FY), fill=SEP_C, width=1)
-    draw.ellipse((PAD, FY + 10, PAD + 22, FY + 28), outline=FOOT_C, width=2)
-    draw.text((PAD + 30, FY + 8), "há poucos segundos", fill=FOOT_C, font=f_small)
-
-    buf = io.BytesIO()
-    img.save(buf, "PNG", optimize=True)
-    buf.seek(0)
-    return discord.File(buf, filename="mensagem-anonima.png")
-
-
-# ── painel ────────────────────────────────────────────────────────────────────
 def criar_painel_view(banner_anexado: bool) -> discord.ui.LayoutView:
-    view   = discord.ui.LayoutView(timeout=None)
+    view = discord.ui.LayoutView(timeout=None)
     banner = BANNER_ATTACHMENT if banner_anexado else BANNER_URL
     view.add_item(
         discord.ui.Container(
             discord.ui.MediaGallery(discord.MediaGalleryItem(banner)),
-            discord.ui.TextDisplay(f"{EMOJI_HEADER} **Mande sua mensagem anônima para qualquer um!**"),
+            discord.ui.TextDisplay(
+                f"{EMOJI_HEADER} **Mande sua mensagem anonima para qual quer um!**"
+            ),
             discord.ui.Separator(visible=False),
             discord.ui.ActionRow(EnviarMensagemButton()),
             discord.ui.MediaGallery(discord.MediaGalleryItem(banner)),
@@ -211,16 +59,26 @@ def criar_painel_view(banner_anexado: bool) -> discord.ui.LayoutView:
     return view
 
 
-# ── fluxo de envio ────────────────────────────────────────────────────────────
+def limitar(texto: str, limite: int = 1800) -> str:
+    texto = texto.strip()
+    return texto[: limite - 1] + "…" if len(texto) > limite else texto
+
+
 class EnviarMensagemButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="mande sua mensagem", emoji=EMOJI_SEND,
-                         style=discord.ButtonStyle.secondary,
-                         custom_id="poyo_anonimo:iniciar")
+        # O Discord não oferece estilo preto puro; secondary é o estilo escuro disponível.
+        super().__init__(
+            label="mande sua mensagem",
+            emoji=EMOJI_SEND,
+            style=discord.ButtonStyle.secondary,
+            custom_id="poyo_anonimo:iniciar",
+        )
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.send_message(
-            "A mensagem deve ser anônima?", view=EscolherAnonimatoView(), ephemeral=True
+            "A mensagem deve ser anônima?",
+            view=EscolherAnonimatoView(),
+            ephemeral=True,
         )
 
 
@@ -229,12 +87,22 @@ class EscolherAnonimatoView(discord.ui.View):
         super().__init__(timeout=180)
 
     @discord.ui.select(
-        placeholder="A mensagem deve ser anônima?", min_values=1, max_values=1,
+        placeholder="A mensagem deve ser anônima?",
+        min_values=1,
+        max_values=1,
         options=[
-            discord.SelectOption(label="Sim", value="sim", emoji=EMOJI_YES,
-                                 description="Seu nome e avatar não serão mostrados."),
-            discord.SelectOption(label="Não", value="nao", emoji=EMOJI_NO,
-                                 description="Seu nome e avatar serão mostrados."),
+            discord.SelectOption(
+                label="Sim",
+                value="sim",
+                emoji=EMOJI_YES,
+                description="Seu nome e avatar não serão mostrados.",
+            ),
+            discord.SelectOption(
+                label="Não",
+                value="nao",
+                emoji=EMOJI_NO,
+                description="Seu nome e avatar serão mostrados.",
+            ),
         ],
     )
     async def escolher(self, interaction: discord.Interaction, select: discord.ui.Select):
@@ -252,7 +120,7 @@ class EscolherAnonimatoView(discord.ui.View):
 class EscolherDestinatarioView(discord.ui.View):
     def __init__(self, anonima: bool, autor_id: int, guild_id: Optional[int]):
         super().__init__(timeout=180)
-        self.anonima  = anonima
+        self.anonima = anonima
         self.autor_id = autor_id
         self.guild_id = guild_id
         self.add_item(DestinatarioSelect(self))
@@ -260,44 +128,54 @@ class EscolherDestinatarioView(discord.ui.View):
 
 class DestinatarioSelect(discord.ui.UserSelect):
     def __init__(self, fluxo: EscolherDestinatarioView):
-        super().__init__(placeholder="Pesquisar pessoa do servidor…",
-                         min_values=1, max_values=1,
-                         custom_id="poyo_anonimo:destinatario")
+        super().__init__(
+            placeholder="Pesquisar pessoa do servidor…",
+            min_values=1,
+            max_values=1,
+            custom_id="poyo_anonimo:destinatario",
+        )
         self.fluxo = fluxo
 
     async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.fluxo.autor_id:
             return await interaction.response.send_message(
-                "Somente quem iniciou pode escolher o destinatário.", ephemeral=True
+                "Somente quem iniciou o envio pode escolher o destinatário.",
+                ephemeral=True,
             )
-        dest = self.values[0]
-        if dest.id == interaction.user.id:
+
+        destinatario = self.values[0]
+        if destinatario.id == interaction.user.id:
             return await interaction.response.send_message(
-                "Você não pode enviar para si mesmo.", ephemeral=True
+                "Você não pode enviar uma mensagem para si mesmo.", ephemeral=True
             )
-        if dest.bot:
+        if destinatario.bot:
             return await interaction.response.send_message(
                 "Escolha uma pessoa, não um bot.", ephemeral=True
             )
+
         await interaction.response.send_modal(
-            EscreverMensagemModal(self.fluxo.anonima, dest.id)
+            EscreverMensagemModal(self.fluxo.anonima, destinatario.id)
         )
 
 
 class EscreverMensagemModal(discord.ui.Modal, title="Escrever mensagem"):
     mensagem = discord.ui.TextInput(
-        label="Sua mensagem", placeholder="Digite a mensagem que deseja enviar…",
-        style=discord.TextStyle.paragraph, min_length=1, max_length=1500, required=True,
+        label="Sua mensagem",
+        placeholder="Digite a mensagem que deseja enviar…",
+        style=discord.TextStyle.paragraph,
+        min_length=1,
+        max_length=1500,
+        required=True,
     )
 
     def __init__(self, anonima: bool, destinatario_id: int):
         super().__init__(timeout=300)
-        self.anonima         = anonima
+        self.anonima = anonima
         self.destinatario_id = destinatario_id
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.send_message(
-            "Confirme o envio:",
+            "Confira sua mensagem. Deseja confirmar o envio?",
             view=ConfirmarEnvioView(
                 autor_id=interaction.user.id,
                 destinatario_id=self.destinatario_id,
@@ -311,29 +189,38 @@ class EscreverMensagemModal(discord.ui.Modal, title="Escrever mensagem"):
 class ConfirmarEnvioView(discord.ui.View):
     def __init__(self, autor_id: int, destinatario_id: int, anonima: bool, mensagem: str):
         super().__init__(timeout=180)
-        self.autor_id        = autor_id
+        self.autor_id = autor_id
         self.destinatario_id = destinatario_id
-        self.anonima         = anonima
-        self.mensagem        = limitar(mensagem, 1500)
+        self.anonima = anonima
+        self.mensagem = limitar(mensagem, 1500)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.autor_id:
             await interaction.response.send_message(
-                "Somente quem escreveu pode confirmar.", ephemeral=True
+                "Somente quem escreveu a mensagem pode confirmá-la.", ephemeral=True
             )
             return False
         return True
 
-    @discord.ui.button(label="Confirmar envio", emoji=EMOJI_CONFIRM,
-                       style=discord.ButtonStyle.secondary)
+    @discord.ui.button(
+        label="Confirmar envio",
+        emoji=EMOJI_CONFIRM,
+        style=discord.ButtonStyle.secondary,
+    )
     async def confirmar(self, interaction: discord.Interaction, button: discord.ui.Button):
         cog = interaction.client.get_cog("Anonimo")
-        if not cog:
-            return await interaction.response.send_message("Sistema indisponível.", ephemeral=True)
+        if cog is None:
+            return await interaction.response.send_message(
+                "O sistema de mensagens anônimas não está disponível.", ephemeral=True
+            )
+
         await interaction.response.defer(ephemeral=True, thinking=True)
         sucesso, resposta = await cog.publicar_mensagem(
-            interaction.guild, interaction.user,
-            self.destinatario_id, self.anonima, self.mensagem,
+            interaction.guild,
+            interaction.user,
+            self.destinatario_id,
+            self.anonima,
+            self.mensagem,
         )
         for item in self.children:
             item.disabled = True
@@ -350,156 +237,304 @@ class ConfirmarEnvioView(discord.ui.View):
         await interaction.response.edit_message(content="Envio cancelado.", view=self)
 
 
-# ── view da publicação (botões) ───────────────────────────────────────────────
+async def gerar_cartao_png(
+    autor: discord.abc.User,
+    destinatario: discord.abc.User,
+    mensagem: str,
+    anonima: bool,
+) -> discord.File:
+    """Gera um cartão PNG branco estilo Tellonym, com os dois avatares."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError as exc:
+        raise RuntimeError(
+            "O Pillow é obrigatório para gerar o cartão de imagem. "
+            "Instale com: pip install Pillow"
+        ) from exc
+
+    async def ler_avatar(usuario: discord.abc.User) -> Optional[bytes]:
+        try:
+            return await usuario.display_avatar.replace(size=128, format="png").read()
+        except Exception:
+            return None
+
+    avatar_autor = None if anonima else await ler_avatar(autor)
+    avatar_destinatario = await ler_avatar(destinatario)
+
+    largura, margem = 1000, 42
+    fonte_regular = fonte_bold = None
+    for caminho in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    ):
+        try:
+            fonte_regular = ImageFont.truetype(caminho, 30)
+            break
+        except OSError:
+            continue
+    for caminho in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+    ):
+        try:
+            fonte_bold = ImageFont.truetype(caminho, 34)
+            break
+        except OSError:
+            continue
+    fonte_regular = fonte_regular or ImageFont.load_default()
+    fonte_bold = fonte_bold or ImageFont.load_default()
+
+    linhas: list[str] = []
+    for paragrafo in mensagem.splitlines() or [mensagem]:
+        linhas.extend(textwrap.wrap(paragrafo, width=48) or [""])
+    linhas = linhas[:25]
+    altura = max(330, 280 + len(linhas) * 45)
+
+    imagem = Image.new("RGB", (largura, altura), (255, 255, 255))
+    desenho = ImageDraw.Draw(imagem)
+    preto = (28, 30, 34)
+    cinza = (130, 134, 141)
+    claro = (232, 234, 237)
+
+    def desenhar_avatar(dados: Optional[bytes], x: int, y: int, tamanho: int = 72):
+        if not dados:
+            desenho.ellipse((x, y, x + tamanho, y + tamanho), fill=(90, 95, 105))
+            desenho.text((x + 20, y + 15), "?", fill="white", font=fonte_bold)
+            return
+        try:
+            avatar = Image.open(io.BytesIO(dados)).convert("RGBA").resize((tamanho, tamanho))
+            mascara = Image.new("L", (tamanho, tamanho), 0)
+            ImageDraw.Draw(mascara).ellipse((0, 0, tamanho, tamanho), fill=255)
+            imagem.paste(avatar, (x, y), mascara)
+        except Exception:
+            desenho.ellipse((x, y, x + tamanho, y + tamanho), fill=(90, 95, 105))
+
+    # Avatar e nome do remetente, ou avatar genérico/nome anônimo.
+    desenhar_avatar(avatar_autor, margem, 30, 72)
+    nome = "Anônimo" if anonima else str(autor)
+    handle = "@anonimo" if anonima else f"@{autor.name}"
+    desenho.text((margem + 90, 30), nome[:32], fill=preto, font=fonte_bold)
+    desenho.text((margem + 90, 74), handle[:42], fill=cinza, font=fonte_regular)
+
+    # Destinatário no lado direito, como no cartão de referência.
+    desenho.text((largura - 360, 35), "Mencionados", fill=preto, font=fonte_bold)
+    desenho.text((largura - 360, 78), str(destinatario)[:24], fill=preto, font=fonte_regular)
+    desenhar_avatar(avatar_destinatario, largura - margem - 66, 72, 54)
+
+    desenho.line((margem, 132, largura - margem, 132), fill=claro, width=2)
+    y = 160
+    for linha in linhas:
+        desenho.text((margem, y), linha, fill=preto, font=fonte_regular)
+        y += 45
+
+    rodape_y = altura - 55
+    desenho.line((margem, rodape_y, largura - margem, rodape_y), fill=claro, width=2)
+    desenho.ellipse((margem, altura - 39, margem + 18, altura - 21), fill=(205, 211, 218))
+    desenho.text((margem + 28, altura - 43), "há poucos segundos", fill=cinza, font=ImageFont.load_default())
+
+    buffer = io.BytesIO()
+    imagem.save(buffer, format="PNG", optimize=True)
+    buffer.seek(0)
+    return discord.File(buffer, filename="mensagem-anonima.png")
+
 class PublicacaoView(discord.ui.View):
-    def __init__(self, destinatario_id: int, autor_id: int, anonima: bool, contagem: int = 0):
+    """Botões em duas linhas: Responder | Comentar; depois Comentários (N) centralizado."""
+
+    def __init__(
+        self,
+        destinatario_id: int,
+        autor_id: int,
+        anonima: bool,
+        comentarios: Optional[list[dict]] = None,
+    ):
         super().__init__(timeout=None)
         self.destinatario_id = destinatario_id
-        self.autor_id        = autor_id
-        self.anonima         = anonima
-        self.contagem        = contagem
-        self._rebuild()
+        self.autor_id = autor_id
+        self.anonima = anonima
+        self.comentarios = comentarios if comentarios is not None else []
 
-    def _rebuild(self):
-        self.clear_items()
-        self.add_item(ResponderButton(self.destinatario_id, self.autor_id, self.anonima))
-        self.add_item(ComentarButton())
-        self.add_item(ContadorButton(self.contagem))
-
-    async def incrementar(self, message: discord.Message):
-        self.contagem += 1
-        self._rebuild()
-        try:
-            await message.edit(view=self)
-        except discord.HTTPException:
-            pass
+        self.add_item(ResponderButton(self))
+        self.add_item(ComentarButton(self))
+        self.add_item(VerComentariosButton(self))
 
 
 class ResponderButton(discord.ui.Button):
-    def __init__(self, destinatario_id: int, autor_id: int, anonima: bool):
-        super().__init__(label="Responder", emoji=EMOJI_SEND,
-                         style=discord.ButtonStyle.secondary,
-                         custom_id="poyo_anonimo:responder", row=0)
-        self.destinatario_id = destinatario_id
-        self.autor_id        = autor_id
-        self.anonima         = anonima
+    def __init__(self, parent: PublicacaoView):
+        super().__init__(
+            label="Responder",
+            emoji=EMOJI_SEND,
+            style=discord.ButtonStyle.secondary,
+            row=0,
+        )
+        self.parent_view = parent
 
     async def callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.destinatario_id:
+        if interaction.user.id != self.parent_view.destinatario_id:
             return await interaction.response.send_message(
-                "Somente o destinatário pode responder.", ephemeral=True
+                "Somente o destinatário pode responder a esta mensagem.", ephemeral=True
             )
         await interaction.response.send_modal(
-            RespostaModal(self.autor_id, self.anonima, interaction.message)
+            RespostaModal(self.parent_view.autor_id, self.parent_view.anonima)
         )
 
 
 class ComentarButton(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="Comentar", emoji=EMOJI_CONFIRM,
-                         style=discord.ButtonStyle.secondary,
-                         custom_id="poyo_anonimo:comentar", row=0)
+    def __init__(self, parent: PublicacaoView):
+        super().__init__(
+            label="Comentar",
+            emoji=EMOJI_CONFIRM,
+            style=discord.ButtonStyle.secondary,
+            row=0,
+        )
+        self.parent_view = parent
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(ComentarioModal(interaction.message))
+        await interaction.response.send_modal(
+            ComentarioModal(self.parent_view, interaction.user.id)
+        )
 
 
-class ContadorButton(discord.ui.Button):
-    def __init__(self, contagem: int):
-        super().__init__(label=f"Comentários ({contagem})", emoji=EMOJI_SEND,
-                         style=discord.ButtonStyle.secondary,
-                         disabled=True, custom_id="poyo_anonimo:contador", row=1)
+class VerComentariosButton(discord.ui.Button):
+    def __init__(self, parent: PublicacaoView):
+        super().__init__(
+            label=f"Comentários ({len(parent.comentarios)})",
+            style=discord.ButtonStyle.secondary,
+            row=1,
+        )
+        self.parent_view = parent
+
+    async def callback(self, interaction: discord.Interaction):
+        if not self.parent_view.comentarios:
+            return await interaction.response.send_message(
+                "Ainda não há comentários nesta mensagem.", ephemeral=True
+            )
+
+        linhas = []
+        for item in self.parent_view.comentarios[-10:]:
+            linhas.append(f"**{discord.utils.escape_markdown(item['nome'])}:** {discord.utils.escape_mentions(item['texto'])}")
+        await interaction.response.send_message(
+            "\n".join(linhas),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 
-# ── modais de resposta e comentário ──────────────────────────────────────────
 class RespostaModal(discord.ui.Modal, title="Responder mensagem"):
-    resposta = discord.ui.TextInput(label="Sua resposta",
-                                    style=discord.TextStyle.paragraph,
-                                    min_length=1, max_length=1000)
+    resposta = discord.ui.TextInput(
+        label="Sua resposta",
+        style=discord.TextStyle.paragraph,
+        min_length=1,
+        max_length=1000,
+    )
 
-    def __init__(self, autor_original_id: int, era_anonima: bool, message: discord.Message):
+    def __init__(self, autor_original_id: int, era_anonima: bool):
         super().__init__(timeout=300)
         self.autor_original_id = autor_original_id
-        self.message           = message
+        self.era_anonima = era_anonima
 
     async def on_submit(self, interaction: discord.Interaction):
-        cog   = interaction.client.get_cog("Anonimo")
+        cog = interaction.client.get_cog("Anonimo")
         canal = cog.canais.get(interaction.guild_id) if cog else None
-        if not canal:
-            return await interaction.response.send_message("Canal não configurado.", ephemeral=True)
-        embed = discord.Embed(description=limitar(str(self.resposta.value), 1000),
-                              color=discord.Color.from_rgb(255, 255, 255))
-        embed.set_author(name=f"Resposta de {interaction.user}",
-                         icon_url=interaction.user.display_avatar.url)
+        if canal is None:
+            return await interaction.response.send_message(
+                "O canal de mensagens anônimas não está configurado.", ephemeral=True
+            )
+        embed = discord.Embed(
+            description=limitar(str(self.resposta.value), 1000),
+            color=discord.Color.from_rgb(255, 255, 255),
+        )
+        embed.set_author(
+            name=f"Resposta de {interaction.user}",
+            icon_url=interaction.user.display_avatar.url,
+        )
         try:
-            await canal.send(content=f"<@{self.autor_original_id}>", embed=embed,
-                             allowed_mentions=discord.AllowedMentions(users=True))
-            view = self.message.view if hasattr(self.message, "view") else None
-            if isinstance(view, PublicacaoView):
-                await view.incrementar(self.message)
+            await canal.send(
+                content=f"<@{self.autor_original_id}>",
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions(users=True),
+            )
             await interaction.response.send_message("Resposta enviada.", ephemeral=True)
         except discord.HTTPException:
-            await interaction.response.send_message("Falha ao enviar.", ephemeral=True)
+            await interaction.response.send_message(
+                "Não consegui enviar a resposta.", ephemeral=True
+            )
 
 
 class ComentarioModal(discord.ui.Modal, title="Comentar mensagem"):
-    comentario = discord.ui.TextInput(label="Comentário",
-                                      style=discord.TextStyle.paragraph,
-                                      min_length=1, max_length=1000)
+    comentario = discord.ui.TextInput(
+        label="Comentário",
+        placeholder="Escreva seu comentário…",
+        style=discord.TextStyle.paragraph,
+        min_length=1,
+        max_length=1000,
+    )
 
-    def __init__(self, message: discord.Message):
+    def __init__(self, publicacao_view: PublicacaoView, comentarista_id: int):
         super().__init__(timeout=300)
-        self.message = message
+        self.publicacao_view = publicacao_view
+        self.comentarista_id = comentarista_id
 
     async def on_submit(self, interaction: discord.Interaction):
-        cog   = interaction.client.get_cog("Anonimo")
-        canal = cog.canais.get(interaction.guild_id) if cog else None
-        if not canal:
-            return await interaction.response.send_message("Canal não configurado.", ephemeral=True)
-        embed = discord.Embed(description=limitar(str(self.comentario.value), 1000),
-                              color=discord.Color.from_rgb(255, 255, 255))
-        embed.set_author(name=f"Comentário de {interaction.user}",
-                         icon_url=interaction.user.display_avatar.url)
+        texto = limitar(str(self.comentario.value), 1000)
+        nome = interaction.user.display_name
+
+        # Guarda o comentário na própria view da publicação e atualiza o contador.
+        self.publicacao_view.comentarios.append({
+            "id": self.comentarista_id,
+            "nome": nome,
+            "texto": texto,
+        })
+        botao_comentarios = next(
+            item for item in self.publicacao_view.children
+            if isinstance(item, VerComentariosButton)
+        )
+        botao_comentarios.label = f"Comentários ({len(self.publicacao_view.comentarios)})"
+
         try:
-            await canal.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-            view = self.message.view if hasattr(self.message, "view") else None
-            if isinstance(view, PublicacaoView):
-                await view.incrementar(self.message)
-            await interaction.response.send_message("Comentário publicado.", ephemeral=True)
+            if interaction.message:
+                await interaction.message.edit(view=self.publicacao_view)
         except discord.HTTPException:
-            await interaction.response.send_message("Falha ao publicar.", ephemeral=True)
+            pass
+
+        await interaction.response.send_message(
+            f"Comentário adicionado. Total: {len(self.publicacao_view.comentarios)}.",
+            ephemeral=True,
+        )
 
 
-# ── cog principal ─────────────────────────────────────────────────────────────
 class Anonimo(commands.Cog):
     def __init__(self, bot: commands.Bot):
-        self.bot    = bot
+        self.bot = bot
+        # Configuração em memória: após reiniciar, execute o comando do painel novamente.
         self.canais: dict[int, discord.TextChannel] = {}
 
-    async def cog_load(self):
-        dados = carregar_canais()
-        for guild_id, canal_id in dados.items():
-            guild = self.bot.get_guild(guild_id)
-            if guild:
-                canal = guild.get_channel(canal_id)
-                if isinstance(canal, discord.TextChannel):
-                    self.canais[guild_id] = canal
-
-    @app_commands.command(name="anonimo_painel",
-                          description="Publica o painel de mensagens anônimas neste canal.")
+    @app_commands.command(
+        name="anonimo_painel",
+        description="Publica o painel de mensagens anônimas neste canal.",
+    )
     @app_commands.describe(canal="Canal onde as mensagens serão publicadas.")
     @app_commands.guild_only()
-    async def anonimo_painel(self, interaction: discord.Interaction, canal: discord.TextChannel):
+    async def anonimo_painel(
+        self,
+        interaction: discord.Interaction,
+        canal: discord.TextChannel,
+    ):
         if not interaction.user.guild_permissions.manage_guild:
             return await interaction.response.send_message(
                 "Você precisa da permissão Gerenciar servidor.", ephemeral=True
             )
-        if not canal.permissions_for(interaction.guild.me).send_messages:
+        if interaction.guild is None or interaction.channel is None:
             return await interaction.response.send_message(
-                "Sem permissão para enviar mensagens no canal.", ephemeral=True
+                "Use este comando em um servidor.", ephemeral=True
             )
+        bot_member = interaction.guild.me
+        if bot_member is None or not canal.permissions_for(bot_member).send_messages:
+            return await interaction.response.send_message(
+                "Não tenho permissão para enviar mensagens no canal selecionado.",
+                ephemeral=True,
+            )
+
         self.canais[interaction.guild.id] = canal
-        salvar_canais(self.canais)
         banner_file = await baixar_banner()
         try:
             await interaction.channel.send(
@@ -507,9 +542,13 @@ class Anonimo(commands.Cog):
                 file=banner_file,
             )
         except discord.HTTPException:
-            return await interaction.response.send_message("Falha ao publicar painel.", ephemeral=True)
+            return await interaction.response.send_message(
+                "Não consegui publicar o painel. Confira minhas permissões.",
+                ephemeral=True,
+            )
         await interaction.response.send_message(
-            f"Painel publicado. Mensagens irão para {canal.mention}.", ephemeral=True
+            f"Painel publicado neste canal. As mensagens serão enviadas em {canal.mention}.",
+            ephemeral=True,
         )
 
     async def publicar_mensagem(
@@ -520,40 +559,33 @@ class Anonimo(commands.Cog):
         anonima: bool,
         mensagem: str,
     ) -> tuple[bool, str]:
-        if not guild:
-            return False, "Servidor não identificado."
+        if guild is None:
+            return False, "Não consegui identificar o servidor."
         canal = self.canais.get(guild.id)
-        if not canal:
+        if canal is None:
             return False, "Canal não configurado. Execute /anonimo_painel novamente."
 
         destinatario = guild.get_member(destinatario_id)
-        if not destinatario:
+        if destinatario is None:
             try:
                 destinatario = await guild.fetch_member(destinatario_id)
             except (discord.NotFound, discord.HTTPException):
-                return False, "Destinatário não encontrado."
-
-        arquivo = await gerar_cartao_png(autor, destinatario, mensagem, anonima)
-        view    = PublicacaoView(destinatario.id, autor.id, anonima)
+                return False, "Não encontrei o destinatário no servidor."
 
         try:
-            if arquivo:
-                await canal.send(
-                    content=destinatario.mention,
-                    file=arquivo,
-                    view=view,
-                    allowed_mentions=discord.AllowedMentions(users=True),
-                )
-            else:
-                embed = discord.Embed(description=limitar(mensagem, 1500),
-                                      color=discord.Color.from_rgb(255, 255, 255))
-                embed.set_author(name="Anônimo" if anonima else str(autor),
-                                 icon_url=None if anonima else autor.display_avatar.url)
-                embed.add_field(name="Mencionados", value=destinatario.mention, inline=False)
-                await canal.send(content=destinatario.mention, embed=embed, view=view,
-                                 allowed_mentions=discord.AllowedMentions(users=True))
+            arquivo = await gerar_cartao_png(autor, destinatario, mensagem, anonima)
+        except RuntimeError as erro:
+            return False, str(erro)
+        view = PublicacaoView(destinatario.id, autor.id, anonima)
+        try:
+            await canal.send(
+                content=destinatario.mention,
+                file=arquivo,
+                view=view,
+                allowed_mentions=discord.AllowedMentions(users=True),
+            )
         except discord.HTTPException:
-            return False, "Falha ao publicar. Verifique as permissões."
+            return False, "Falha ao publicar. Verifique as permissões do bot."
         return True, f"Mensagem enviada para {destinatario.mention}."
 
 
