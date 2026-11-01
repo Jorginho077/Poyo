@@ -356,8 +356,8 @@ async def gerar_cartao_png(
     ), 14)
 
     WHITE = (255, 255, 255)
-    PINK = (214, 51, 132)  # Rosa intenso para manter o texto branco legível.
-    SEPARATOR = (242, 137, 190)
+    PINK = (255, 183, 206)  # Rosa-bebê inspirado no emoji 🩷.
+    SEPARATOR = (255, 218, 229)
     FOOTER_GRAY = WHITE
 
     def avatar_img(data: Optional[bytes], size: int, fallback: str):
