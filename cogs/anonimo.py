@@ -320,7 +320,7 @@ async def gerar_cartao_png(
     AVATAR, MINI = 112, 112
     HEADER_LINE_Y = 204
     MESSAGE_TOP = 244
-    LINE_HEIGHT = 58
+    LINE_HEIGHT = 76
     FOOTER_HEIGHT = 82
 
     def p(n: int) -> int:
@@ -337,7 +337,7 @@ async def gerar_cartao_png(
     regular = font((
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-    ), 34)
+    ), 52)
     bold = font((
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
