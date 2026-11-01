@@ -356,10 +356,9 @@ async def gerar_cartao_png(
     ), 14)
 
     WHITE = (255, 255, 255)
-    BLACK = (27, 28, 32)
-    GRAY = (128, 132, 140)
-    SEPARATOR = (229, 231, 235)
-    FOOTER_GRAY = (188, 192, 199)
+    PINK = (214, 51, 132)  # Rosa intenso para manter o texto branco legível.
+    SEPARATOR = (242, 137, 190)
+    FOOTER_GRAY = WHITE
 
     def avatar_img(data: Optional[bytes], size: int, fallback: str):
         size_px = p(size)
@@ -409,7 +408,7 @@ async def gerar_cartao_png(
     text_height = max(p(48), len(linhas) * p(LINE_HEIGHT))
     footer_y = p(MESSAGE_TOP) + text_height + p(35)
     height = max(p(510), footer_y + p(FOOTER_HEIGHT))
-    image = Image.new("RGB", (p(W), height), WHITE)
+    image = Image.new("RGB", (p(W), height), PINK)
     draw = ImageDraw.Draw(image)
 
     # Avatar e identificação do remetente à esquerda.
@@ -423,8 +422,8 @@ async def gerar_cartao_png(
     name_x = p(PAD + AVATAR + 28)
     sender_name = "Anônimo" if anonima else autor.display_name
     sender_handle = "@anonimo" if anonima else f"@{autor.name}"
-    draw.text((name_x, p(48)), sender_name[:32], fill=BLACK, font=bold)
-    draw.text((name_x, p(111)), sender_handle[:42], fill=GRAY, font=regular)
+    draw.text((name_x, p(48)), sender_name[:32], fill=WHITE, font=bold)
+    draw.text((name_x, p(111)), sender_handle[:42], fill=WHITE, font=regular)
 
     # Área do destinatário menor e deslocada para a direita, como na referência.
     recipient_avatar = avatar_img(
@@ -435,7 +434,7 @@ async def gerar_cartao_png(
     image.paste(recipient_avatar, (avatar_x, avatar_y), recipient_avatar)
 
     label = "Mencionados"
-    draw.text((p(984), p(46)), label, fill=BLACK, font=mentioned_title_font)
+    draw.text((p(984), p(46)), label, fill=WHITE, font=mentioned_title_font)
     recipient_name = destinatario.display_name or destinatario.name
     recipient_name_x = p(984)
     recipient_name_y = p(105)
@@ -446,7 +445,7 @@ async def gerar_cartao_png(
         recipient_name_display = recipient_name_display[:-2].rstrip() + "…"
         if len(recipient_name_display) <= 2:
             break
-    draw.text((recipient_name_x, recipient_name_y), recipient_name_display, fill=BLACK, font=mentioned_font)
+    draw.text((recipient_name_x, recipient_name_y), recipient_name_display, fill=WHITE, font=mentioned_font)
 
     # Linha horizontal do cabeçalho.
     draw.line((p(PAD), p(HEADER_LINE_Y), p(W - PAD), p(HEADER_LINE_Y)),
@@ -455,7 +454,7 @@ async def gerar_cartao_png(
     # Mensagem, com espaço e tamanho próximos da imagem de referência.
     y = p(MESSAGE_TOP)
     for line in linhas:
-        draw.text((p(PAD), y), line, fill=BLACK, font=regular)
+        draw.text((p(PAD), y), line, fill=WHITE, font=regular)
         y += p(LINE_HEIGHT)
 
     # Rodapé discreto.
