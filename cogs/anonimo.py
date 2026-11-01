@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import textwrap
 import urllib.request
+from pathlib import Path
 from typing import Optional
 
 import discord
@@ -24,6 +26,7 @@ BANNER_URL = (
 )
 BANNER_FILENAME = "poyo-anonimo-banner.gif"
 BANNER_ATTACHMENT = f"attachment://{BANNER_FILENAME}"
+CONFIG_PATH = Path("data") / "anonimo_canais.json"
 
 
 async def baixar_banner() -> Optional[discord.File]:
@@ -578,8 +581,48 @@ class ComentarioModal(discord.ui.Modal, title="Comentar mensagem"):
 class Anonimo(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # Configuração em memória: após reiniciar, execute o comando do painel novamente.
         self.canais: dict[int, discord.TextChannel] = {}
+        self._canais_ids: dict[int, int] = {}
+
+    def _salvar_configuracao(self) -> None:
+        """Persiste os IDs dos canais para restaurar a configuração após reinícios."""
+        try:
+            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            temporario = CONFIG_PATH.with_suffix(".tmp")
+            temporario.write_text(
+                json.dumps({str(guild_id): channel_id for guild_id, channel_id in self._canais_ids.items()}, indent=2),
+                encoding="utf-8",
+            )
+            temporario.replace(CONFIG_PATH)
+        except OSError as erro:
+            print(f"[Anonimo] Não consegui salvar a configuração: {erro}")
+
+    async def cog_load(self) -> None:
+        """Registra o botão persistente e recupera os canais configurados."""
+        # A view não tem timeout e o botão possui custom_id fixo, então funciona
+        # também nos painéis publicados antes do último reinício.
+        try:
+            self.bot.add_view(criar_painel_view(banner_anexado=False))
+        except (TypeError, ValueError) as erro:
+            print(f"[Anonimo] Não consegui registrar a view persistente: {erro}")
+
+        try:
+            if CONFIG_PATH.exists():
+                dados = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+                self._canais_ids = {int(guild_id): int(channel_id) for guild_id, channel_id in dados.items()}
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as erro:
+            print(f"[Anonimo] Não consegui carregar a configuração: {erro}")
+            self._canais_ids = {}
+
+        for guild_id, channel_id in list(self._canais_ids.items()):
+            canal = self.bot.get_channel(channel_id)
+            if canal is None:
+                try:
+                    canal = await self.bot.fetch_channel(channel_id)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    continue
+            if isinstance(canal, discord.TextChannel) and canal.guild.id == guild_id:
+                self.canais[guild_id] = canal
 
     @app_commands.command(
         name="anonimo_painel",
@@ -592,34 +635,43 @@ class Anonimo(commands.Cog):
         interaction: discord.Interaction,
         canal: discord.TextChannel,
     ):
+        # Responde imediatamente ao Discord: baixar o banner pode levar vários segundos.
+        # Sem defer, a interação expira após ~3 segundos e aparece "o bot não respondeu a tempo".
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
         if not interaction.user.guild_permissions.manage_guild:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "Você precisa da permissão Gerenciar servidor.", ephemeral=True
             )
         if interaction.guild is None or interaction.channel is None:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "Use este comando em um servidor.", ephemeral=True
             )
         bot_member = interaction.guild.me
         if bot_member is None or not canal.permissions_for(bot_member).send_messages:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "Não tenho permissão para enviar mensagens no canal selecionado.",
                 ephemeral=True,
             )
 
+        # Salva a configuração antes de qualquer operação de rede.
         self.canais[interaction.guild.id] = canal
+        self._canais_ids[interaction.guild.id] = canal.id
+        self._salvar_configuracao()
+
         banner_file = await baixar_banner()
         try:
-            await interaction.channel.send(
-                view=criar_painel_view(banner_anexado=banner_file is not None),
-                file=banner_file,
-            )
-        except discord.HTTPException:
-            return await interaction.response.send_message(
-                "Não consegui publicar o painel. Confira minhas permissões.",
+            kwargs = {"view": criar_painel_view(banner_anexado=banner_file is not None)}
+            if banner_file is not None:
+                kwargs["file"] = banner_file
+            await interaction.channel.send(**kwargs)
+        except discord.HTTPException as erro:
+            print(f"[Anonimo] Falha ao publicar painel: {erro}")
+            return await interaction.followup.send(
+                "Não consegui publicar o painel. Confira minhas permissões e tente novamente.",
                 ephemeral=True,
             )
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Painel publicado neste canal. As mensagens serão enviadas em {canal.mention}.",
             ephemeral=True,
         )
