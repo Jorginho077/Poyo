@@ -156,8 +156,52 @@ class DestinatarioSelect(discord.ui.UserSelect):
                 "Escolha uma pessoa, não um bot.", ephemeral=True
             )
 
+        await interaction.response.send_message(
+            "Deseja enviar a mensagem no privado do destinatário?",
+            view=EscolherDestinoEnvioView(
+                anonima=self.fluxo.anonima,
+                destinatario_id=destinatario.id,
+                autor_id=interaction.user.id,
+            ),
+            ephemeral=True,
+        )
+
+
+class EscolherDestinoEnvioView(discord.ui.View):
+    def __init__(self, anonima: bool, destinatario_id: int, autor_id: int):
+        super().__init__(timeout=180)
+        self.anonima = anonima
+        self.destinatario_id = destinatario_id
+        self.autor_id = autor_id
+
+    @discord.ui.select(
+        placeholder="Enviar no privado?",
+        min_values=1,
+        max_values=1,
+        options=[
+            discord.SelectOption(
+                label="Sim",
+                value="sim",
+                emoji=EMOJI_YES,
+                description="Envia o cartão por mensagem direta (PV).",
+            ),
+            discord.SelectOption(
+                label="Não",
+                value="nao",
+                emoji=EMOJI_NO,
+                description="Publica o cartão no canal configurado pelo painel.",
+            ),
+        ],
+    )
+    async def escolher_destino(self, interaction: discord.Interaction, select: discord.ui.Select):
+        if interaction.user.id != self.autor_id:
+            return await interaction.response.send_message(
+                "Somente quem iniciou o envio pode escolher o destino.", ephemeral=True
+            )
         await interaction.response.send_modal(
-            EscreverMensagemModal(self.fluxo.anonima, destinatario.id)
+            EscreverMensagemModal(
+                self.anonima, self.destinatario_id, enviar_privado=select.values[0] == "sim"
+            )
         )
 
 
@@ -171,10 +215,11 @@ class EscreverMensagemModal(discord.ui.Modal, title="Escrever mensagem"):
         required=True,
     )
 
-    def __init__(self, anonima: bool, destinatario_id: int):
+    def __init__(self, anonima: bool, destinatario_id: int, enviar_privado: bool = False):
         super().__init__(timeout=300)
         self.anonima = anonima
         self.destinatario_id = destinatario_id
+        self.enviar_privado = enviar_privado
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.send_message(
@@ -184,18 +229,23 @@ class EscreverMensagemModal(discord.ui.Modal, title="Escrever mensagem"):
                 destinatario_id=self.destinatario_id,
                 anonima=self.anonima,
                 mensagem=str(self.mensagem.value),
+                enviar_privado=self.enviar_privado,
             ),
             ephemeral=True,
         )
 
 
 class ConfirmarEnvioView(discord.ui.View):
-    def __init__(self, autor_id: int, destinatario_id: int, anonima: bool, mensagem: str):
+    def __init__(
+        self, autor_id: int, destinatario_id: int, anonima: bool, mensagem: str,
+        enviar_privado: bool = False,
+    ):
         super().__init__(timeout=180)
         self.autor_id = autor_id
         self.destinatario_id = destinatario_id
         self.anonima = anonima
         self.mensagem = limitar(mensagem, 1500)
+        self.enviar_privado = enviar_privado
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.autor_id:
@@ -224,6 +274,7 @@ class ConfirmarEnvioView(discord.ui.View):
             self.destinatario_id,
             self.anonima,
             self.mensagem,
+            enviar_privado=self.enviar_privado,
         )
         for item in self.children:
             item.disabled = True
@@ -266,10 +317,10 @@ async def gerar_cartao_png(
     # Tudo é desenhado em 2x e reduzido com LANCZOS para bordas e texto mais nítidos.
     S = 2
     W, PAD = 1536, 64
-    AVATAR, MINI = 112, 72
+    AVATAR, MINI = 112, 112
     HEADER_LINE_Y = 204
     MESSAGE_TOP = 244
-    LINE_HEIGHT = 48
+    LINE_HEIGHT = 58
     FOOTER_HEIGHT = 82
 
     def p(n: int) -> int:
@@ -286,19 +337,19 @@ async def gerar_cartao_png(
     regular = font((
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-    ), 28)
+    ), 34)
     bold = font((
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-    ), 31)
+    ), 36)
     mentioned_title_font = font((
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-    ), 27)
+    ), 31)
     mentioned_font = font((
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-    ), 24)
+    ), 30)
     footer_font = font((
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
@@ -380,13 +431,22 @@ async def gerar_cartao_png(
         dados_dest, MINI, destinatario.display_name[:1] or "?"
     )
     avatar_x = p(W - PAD - MINI)
-    avatar_y = p(88)
+    avatar_y = p(82)
     image.paste(recipient_avatar, (avatar_x, avatar_y), recipient_avatar)
 
     label = "Mencionados"
     draw.text((p(984), p(46)), label, fill=BLACK, font=mentioned_title_font)
     recipient_name = destinatario.display_name or destinatario.name
-    draw.text((p(984), p(105)), recipient_name[:22], fill=BLACK, font=mentioned_font)
+    recipient_name_x = p(984)
+    recipient_name_y = p(105)
+    # Mantém o nome maior, mas limita-o ao espaço antes do avatar para não sobrepor.
+    recipient_max_width = avatar_x - recipient_name_x - p(18)
+    recipient_name_display = recipient_name
+    while recipient_name_display and draw.textlength(recipient_name_display, font=mentioned_font) > recipient_max_width:
+        recipient_name_display = recipient_name_display[:-2].rstrip() + "…"
+        if len(recipient_name_display) <= 2:
+            break
+    draw.text((recipient_name_x, recipient_name_y), recipient_name_display, fill=BLACK, font=mentioned_font)
 
     # Linha horizontal do cabeçalho.
     draw.line((p(PAD), p(HEADER_LINE_Y), p(W - PAD), p(HEADER_LINE_Y)),
@@ -515,18 +575,15 @@ class RespostaModal(discord.ui.Modal, title="Responder mensagem"):
             return await interaction.response.send_message(
                 "O canal de mensagens anônimas não está configurado.", ephemeral=True
             )
-        embed = discord.Embed(
-            description=limitar(str(self.resposta.value), 1000),
-            color=discord.Color.from_rgb(255, 255, 255),
-        )
-        embed.set_author(
-            name=f"Resposta de {interaction.user}",
-            icon_url=interaction.user.display_avatar.url,
-        )
+        # Não usar embeds neste sistema: respostas também são texto simples.
+        resposta_texto = limitar(str(self.resposta.value), 1000)
         try:
             await canal.send(
-                content=f"<@{self.autor_original_id}>",
-                embed=embed,
+                content=(
+                    f"<@{self.autor_original_id}>\n"
+                    f"**Resposta de {discord.utils.escape_markdown(interaction.user.display_name)}:**\n"
+                    f"{discord.utils.escape_mentions(resposta_texto)}"
+                ),
                 allowed_mentions=discord.AllowedMentions(users=True),
             )
             await interaction.response.send_message("Resposta enviada.", ephemeral=True)
@@ -683,11 +740,12 @@ class Anonimo(commands.Cog):
         destinatario_id: int,
         anonima: bool,
         mensagem: str,
+        enviar_privado: bool = False,
     ) -> tuple[bool, str]:
         if guild is None:
             return False, "Não consegui identificar o servidor."
         canal = self.canais.get(guild.id)
-        if canal is None:
+        if not enviar_privado and canal is None:
             return False, "Canal não configurado. Execute /anonimo_painel novamente."
 
         destinatario = guild.get_member(destinatario_id)
@@ -701,17 +759,28 @@ class Anonimo(commands.Cog):
             arquivo = await gerar_cartao_png(autor, destinatario, mensagem, anonima)
         except RuntimeError as erro:
             return False, str(erro)
-        view = PublicacaoView(destinatario.id, autor.id, anonima)
         try:
+            if enviar_privado:
+                # No PV, a publicação é o cartão PNG; não há embed nem texto adicional.
+                await destinatario.send(file=arquivo, allowed_mentions=discord.AllowedMentions.none())
+                return True, f"Cartão enviado no privado de {destinatario.mention}."
+
+            if canal is None:
+                return False, "Canal não configurado. Execute /anonimo_painel novamente."
+            view = PublicacaoView(destinatario.id, autor.id, anonima)
             await canal.send(
                 content=destinatario.mention,
                 file=arquivo,
                 view=view,
                 allowed_mentions=discord.AllowedMentions(users=True),
             )
-        except discord.HTTPException:
+        except discord.Forbidden:
+            if enviar_privado:
+                return False, "Não consegui enviar o PV. A pessoa pode ter mensagens diretas bloqueadas para este servidor."
             return False, "Falha ao publicar. Verifique as permissões do bot."
-        return True, f"Mensagem enviada para {destinatario.mention}."
+        except discord.HTTPException:
+            return False, "Falha ao enviar o cartão. Tente novamente."
+        return True, f"Mensagem publicada em {canal.mention} para {destinatario.mention}."
 
 
 async def setup(bot: commands.Bot):
