@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import textwrap
 import urllib.request
 from typing import Optional
 
@@ -9,14 +10,14 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-# Emojis personalizados
+# Emojis personalizados pedidos
 EMOJI_HEADER = discord.PartialEmoji(name="poyo_tk_renomear", id=1561077420835086346)
 EMOJI_SEND = discord.PartialEmoji(name="4outros", id=1557614626441666602)
 EMOJI_YES = discord.PartialEmoji(name="zev", id=1522067662996242593)
 EMOJI_NO = discord.PartialEmoji(name="zev", id=1522067748786667733)
 EMOJI_CONFIRM = discord.PartialEmoji(name="poyo_tk_call", id=1561077098397831249)
 
-# Banner animado do repositório
+# GIF rosa que já existe na pasta assets do repositório.
 BANNER_URL = (
     "https://raw.githubusercontent.com/Jorginho077/Poyo/main/"
     "assets/Tumblr-l-67143811701311.gif"
@@ -25,31 +26,23 @@ BANNER_FILENAME = "poyo-anonimo-banner.gif"
 BANNER_ATTACHMENT = f"attachment://{BANNER_FILENAME}"
 
 
-async def _baixar_bytes(url: str) -> Optional[bytes]:
-    """Baixa bytes de uma URL."""
-    def _baixar() -> bytes:
+async def baixar_banner() -> Optional[discord.File]:
+    """Baixa o banner animado para anexá-lo ao painel."""
+    def baixar() -> bytes:
         request = urllib.request.Request(
-            url, headers={"User-Agent": "PoyoBot/1.0"}
+            BANNER_URL, headers={"User-Agent": "PoyoBot/1.0"}
         )
         with urllib.request.urlopen(request, timeout=15) as response:
             return response.read()
 
     try:
-        return await asyncio.to_thread(_baixar)
+        data = await asyncio.to_thread(baixar)
+        return discord.File(io.BytesIO(data), filename=BANNER_FILENAME)
     except Exception:
         return None
 
 
-async def baixar_banner() -> Optional[discord.File]:
-    """Baixa o banner para anexar ao painel."""
-    data = await _baixar_bytes(BANNER_URL)
-    if data is None:
-        return None
-    return discord.File(io.BytesIO(data), filename=BANNER_FILENAME)
-
-
 def criar_painel_view(banner_anexado: bool) -> discord.ui.LayoutView:
-    """Monta o painel com banner, texto e botão."""
     view = discord.ui.LayoutView(timeout=None)
     banner = BANNER_ATTACHMENT if banner_anexado else BANNER_URL
     view.add_item(
@@ -67,13 +60,13 @@ def criar_painel_view(banner_anexado: bool) -> discord.ui.LayoutView:
 
 
 def limitar(texto: str, limite: int = 1800) -> str:
-    """Corta o texto se passar do limite."""
     texto = texto.strip()
     return texto[: limite - 1] + "…" if len(texto) > limite else texto
 
 
 class EnviarMensagemButton(discord.ui.Button):
     def __init__(self):
+        # O Discord não oferece estilo preto puro; secondary é o estilo escuro disponível.
         super().__init__(
             label="mande sua mensagem",
             emoji=EMOJI_SEND,
@@ -249,221 +242,176 @@ async def gerar_cartao_png(
     destinatario: discord.abc.User,
     mensagem: str,
     anonima: bool,
-) -> Optional[discord.File]:
-    """Gera o cartão PNG branco com avatares e mensagem."""
+) -> discord.File:
+    """Gera um cartão branco de alta resolução inspirado na referência enviada."""
     try:
         from PIL import Image, ImageDraw, ImageFont
-    except ImportError:
-        return None
+    except ImportError as exc:
+        raise RuntimeError(
+            "O Pillow é obrigatório para gerar o cartão. Instale com: pip install Pillow"
+        ) from exc
 
-    # Escala alta para nitidez
+    async def ler_avatar(usuario: discord.abc.User) -> Optional[bytes]:
+        try:
+            return await usuario.display_avatar.replace(size=256, format="png").read()
+        except Exception:
+            return None
+
+    dados_autor = None if anonima else await ler_avatar(autor)
+    dados_dest = await ler_avatar(destinatario)
+
+    # Tudo é desenhado em 2x e reduzido com LANCZOS para bordas e texto mais nítidos.
     S = 2
-    W = 768
-    PAD = 32
+    W, PAD = 1536, 64
+    AVATAR, MINI = 112, 72
+    HEADER_LINE_Y = 204
+    MESSAGE_TOP = 244
+    LINE_HEIGHT = 48
+    FOOTER_HEIGHT = 82
 
-    WHITE = (255, 255, 255)
-    BLACK = (25, 26, 30)
-    GRAY = (125, 128, 135)
-    SEPARATOR = (229, 231, 235)
-    FOOTER = (188, 191, 197)
+    def p(n: int) -> int:
+        return n * S
 
-    def font(paths, size):
+    def font(paths: tuple[str, ...], size: int):
         for path in paths:
             try:
-                return ImageFont.truetype(path, size * S)
+                return ImageFont.truetype(path, p(size))
             except OSError:
-                continue
+                pass
         return ImageFont.load_default()
 
-    bold_paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-    ]
-    regular_paths = [
+    regular = font((
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-    ]
+    ), 28)
+    bold = font((
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+    ), 31)
+    mentioned_title_font = font((
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+    ), 27)
+    mentioned_font = font((
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    ), 24)
+    footer_font = font((
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    ), 14)
 
-    f_name = font(bold_paths, 22)
-    f_handle = font(regular_paths, 19)
-    f_mentioned = font(bold_paths, 21)
-    f_message = font(regular_paths, 23)
-    f_footer = font(regular_paths, 10)
+    WHITE = (255, 255, 255)
+    BLACK = (27, 28, 32)
+    GRAY = (128, 132, 140)
+    SEPARATOR = (229, 231, 235)
+    FOOTER_GRAY = (188, 192, 199)
 
-    def p(n):
-        return int(n * S)
-
-    def avatar(data, size, letra="?"):
-        """Cria o avatar circular; fallback com a inicial."""
+    def avatar_img(data: Optional[bytes], size: int, fallback: str):
         size_px = p(size)
-
-        try:
-            if data:
-                im = Image.open(io.BytesIO(data)).convert("RGBA")
-                im = im.resize((size_px, size_px), Image.Resampling.LANCZOS)
-            else:
-                raise ValueError("Avatar indisponível")
-        except Exception:
-            im = Image.new("RGBA", (size_px, size_px), (235, 237, 240, 255))
-            d = ImageDraw.Draw(im)
-            d.text(
-                (size_px // 2, size_px // 2),
-                letra[:1].upper(),
-                fill=(90, 92, 98, 255),
-                anchor="mm",
-            )
-
+        avatar = None
+        if data:
+            try:
+                avatar = Image.open(io.BytesIO(data)).convert("RGBA")
+                avatar = avatar.resize((size_px, size_px), Image.Resampling.LANCZOS)
+            except Exception:
+                avatar = None
+        if avatar is None:
+            avatar = Image.new("RGBA", (size_px, size_px), (226, 229, 234, 255))
+            d = ImageDraw.Draw(avatar)
+            f = font((
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+            ), max(16, size // 2))
+            d.text((size_px // 2, size_px // 2), (fallback or "?")[:1].upper(),
+                   fill=(95, 99, 108, 255), font=f, anchor="mm")
         mask = Image.new("L", (size_px, size_px), 0)
         ImageDraw.Draw(mask).ellipse((0, 0, size_px - 1, size_px - 1), fill=255)
-        im.putalpha(mask)
-        return im
+        avatar.putalpha(mask)
+        return avatar
 
-    # Avatares
-    author_data = None
-    if not anonima:
-        author_data = await _baixar_bytes(
-            str(autor.display_avatar.replace(size=256, format="png"))
-        )
-
-    recipient_data = await _baixar_bytes(
-        str(destinatario.display_avatar.replace(size=128, format="png"))
-    )
-
-    # Quebra de linha pela largura disponível
-    mensagem = limitar(mensagem, 1500)
-    linhas = []
-
-    temp = Image.new("RGB", (p(W), p(100)), WHITE)
-    temp_draw = ImageDraw.Draw(temp)
-    max_width = p(W - PAD * 2)
-
-    for paragrafo in (mensagem.splitlines() or [mensagem]):
-        if not paragrafo:
+    # Quebra de texto pelo tamanho real das letras, não por número fixo de caracteres.
+    max_text_width = p(W - PAD * 2)
+    probe = Image.new("RGB", (max_text_width, 100), WHITE)
+    probe_draw = ImageDraw.Draw(probe)
+    linhas: list[str] = []
+    for paragrafo in (limitar(mensagem, 1500).splitlines() or [mensagem]):
+        if not paragrafo.strip():
             linhas.append("")
             continue
-
         atual = ""
         for palavra in paragrafo.split():
-            teste = f"{atual} {palavra}".strip()
-
-            if temp_draw.textlength(teste, font=f_message) <= max_width:
-                atual = teste
+            tentativa = f"{atual} {palavra}".strip()
+            if probe_draw.textlength(tentativa, font=regular) <= max_text_width:
+                atual = tentativa
             else:
                 if atual:
                     linhas.append(atual)
                 atual = palavra
-
         if atual:
             linhas.append(atual)
+    linhas = (linhas or [""])[:30]
 
-    linhas = linhas[:30] or [""]
+    text_height = max(p(48), len(linhas) * p(LINE_HEIGHT))
+    footer_y = p(MESSAGE_TOP) + text_height + p(35)
+    height = max(p(510), footer_y + p(FOOTER_HEIGHT))
+    image = Image.new("RGB", (p(W), height), WHITE)
+    draw = ImageDraw.Draw(image)
 
-    # Altura dinâmica
-    line_height = p(34)
-    message_y = p(125)
-    footer_height = p(42)
-
-    height = max(
-        p(255),
-        message_y + len(linhas) * line_height + p(35) + footer_height,
-    )
-
-    img = Image.new("RGB", (p(W), height), WHITE)
-    draw = ImageDraw.Draw(img)
-
-    # Remetente
-    main_avatar = avatar(
-        author_data,
-        52,
+    # Avatar e identificação do remetente à esquerda.
+    sender_avatar = avatar_img(
+        dados_autor,
+        AVATAR,
         "?" if anonima else (autor.display_name[:1] or "?"),
     )
-    img.paste(main_avatar, (p(PAD), p(23)), main_avatar)
+    image.paste(sender_avatar, (p(PAD), p(43)), sender_avatar)
 
-    name = "Anônimo" if anonima else autor.display_name[:30]
-    handle = "@anonimo" if anonima else f"@{autor.name[:32]}"
+    name_x = p(PAD + AVATAR + 28)
+    sender_name = "Anônimo" if anonima else autor.display_name
+    sender_handle = "@anonimo" if anonima else f"@{autor.name}"
+    draw.text((name_x, p(48)), sender_name[:32], fill=BLACK, font=bold)
+    draw.text((name_x, p(111)), sender_handle[:42], fill=GRAY, font=regular)
 
-    text_x = p(PAD + 65)
-
-    draw.text((text_x, p(28)), name, font=f_name, fill=BLACK)
-    draw.text((text_x, p(62)), handle, font=f_handle, fill=GRAY)
-
-    # Destinatário
-    right_edge = p(W - PAD)
-    mini_size = p(40)
-    mini_x = right_edge - mini_size
-    mini_y = p(55)
-
-    recipient_avatar = avatar(
-        recipient_data,
-        40,
-        destinatario.display_name[:1] or "?",
+    # Área do destinatário menor e deslocada para a direita, como na referência.
+    recipient_avatar = avatar_img(
+        dados_dest, MINI, destinatario.display_name[:1] or "?"
     )
-    img.paste(recipient_avatar, (mini_x, mini_y), recipient_avatar)
+    avatar_x = p(W - PAD - MINI)
+    avatar_y = p(88)
+    image.paste(recipient_avatar, (avatar_x, avatar_y), recipient_avatar)
 
-    title = "Mencionados"
-    title_width = draw.textlength(title, font=f_mentioned)
-    title_x = mini_x - p(12) - title_width
+    label = "Mencionados"
+    draw.text((p(984), p(46)), label, fill=BLACK, font=mentioned_title_font)
+    recipient_name = destinatario.display_name or destinatario.name
+    draw.text((p(984), p(105)), recipient_name[:22], fill=BLACK, font=mentioned_font)
 
-    draw.text((title_x, p(28)), title, font=f_mentioned, fill=BLACK)
+    # Linha horizontal do cabeçalho.
+    draw.line((p(PAD), p(HEADER_LINE_Y), p(W - PAD), p(HEADER_LINE_Y)),
+              fill=SEPARATOR, width=p(2))
 
-    recipient_name = destinatario.display_name[:20]
-    name_width = draw.textlength(recipient_name, font=f_handle)
+    # Mensagem, com espaço e tamanho próximos da imagem de referência.
+    y = p(MESSAGE_TOP)
+    for line in linhas:
+        draw.text((p(PAD), y), line, fill=BLACK, font=regular)
+        y += p(LINE_HEIGHT)
 
-    draw.text(
-        (mini_x - p(12) - name_width, p(62)),
-        recipient_name,
-        font=f_handle,
-        fill=BLACK,
-    )
+    # Rodapé discreto.
+    draw.line((p(PAD), footer_y, p(W - PAD), footer_y), fill=SEPARATOR, width=p(2))
+    dot_x, dot_y = p(PAD + 2), footer_y + p(23)
+    draw.ellipse((dot_x, dot_y, dot_x + p(19), dot_y + p(19)), fill=FOOTER_GRAY)
+    draw.text((p(PAD + 30), footer_y + p(20)), "há poucos segundos",
+              fill=FOOTER_GRAY, font=footer_font)
 
-    # Separador do cabeçalho
-    separator_y = p(102)
-    draw.line(
-        (p(PAD), separator_y, p(W - PAD), separator_y),
-        fill=SEPARATOR,
-        width=p(1),
-    )
-
-    # Mensagem
-    y = message_y
-    for linha in linhas:
-        draw.text((p(PAD), y), linha, font=f_message, fill=BLACK)
-        y += line_height
-
-    # Rodapé
-    footer_y = height - footer_height
-    draw.line(
-        (p(PAD), footer_y, p(W - PAD), footer_y),
-        fill=SEPARATOR,
-        width=p(1),
-    )
-
-    circle_x = p(PAD + 7)
-    circle_y = footer_y + p(12)
-    circle_size = p(12)
-
-    draw.ellipse(
-        (circle_x, circle_y, circle_x + circle_size, circle_y + circle_size),
-        fill=FOOTER,
-    )
-
-    draw.text(
-        (p(PAD + 22), footer_y + p(10)),
-        "há poucos segundos",
-        font=f_footer,
-        fill=FOOTER,
-    )
-
-    # Salva em PNG
+    # Reduz a imagem mantendo boa qualidade e arquivo menor para o Discord.
+    final_image = image.resize((W, max(1, height // S)), Image.Resampling.LANCZOS)
     buffer = io.BytesIO()
-    img.save(buffer, format="PNG", optimize=True)
+    final_image.save(buffer, format="PNG", optimize=True)
     buffer.seek(0)
-
     return discord.File(buffer, filename="mensagem-anonima.png")
 
 
 class PublicacaoView(discord.ui.View):
-    """Botões Responder / Comentar / Comentários."""
+    """Botões em duas linhas: Responder | Comentar; depois Comentários (N) centralizado."""
 
     def __init__(
         self,
@@ -536,10 +484,7 @@ class VerComentariosButton(discord.ui.Button):
 
         linhas = []
         for item in self.parent_view.comentarios[-10:]:
-            linhas.append(
-                f"**{discord.utils.escape_markdown(item['nome'])}:** "
-                f"{discord.utils.escape_mentions(item['texto'])}"
-            )
+            linhas.append(f"**{discord.utils.escape_markdown(item['nome'])}:** {discord.utils.escape_mentions(item['texto'])}")
         await interaction.response.send_message(
             "\n".join(linhas),
             ephemeral=True,
@@ -606,7 +551,7 @@ class ComentarioModal(discord.ui.Modal, title="Comentar mensagem"):
         texto = limitar(str(self.comentario.value), 1000)
         nome = interaction.user.display_name
 
-        # Salva o comentário na view e atualiza o contador
+        # Guarda o comentário na própria view da publicação e atualiza o contador.
         self.publicacao_view.comentarios.append({
             "id": self.comentarista_id,
             "nome": nome,
@@ -633,7 +578,7 @@ class ComentarioModal(discord.ui.Modal, title="Comentar mensagem"):
 class Anonimo(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # Memória: reinicie o painel após reiniciar o bot
+        # Configuração em memória: após reiniciar, execute o comando do painel novamente.
         self.canais: dict[int, discord.TextChannel] = {}
 
     @app_commands.command(
@@ -700,34 +645,18 @@ class Anonimo(commands.Cog):
             except (discord.NotFound, discord.HTTPException):
                 return False, "Não encontrei o destinatário no servidor."
 
-        # Tenta o cartão PNG; sem Pillow, cai para embed
-        arquivo = await gerar_cartao_png(autor, destinatario, mensagem, anonima)
-        view = PublicacaoView(destinatario.id, autor.id, anonima)
-
         try:
-            if arquivo is not None:
-                await canal.send(
-                    content=destinatario.mention,
-                    file=arquivo,
-                    view=view,
-                    allowed_mentions=discord.AllowedMentions(users=True),
-                )
-            else:
-                embed = discord.Embed(
-                    description=limitar(mensagem, 1500),
-                    color=discord.Color.from_rgb(255, 255, 255),
-                )
-                embed.set_author(
-                    name="Anônimo" if anonima else str(autor),
-                    icon_url=None if anonima else autor.display_avatar.url,
-                )
-                embed.set_footer(text=f"Para: {destinatario.display_name}")
-                await canal.send(
-                    content=destinatario.mention,
-                    embed=embed,
-                    view=view,
-                    allowed_mentions=discord.AllowedMentions(users=True),
-                )
+            arquivo = await gerar_cartao_png(autor, destinatario, mensagem, anonima)
+        except RuntimeError as erro:
+            return False, str(erro)
+        view = PublicacaoView(destinatario.id, autor.id, anonima)
+        try:
+            await canal.send(
+                content=destinatario.mention,
+                file=arquivo,
+                view=view,
+                allowed_mentions=discord.AllowedMentions(users=True),
+            )
         except discord.HTTPException:
             return False, "Falha ao publicar. Verifique as permissões do bot."
         return True, f"Mensagem enviada para {destinatario.mention}."
