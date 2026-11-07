@@ -27,12 +27,12 @@ def _env_float(nome: str, padrao: float, minimo: float, maximo: float) -> float:
 
 
 # ----------------------------------------------------------------------------
-# NVIDIA NIM
+# Groq (OpenAI-compatible)
 # ----------------------------------------------------------------------------
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "").strip()
-NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3-super-120b-a12b").strip()
-NVIDIA_API_BASE = os.getenv(
-    "NVIDIA_API_BASE", "https://integrate.api.nvidia.com/v1"
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b").strip()
+GROQ_API_BASE = os.getenv(
+    "GROQ_API_BASE", "https://api.groq.com/openai/v1"
 ).rstrip("/")
 
 COOLDOWN_SEGUNDOS = _env_float("POYO_COOLDOWN", 2.5, 0, 60)
@@ -213,8 +213,8 @@ class Poyo(commands.Cog):
 
         print(
             "[Poyo] Config: "
-            f"NVIDIA={'ok' if NVIDIA_API_KEY else 'ausente'} | "
-            f"Modelo={NVIDIA_MODEL} | MaxIter={MAX_TOOL_ITERACOES}"
+            f"Groq={'ok' if GROQ_API_KEY else 'ausente'} | "
+            f"Modelo={GROQ_MODEL} | MaxIter={MAX_TOOL_ITERACOES}"
         )
 
     async def cog_load(self) -> None:
@@ -275,18 +275,18 @@ class Poyo(commands.Cog):
         return True, ""
 
     # ------------------------------------------------------------------
-    # Chamada ao modelo (NVIDIA NIM)
+    # Chamada ao modelo (Groq)
     # ------------------------------------------------------------------
     async def _chat_completions(
         self,
         mensagens: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        if not NVIDIA_API_KEY:
-            raise RuntimeError("NVIDIA_API_KEY não configurada")
+        if not GROQ_API_KEY:
+            raise RuntimeError("GROQ_API_KEY não configurada")
 
         payload: dict[str, Any] = {
-            "model": NVIDIA_MODEL,
+            "model": GROQ_MODEL,
             "messages": mensagens,
             "temperature": 0.5,
             "top_p": 0.9,
@@ -298,31 +298,35 @@ class Poyo(commands.Cog):
             payload["tool_choice"] = "auto"
 
         headers = {
-            "Authorization": f"Bearer {NVIDIA_API_KEY}",
+            "Authorization": f"Bearer {GROQ_API_KEY}",
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
 
         for tentativa in range(3):
             async with self.sessao().post(
-                f"{NVIDIA_API_BASE}/chat/completions",
+                f"{GROQ_API_BASE}/chat/completions",
                 json=payload,
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=60),
             ) as r:
                 if r.status in (429, 503) and tentativa < 2:
                     espera = tentativa + 1
-                    print(f"[Poyo] NVIDIA NIM {r.status}. Retry em {espera}s.")
+                    ra = r.headers.get("Retry-After")
+                    if ra:
+                        try:
+                            espera = min(10, max(1, int(float(ra))))
+                        except ValueError:
+                            pass
+                    print(f"[Poyo] Groq {r.status}. Retry em {espera}s.")
                     await asyncio.sleep(espera)
                     continue
                 if r.status >= 400:
                     detalhe = (await r.text())[:400]
-                    raise RuntimeError(
-                        f"NVIDIA NIM HTTP {r.status}: {detalhe}"
-                    )
+                    raise RuntimeError(f"Groq HTTP {r.status}: {detalhe}")
                 return await r.json()
 
-        raise RuntimeError("NVIDIA NIM não respondeu após tentativas")
+        raise RuntimeError("Groq não respondeu após tentativas")
 
     async def contexto_do_canal(self, message: discord.Message) -> str:
         linhas: list[str] = []
